@@ -1,0 +1,10 @@
+# rust build output
+/target/
+
+# credentials
+.env
+
+# runtime artifacts
+data/
+model/
+state/

@@ -1,0 +1,19 @@
+[package]
+name = "trainer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+burn = { workspace = true, features = ["train"] }
+miette = { workspace = true, features = ["fancy"] }
+stock-client = { path = "../stock-client" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[features]
+default = ["wgpu"]
+ndarray = ["burn/ndarray"]
+wgpu = ["burn/wgpu"]
+
+[lints]
+workspace = true
