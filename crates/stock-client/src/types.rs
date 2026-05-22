@@ -34,7 +34,7 @@ pub struct UserStock {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OhlcvRow {
-    pub date: String,
+    pub date: NaiveDate,
     pub stock_code_id: String,
     pub open: Option<f64>,
     pub high: Option<f64>,

@@ -22,10 +22,8 @@ fn assert_ohlcv_rows(rows: &[OhlcvRow], start: NaiveDate, end: NaiveDate) {
     assert!(!rows.is_empty(), "expected at least one row");
 
     for row in rows {
-        let parsed = NaiveDate::parse_from_str(&row.date, "%Y-%m-%d")
-            .unwrap_or_else(|_| panic!("date not ISO: {}", row.date));
         assert!(
-            parsed >= start && parsed <= end,
+            row.date >= start && row.date <= end,
             "date out of range: {}",
             row.date
         );

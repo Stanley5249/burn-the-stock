@@ -26,11 +26,8 @@ pub async fn fetch_stock_data(
         rows.extend(batch);
     }
 
-    rows.retain(|r| {
-        NaiveDate::parse_from_str(&r.date, "%Y-%m-%d").is_ok_and(|d| d >= start && d <= end)
-    });
-
-    rows.sort_by(|a, b| a.date.cmp(&b.date));
+    rows.retain(|r| r.date >= start && r.date <= end);
+    rows.sort_by_key(|r| r.date);
 
     Ok(rows)
 }
@@ -79,8 +76,11 @@ async fn fetch_twse(http: &reqwest::Client, code: &str, month: NaiveDate) -> Res
         if row.len() < 9 {
             continue;
         }
+        let Some(date) = roc_to_date(&row[0]) else {
+            continue;
+        };
         rows.push(OhlcvRow {
-            date: roc_to_iso(&row[0]),
+            date,
             stock_code_id: code.to_owned(),
             capacity: clean_f64(&row[1]),
             turnover: clean_f64(&row[2]),
@@ -136,8 +136,11 @@ async fn fetch_tpex(http: &reqwest::Client, code: &str, month: NaiveDate) -> Res
         if row.len() < 9 {
             continue;
         }
+        let Some(date) = roc_to_date(&row[0]) else {
+            continue;
+        };
         rows.push(OhlcvRow {
-            date: roc_to_iso(&row[0]),
+            date,
             stock_code_id: code.to_owned(),
             capacity: clean_f64(&row[1]) * 1000.0,
             turnover: clean_f64(&row[2]) * 1000.0,
@@ -181,6 +184,9 @@ async fn fetch_esb(http: &reqwest::Client, code: &str, month: NaiveDate) -> Resu
         if row.len() < 13 {
             continue;
         }
+        let Some(date) = roc_to_date(&row[0]) else {
+            continue;
+        };
         let capacity_1 = clean_f64(&row[1]);
         let turnover_1 = clean_f64(&row[2]);
         let high_1 = clean_f64(&row[3]);
@@ -200,7 +206,7 @@ async fn fetch_esb(http: &reqwest::Client, code: &str, month: NaiveDate) -> Resu
         let low = nonzero_min(low_1, low_2);
 
         rows.push(OhlcvRow {
-            date: roc_to_iso(&row[0]),
+            date,
             stock_code_id: code.to_owned(),
             capacity,
             turnover,
@@ -233,13 +239,15 @@ fn nonzero_min(a: f64, b: f64) -> Option<f64> {
     }
 }
 
-fn roc_to_iso(s: &str) -> String {
+fn roc_to_date(s: &str) -> Option<NaiveDate> {
     let mut parts = s.split('/');
     let (Some(y), Some(m), Some(d)) = (parts.next(), parts.next(), parts.next()) else {
-        return s.to_owned();
+        return None;
     };
-    let year: u32 = y.trim().parse().unwrap_or(0) + 1911;
-    format!("{year}-{m}-{d}")
+    let year: i32 = y.trim().parse::<i32>().ok()? + 1911;
+    let month: u32 = m.trim().parse().ok()?;
+    let day: u32 = d.trim().parse().ok()?;
+    NaiveDate::from_ymd_opt(year, month, day)
 }
 
 fn clean_f64(s: &str) -> f64 {
