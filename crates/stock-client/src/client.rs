@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
-use crate::types::{ApiResponse, Market, UserStock};
+use crate::types::{ApiResponse, Market, StockInfo, UserStock};
 use crate::urls;
+use std::collections::HashMap;
 
 pub struct StockClient {
     http: reqwest::Client,
@@ -9,6 +10,11 @@ pub struct StockClient {
 }
 
 impl StockClient {
+    #[must_use]
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     /// Load credentials from `STOCK_ACCOUNT` and `STOCK_PASSWORD` env vars.
     /// Call `dotenvy::dotenv().ok()` before this if using a `.env` file.
     ///
@@ -28,15 +34,14 @@ impl StockClient {
     /// # Errors
     ///
     /// Returns an error on network or deserialization failure.
-    pub async fn stock_list(&self) -> Result<Vec<String>> {
-        let map: serde_json::Map<String, serde_json::Value> = self
+    pub async fn stock_list(&self) -> Result<HashMap<String, StockInfo>> {
+        Ok(self
             .http
             .get(format!("{}/stock_list", urls::TRADING_API_BASE))
             .send()
             .await?
             .json()
-            .await?;
-        Ok(map.into_iter().map(|(k, _v)| k).collect())
+            .await?)
     }
 
     /// # Errors
@@ -68,7 +73,14 @@ impl StockClient {
     ///
     /// Returns an error on network or deserialization failure.
     pub async fn user_stocks(&self) -> Result<Vec<UserStock>> {
-        let response: serde_json::Value = self
+        #[derive(serde::Deserialize)]
+        struct UserStocksResponse {
+            result: String,
+            #[serde(default)]
+            data: Vec<UserStock>,
+        }
+
+        let response: UserStocksResponse = self
             .http
             .post(format!("{}/get_user_stocks", urls::TRADING_API_BASE))
             .form(&[("account", &self.account), ("password", &self.password)])
@@ -76,10 +88,11 @@ impl StockClient {
             .await?
             .json()
             .await?;
-        if response["result"] != "success" {
+
+        if response.result != "success" {
             return Ok(vec![]);
         }
-        Ok(serde_json::from_value(response["data"].clone())?)
+        Ok(response.data)
     }
 
     /// # Errors

@@ -8,6 +8,14 @@ pub struct ApiResponse {
     pub status: String,
 }
 
+/// One entry from the sim server's [`stock_list`] endpoint.
+#[derive(Debug, Deserialize)]
+pub struct StockInfo {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
 /// One position as returned by the sim server's [`get_user_stocks`] endpoint.
 #[derive(Debug, Deserialize)]
 pub struct UserStock {

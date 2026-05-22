@@ -22,3 +22,4 @@ tracing-subscriber = { version = "0.3.23", default-features = false }
 
 [workspace.lints.clippy]
 pedantic = "warn"
+assertions_on_result_states = "warn"

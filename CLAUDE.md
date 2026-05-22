@@ -4,6 +4,10 @@ Taiwan stock trading bot with a burn NN backend.
 
 Workspace: `stock-client` (lib), `trainer` (bin), `trader` (bin).
 
+## Project Conventions
+
+Define all URLs as `pub const` in `crates/stock-client/src/urls.rs`.
+
 ## Cargo
 
 Use `cargo add` to add dependencies.
@@ -31,9 +35,9 @@ Never re-export a module and its members from the same level. Pick one or the ot
 
 ## Variables and Naming
 
-Spell out variable names fully. Avoid abbreviations like `resp`, `cols`, `cur`, `cfg`, `tmp`, etc. Use clear, complete names: `response`, `columns`, `current`, `config`, `temporary`.
+Spell out variable names fully. Avoid common abbreviations and use complete, self-describing names.
 
-Single-letter loop counters are fine (`i`, `j`, `k`), but prefer meaningful names like `row`, `col`, `index` when the loop is long or complex.
+Single-letter loop counters are fine (`i`, `j`, `k`), but prefer meaningful names when the loop is long or complex.
 
 ## Writing
 

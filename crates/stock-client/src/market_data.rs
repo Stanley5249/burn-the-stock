@@ -51,7 +51,14 @@ fn month_starts(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
 }
 
 async fn fetch_twse(http: &reqwest::Client, code: &str, month: NaiveDate) -> Result<Vec<OhlcvRow>> {
-    let response_json: serde_json::Value = http
+    #[derive(serde::Deserialize)]
+    struct TwseResponse {
+        stat: String,
+        #[serde(default)]
+        data: Vec<Vec<String>>,
+    }
+
+    let response: TwseResponse = http
         .get(urls::TWSE_STOCK_DAY)
         .query(&[
             ("response", "json"),
@@ -63,38 +70,46 @@ async fn fetch_twse(http: &reqwest::Client, code: &str, month: NaiveDate) -> Res
         .json()
         .await?;
 
-    if response_json["stat"] != "OK" {
+    if response.stat != "OK" {
         return Ok(vec![]);
     }
 
-    let Some(data) = response_json["data"].as_array() else {
-        return Ok(vec![]);
-    };
-
-    let mut rows = Vec::with_capacity(data.len());
-    for row in data {
-        let columns = str_cols(row);
-        if columns.len() < 9 {
+    let mut rows = Vec::with_capacity(response.data.len());
+    for row in &response.data {
+        if row.len() < 9 {
             continue;
         }
         rows.push(OhlcvRow {
-            date: roc_to_iso(columns[0]),
+            date: roc_to_iso(&row[0]),
             stock_code_id: code.to_owned(),
-            capacity: clean_f64(columns[1]),
-            turnover: clean_f64(columns[2]),
-            open: Some(clean_f64(columns[3])),
-            high: Some(clean_f64(columns[4])),
-            low: Some(clean_f64(columns[5])),
-            close: Some(clean_f64(columns[6])),
-            change: Some(clean_f64(columns[7])),
-            transaction_volume: clean_f64(columns[8]),
+            capacity: clean_f64(&row[1]),
+            turnover: clean_f64(&row[2]),
+            open: Some(clean_f64(&row[3])),
+            high: Some(clean_f64(&row[4])),
+            low: Some(clean_f64(&row[5])),
+            close: Some(clean_f64(&row[6])),
+            change: Some(clean_f64(&row[7])),
+            transaction_volume: clean_f64(&row[8]),
         });
     }
     Ok(rows)
 }
 
+#[derive(serde::Deserialize)]
+struct TpexTable {
+    #[serde(default)]
+    data: Vec<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct TpexResponse {
+    stat: String,
+    #[serde(default)]
+    tables: Vec<TpexTable>,
+}
+
 async fn fetch_tpex(http: &reqwest::Client, code: &str, month: NaiveDate) -> Result<Vec<OhlcvRow>> {
-    let response_json: serde_json::Value = http
+    let response: TpexResponse = http
         .get(urls::TPEX_TRADING_STOCK)
         .query(&[
             ("code", code),
@@ -107,40 +122,38 @@ async fn fetch_tpex(http: &reqwest::Client, code: &str, month: NaiveDate) -> Res
         .json()
         .await?;
 
-    let stat = response_json["stat"].as_str().unwrap_or("");
-    if !stat.eq_ignore_ascii_case("ok") {
+    if !response.stat.eq_ignore_ascii_case("ok") {
         return Ok(vec![]);
     }
 
-    let Some(data) = response_json["tables"][0]["data"].as_array() else {
+    let Some(table) = response.tables.first() else {
         return Ok(vec![]);
     };
 
-    let mut rows = Vec::with_capacity(data.len());
-    for row in data {
-        let columns = str_cols(row);
+    let mut rows = Vec::with_capacity(table.data.len());
+    for row in &table.data {
         // columns: date, capacity(lots), turnover(thousands), open, high, low, close, change, txn
-        if columns.len() < 9 {
+        if row.len() < 9 {
             continue;
         }
         rows.push(OhlcvRow {
-            date: roc_to_iso(columns[0]),
+            date: roc_to_iso(&row[0]),
             stock_code_id: code.to_owned(),
-            capacity: clean_f64(columns[1]) * 1000.0,
-            turnover: clean_f64(columns[2]) * 1000.0,
-            open: Some(clean_f64(columns[3])),
-            high: Some(clean_f64(columns[4])),
-            low: Some(clean_f64(columns[5])),
-            close: Some(clean_f64(columns[6])),
-            change: Some(clean_f64(columns[7])),
-            transaction_volume: clean_f64(columns[8]),
+            capacity: clean_f64(&row[1]) * 1000.0,
+            turnover: clean_f64(&row[2]) * 1000.0,
+            open: Some(clean_f64(&row[3])),
+            high: Some(clean_f64(&row[4])),
+            low: Some(clean_f64(&row[5])),
+            close: Some(clean_f64(&row[6])),
+            change: Some(clean_f64(&row[7])),
+            transaction_volume: clean_f64(&row[8]),
         });
     }
     Ok(rows)
 }
 
 async fn fetch_esb(http: &reqwest::Client, code: &str, month: NaiveDate) -> Result<Vec<OhlcvRow>> {
-    let response_json: serde_json::Value = http
+    let response: TpexResponse = http
         .get(urls::TPEX_EMERGING_HISTORICAL)
         .query(&[
             ("type", "Monthly"),
@@ -154,32 +167,30 @@ async fn fetch_esb(http: &reqwest::Client, code: &str, month: NaiveDate) -> Resu
         .json()
         .await?;
 
-    let stat = response_json["stat"].as_str().unwrap_or("");
-    if !stat.eq_ignore_ascii_case("ok") {
+    if !response.stat.eq_ignore_ascii_case("ok") {
         return Ok(vec![]);
     }
 
-    let Some(data) = response_json["tables"][0]["data"].as_array() else {
+    let Some(table) = response.tables.first() else {
         return Ok(vec![]);
     };
 
-    let mut rows = Vec::with_capacity(data.len());
-    for row in data {
-        let columns = str_cols(row);
+    let mut rows = Vec::with_capacity(table.data.len());
+    for row in &table.data {
         // 13 columns: date, capacity1, turnover1, high1, low1, avg1, transaction1, capacity2, turnover2, high2, low2, avg2, transaction2
-        if columns.len() < 13 {
+        if row.len() < 13 {
             continue;
         }
-        let capacity_1 = clean_f64(columns[1]);
-        let turnover_1 = clean_f64(columns[2]);
-        let high_1 = clean_f64(columns[3]);
-        let low_1 = clean_f64(columns[4]);
-        let transaction_1 = clean_f64(columns[6]);
-        let capacity_2 = clean_f64(columns[7]);
-        let turnover_2 = clean_f64(columns[8]);
-        let high_2 = clean_f64(columns[9]);
-        let low_2 = clean_f64(columns[10]);
-        let transaction_2 = clean_f64(columns[12]);
+        let capacity_1 = clean_f64(&row[1]);
+        let turnover_1 = clean_f64(&row[2]);
+        let high_1 = clean_f64(&row[3]);
+        let low_1 = clean_f64(&row[4]);
+        let transaction_1 = clean_f64(&row[6]);
+        let capacity_2 = clean_f64(&row[7]);
+        let turnover_2 = clean_f64(&row[8]);
+        let high_2 = clean_f64(&row[9]);
+        let low_2 = clean_f64(&row[10]);
+        let transaction_2 = clean_f64(&row[12]);
 
         let capacity = capacity_1 + capacity_2;
         let turnover = turnover_1 + turnover_2;
@@ -189,7 +200,7 @@ async fn fetch_esb(http: &reqwest::Client, code: &str, month: NaiveDate) -> Resu
         let low = nonzero_min(low_1, low_2);
 
         rows.push(OhlcvRow {
-            date: roc_to_iso(columns[0]),
+            date: roc_to_iso(&row[0]),
             stock_code_id: code.to_owned(),
             capacity,
             turnover,
@@ -220,12 +231,6 @@ fn nonzero_min(a: f64, b: f64) -> Option<f64> {
         (false, true) => Some(b),
         (false, false) => None,
     }
-}
-
-fn str_cols(row: &serde_json::Value) -> Vec<&str> {
-    row.as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default()
 }
 
 fn roc_to_iso(s: &str) -> String {
