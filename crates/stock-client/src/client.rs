@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::types::{ApiResponse, Market, StockInfo, UserStock};
+use crate::types::{ApiMarket, ApiResponse, MarketType, StockInfo, UserStock};
 use crate::urls;
 use std::collections::HashMap;
 
@@ -46,12 +46,12 @@ impl StockClient {
 
     /// # Errors
     ///
-    /// Returns an error on network, deserialization, or unknown market type.
-    pub async fn stock_market(&self, code: &str) -> Result<Market> {
+    /// Returns an error on network or deserialization failure.
+    pub async fn stock_market(&self, code: &str) -> Result<ApiMarket> {
         #[derive(serde::Deserialize)]
         struct Response {
             #[serde(rename = "type")]
-            kind: String,
+            kind: MarketType,
         }
         let response: Response = self
             .http
@@ -61,12 +61,8 @@ impl StockClient {
             .await?
             .json()
             .await?;
-        match response.kind.as_str() {
-            "TWSE" | "ETF" => Ok(Market::Twse),
-            "OTC" => Ok(Market::Tpex),
-            "ESB" => Ok(Market::Esb),
-            other => Err(Error::UnknownMarket(other.to_owned())),
-        }
+
+        Ok(response.kind.into())
     }
 
     /// # Errors

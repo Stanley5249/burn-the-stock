@@ -15,10 +15,6 @@ pub enum Error {
     #[diagnostic(code(stock::env))]
     Env(#[from] std::env::VarError),
 
-    #[error("Unknown market type: {0}")]
-    #[diagnostic(code(stock::market))]
-    UnknownMarket(String),
-
     #[error("API returned failure: {status}")]
     #[diagnostic(code(stock::api))]
     ApiFailure { status: String },

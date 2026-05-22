@@ -2,11 +2,15 @@ use chrono::NaiveDate;
 use std::sync::LazyLock;
 use stock_client::client::StockClient;
 use stock_client::market_data::fetch_stock_data;
-use stock_client::types::Market;
+use stock_client::types::{ApiMarket, MarketType, OhlcvRow};
 
 static CLIENT: LazyLock<StockClient> = LazyLock::new(|| {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt().try_init().ok();
+
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
     StockClient::from_env().expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
 });
 
@@ -14,8 +18,9 @@ fn date(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
 }
 
-fn assert_ohlcv_rows(rows: &[stock_client::types::OhlcvRow], start: NaiveDate, end: NaiveDate) {
+fn assert_ohlcv_rows(rows: &[OhlcvRow], start: NaiveDate, end: NaiveDate) {
     assert!(!rows.is_empty(), "expected at least one row");
+
     for row in rows {
         let parsed = NaiveDate::parse_from_str(&row.date, "%Y-%m-%d")
             .unwrap_or_else(|_| panic!("date not ISO: {}", row.date));
@@ -88,7 +93,7 @@ async fn test_user_stocks_schema() {
 async fn test_fetch_twse_schema() {
     let start = date("2024-03-01");
     let end = date("2024-03-31");
-    let rows = fetch_stock_data(CLIENT.http(), "2330", start, end, Market::Twse)
+    let rows = fetch_stock_data(CLIENT.http(), "2330", start, end, ApiMarket::Twse)
         .await
         .unwrap();
     tracing::info!(count = rows.len(), "twse rows");
@@ -104,11 +109,11 @@ async fn test_fetch_tpex_schema() {
     let stocks = CLIENT.stock_list().await.unwrap();
     let code = stocks
         .iter()
-        .find(|(_, info)| info.kind == "OTC")
+        .find(|(_, info)| info.kind == MarketType::Otc)
         .map(|(code, _)| code.clone())
         .expect("no OTC stock in list");
 
-    let rows = fetch_stock_data(CLIENT.http(), &code, start, end, Market::Tpex)
+    let rows = fetch_stock_data(CLIENT.http(), &code, start, end, ApiMarket::Tpex)
         .await
         .unwrap();
     tracing::info!(count = rows.len(), code, "tpex rows");
@@ -124,7 +129,7 @@ async fn test_fetch_esb_schema() {
     let stocks = CLIENT.stock_list().await.unwrap();
     let esb_codes: Vec<_> = stocks
         .iter()
-        .filter(|(_, info)| info.kind == "ESB")
+        .filter(|(_, info)| info.kind == MarketType::Esb)
         .map(|(code, _)| code.clone())
         .take(20)
         .collect();
@@ -132,7 +137,7 @@ async fn test_fetch_esb_schema() {
     assert!(!esb_codes.is_empty(), "no ESB stocks in list");
 
     for code in &esb_codes {
-        let rows = fetch_stock_data(CLIENT.http(), code, start, end, Market::Esb)
+        let rows = fetch_stock_data(CLIENT.http(), code, start, end, ApiMarket::Esb)
             .await
             .unwrap();
         if !rows.is_empty() {

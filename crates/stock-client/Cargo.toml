@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-chrono = { workspace = true, features = ["clock", "std", "serde"] }
+chrono = { workspace = true, features = ["clock", "serde", "std"] }
 chrono-tz.workspace = true
 dotenvy.workspace = true
 miette.workspace = true
-reqwest = { workspace = true, features = ["default-tls", "form", "json", "query"] }
+reqwest = {
+  workspace = true,
+  features = ["default-tls", "form", "json", "query"]
+}
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

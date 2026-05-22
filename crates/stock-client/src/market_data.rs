@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::types::{Market, OhlcvRow};
+use crate::types::{ApiMarket, OhlcvRow};
 use crate::urls;
 use chrono::{Datelike, NaiveDate};
 
@@ -13,15 +13,15 @@ pub async fn fetch_stock_data(
     code: &str,
     start: NaiveDate,
     end: NaiveDate,
-    market: Market,
+    market: ApiMarket,
 ) -> Result<Vec<OhlcvRow>> {
     let mut rows = Vec::new();
 
     for month in month_starts(start, end) {
         let batch = match market {
-            Market::Twse => fetch_twse(http, code, month).await?,
-            Market::Tpex => fetch_tpex(http, code, month).await?,
-            Market::Esb => fetch_esb(http, code, month).await?,
+            ApiMarket::Twse => fetch_twse(http, code, month).await?,
+            ApiMarket::Tpex => fetch_tpex(http, code, month).await?,
+            ApiMarket::Esb => fetch_esb(http, code, month).await?,
         };
         rows.extend(batch);
     }
