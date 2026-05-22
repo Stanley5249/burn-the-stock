@@ -82,14 +82,14 @@ async fn fetch_twse(http: &reqwest::Client, code: &str, month: NaiveDate) -> Res
         rows.push(OhlcvRow {
             date,
             stock_code_id: code.to_owned(),
-            capacity: clean_f64(&row[1]),
-            turnover: clean_f64(&row[2]),
+            capacity: clean_u64(&row[1]),
+            turnover: clean_u64(&row[2]),
             open: Some(clean_f64(&row[3])),
             high: Some(clean_f64(&row[4])),
             low: Some(clean_f64(&row[5])),
             close: Some(clean_f64(&row[6])),
             change: Some(clean_f64(&row[7])),
-            transaction_volume: clean_f64(&row[8]),
+            transaction_volume: clean_u64(&row[8]),
         });
     }
     Ok(rows)
@@ -142,14 +142,14 @@ async fn fetch_tpex(http: &reqwest::Client, code: &str, month: NaiveDate) -> Res
         rows.push(OhlcvRow {
             date,
             stock_code_id: code.to_owned(),
-            capacity: clean_f64(&row[1]) * 1000.0,
-            turnover: clean_f64(&row[2]) * 1000.0,
+            capacity: clean_u64(&row[1]) * 1000,
+            turnover: clean_u64(&row[2]) * 1000,
             open: Some(clean_f64(&row[3])),
             high: Some(clean_f64(&row[4])),
             low: Some(clean_f64(&row[5])),
             close: Some(clean_f64(&row[6])),
             change: Some(clean_f64(&row[7])),
-            transaction_volume: clean_f64(&row[8]),
+            transaction_volume: clean_u64(&row[8]),
         });
     }
     Ok(rows)
@@ -187,21 +187,22 @@ async fn fetch_esb(http: &reqwest::Client, code: &str, month: NaiveDate) -> Resu
         let Some(date) = roc_to_date(&row[0]) else {
             continue;
         };
-        let capacity_1 = clean_f64(&row[1]);
-        let turnover_1 = clean_f64(&row[2]);
+        let capacity_1 = clean_u64(&row[1]);
+        let turnover_1 = clean_u64(&row[2]);
         let high_1 = clean_f64(&row[3]);
         let low_1 = clean_f64(&row[4]);
-        let transaction_1 = clean_f64(&row[6]);
-        let capacity_2 = clean_f64(&row[7]);
-        let turnover_2 = clean_f64(&row[8]);
+        let transaction_1 = clean_u64(&row[6]);
+        let capacity_2 = clean_u64(&row[7]);
+        let turnover_2 = clean_u64(&row[8]);
         let high_2 = clean_f64(&row[9]);
         let low_2 = clean_f64(&row[10]);
-        let transaction_2 = clean_f64(&row[12]);
+        let transaction_2 = clean_u64(&row[12]);
 
         let capacity = capacity_1 + capacity_2;
         let turnover = turnover_1 + turnover_2;
         // weighted average price as close proxy; no open available
-        let close = (capacity > 0.0).then(|| turnover / capacity);
+        #[allow(clippy::cast_precision_loss)]
+        let close = (capacity > 0).then(|| turnover as f64 / capacity as f64);
         let high = nonzero_max(high_1, high_2);
         let low = nonzero_min(low_1, low_2);
 
@@ -248,6 +249,10 @@ fn roc_to_date(s: &str) -> Option<NaiveDate> {
     let month: u32 = m.trim().parse().ok()?;
     let day: u32 = d.trim().parse().ok()?;
     NaiveDate::from_ymd_opt(year, month, day)
+}
+
+fn clean_u64(s: &str) -> u64 {
+    s.replace([',', 'X'], "").trim().parse().unwrap_or(0)
 }
 
 fn clean_f64(s: &str) -> f64 {

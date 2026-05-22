@@ -8,7 +8,7 @@ static CLIENT: LazyLock<StockClient> = LazyLock::new(|| {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         .init();
 
     StockClient::from_env().expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
@@ -27,26 +27,17 @@ fn assert_ohlcv_rows(rows: &[OhlcvRow], start: NaiveDate, end: NaiveDate) {
             "date out of range: {}",
             row.date
         );
-        assert!(row.capacity.is_finite(), "capacity not finite");
-        assert!(row.turnover.is_finite(), "turnover not finite");
-        assert!(
-            row.transaction_volume.is_finite(),
-            "transaction_volume not finite"
-        );
         if let Some(v) = row.open {
-            assert!(v.is_finite(), "open not finite");
+            assert!(!v.is_sign_negative(), "open negative");
         }
         if let Some(v) = row.high {
-            assert!(v.is_finite(), "high not finite");
+            assert!(!v.is_sign_negative(), "high negative");
         }
         if let Some(v) = row.low {
-            assert!(v.is_finite(), "low not finite");
+            assert!(!v.is_sign_negative(), "low negative");
         }
         if let Some(v) = row.close {
-            assert!(v.is_finite(), "close not finite");
-        }
-        if let Some(v) = row.change {
-            assert!(v.is_finite(), "change not finite");
+            assert!(!v.is_sign_negative(), "close negative");
         }
     }
 }

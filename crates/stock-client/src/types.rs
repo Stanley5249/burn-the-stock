@@ -1,4 +1,5 @@
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 // sim server types
@@ -24,8 +25,8 @@ pub struct UserStock {
     pub stock_name: String,
     pub stock_code_id: String,
     pub shares: u64,
-    /// Decimal string, e.g. `"344.00000"`. Parse with `str::parse::<f64>()` when needed.
-    pub beginning_price: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub beginning_price: Decimal,
     pub createtime: i64,
     pub user_uid_id: u64,
 }
@@ -41,9 +42,9 @@ pub struct OhlcvRow {
     pub low: Option<f64>,
     pub close: Option<f64>,
     pub change: Option<f64>,
-    pub capacity: f64,
-    pub turnover: f64,
-    pub transaction_volume: f64,
+    pub capacity: u64,
+    pub turnover: u64,
+    pub transaction_volume: u64,
 }
 
 /// Market label as returned by the sim server's `/stock_type` endpoint.

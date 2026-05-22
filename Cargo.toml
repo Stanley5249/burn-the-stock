@@ -13,6 +13,7 @@ chrono-tz = "0.10.4"
 dotenvy = "0.15.7"
 miette = "7.6.0"
 reqwest = { version = "0.13.3", default-features = false }
+rust_decimal = { version = "1.42.0", default-features = false }
 serde = "1.0.228"
 serde_json = "1.0.150"
 thiserror = "2.0.18"
