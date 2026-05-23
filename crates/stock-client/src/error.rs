@@ -8,16 +8,16 @@ pub enum Error {
     Http(#[from] reqwest::Error),
 
     #[error(transparent)]
-    #[diagnostic(code(stock::json))]
-    Json(#[from] serde_json::Error),
-
-    #[error(transparent)]
     #[diagnostic(code(stock::env))]
     Env(#[from] std::env::VarError),
 
     #[error("API returned failure: {status}")]
     #[diagnostic(code(stock::api))]
     ApiFailure { status: String },
+
+    #[error("invalid row: {0}")]
+    #[diagnostic(code(stock::invalid_row))]
+    InvalidRow(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

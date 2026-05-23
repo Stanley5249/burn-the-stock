@@ -1,3 +1,4 @@
+use crate::error::{Error, Result};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,50 @@ pub struct OhlcvRow {
     pub capacity: u64,
     pub turnover: u64,
     pub transaction_volume: u64,
+}
+
+impl OhlcvRow {
+    /// # Errors
+    /// Returns `InvalidRow` if `stock_code_id` is empty or any price field is negative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        date: NaiveDate,
+        stock_code_id: String,
+        open: Option<f64>,
+        high: Option<f64>,
+        low: Option<f64>,
+        close: Option<f64>,
+        change: Option<f64>,
+        capacity: u64,
+        turnover: u64,
+        transaction_volume: u64,
+    ) -> Result<Self> {
+        if stock_code_id.is_empty() {
+            return Err(Error::InvalidRow("empty stock_code_id".to_owned()));
+        }
+        for (name, value) in [
+            ("open", open),
+            ("high", high),
+            ("low", low),
+            ("close", close),
+        ] {
+            if value.is_some_and(f64::is_sign_negative) {
+                return Err(Error::InvalidRow(format!("{name} is negative")));
+            }
+        }
+        Ok(Self {
+            date,
+            stock_code_id,
+            open,
+            high,
+            low,
+            close,
+            change,
+            capacity,
+            turnover,
+            transaction_volume,
+        })
+    }
 }
 
 /// Market label as returned by the sim server's `/stock_type` endpoint.

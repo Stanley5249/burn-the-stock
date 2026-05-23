@@ -21,11 +21,11 @@ impl StockClient {
     /// # Errors
     ///
     /// Returns an error if either env var is missing.
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env(http: reqwest::Client) -> Result<Self> {
         let account = std::env::var("STOCK_ACCOUNT")?;
         let password = std::env::var("STOCK_PASSWORD")?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            http,
             account,
             password,
         })

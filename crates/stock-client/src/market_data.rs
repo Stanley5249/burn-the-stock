@@ -1,260 +1,174 @@
-use crate::error::Result;
-use crate::types::{ApiMarket, OhlcvRow};
+use crate::error::{Error, Result};
 use crate::urls;
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
+use serde::Deserialize;
 
-/// Fetch OHLCV rows for `code` over `[start, end]` from the appropriate exchange.
+/// Maximum number of days per historical candles request (API limit is ~1 year).
+pub const CANDLE_CHUNK_DAYS: i64 = 364;
+
+// --- Public API ---
+
+/// Fetch the list of equity tickers for `market`.
 ///
 /// # Errors
 ///
 /// Returns an error on network or deserialization failure.
-pub async fn fetch_stock_data(
+pub async fn fetch_tickers(
     http: &reqwest::Client,
-    code: &str,
-    start: NaiveDate,
-    end: NaiveDate,
-    market: ApiMarket,
-) -> Result<Vec<OhlcvRow>> {
-    let mut rows = Vec::new();
-
-    for month in month_starts(start, end) {
-        let batch = match market {
-            ApiMarket::Twse => fetch_twse(http, code, month).await?,
-            ApiMarket::Tpex => fetch_tpex(http, code, month).await?,
-            ApiMarket::Esb => fetch_esb(http, code, month).await?,
-        };
-        rows.extend(batch);
-    }
-
-    rows.retain(|r| r.date >= start && r.date <= end);
-    rows.sort_by_key(|r| r.date);
-
-    Ok(rows)
-}
-
-fn month_starts(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
-    let mut months = Vec::new();
-    let mut current = NaiveDate::from_ymd_opt(start.year(), start.month(), 1).unwrap();
-    let end_month = NaiveDate::from_ymd_opt(end.year(), end.month(), 1).unwrap();
-    while current <= end_month {
-        months.push(current);
-        current = if current.month() == 12 {
-            NaiveDate::from_ymd_opt(current.year() + 1, 1, 1).unwrap()
-        } else {
-            NaiveDate::from_ymd_opt(current.year(), current.month() + 1, 1).unwrap()
-        };
-    }
-    months
-}
-
-async fn fetch_twse(http: &reqwest::Client, code: &str, month: NaiveDate) -> Result<Vec<OhlcvRow>> {
-    #[derive(serde::Deserialize)]
-    struct TwseResponse {
-        stat: String,
-        #[serde(default)]
-        data: Vec<Vec<String>>,
-    }
-
-    let response: TwseResponse = http
-        .get(urls::TWSE_STOCK_DAY)
+    market: FugleMarket,
+) -> Result<Vec<FugleTickerItem>> {
+    let response = http
+        .get(urls::FUGLE_INTRADAY_TICKERS)
         .query(&[
-            ("response", "json"),
-            ("date", &month.format("%Y%m%d").to_string()),
-            ("stockNo", code),
+            ("type", "EQUITY"),
+            ("exchange", market.exchange()),
+            ("market", market.as_str()),
         ])
         .send()
         .await?
-        .json()
+        .error_for_status()?
+        .json::<FugleTickersResponse>()
         .await?;
+    Ok(response.data)
+}
 
-    if response.stat != "OK" {
-        return Ok(vec![]);
+/// Fetch adjusted daily candles for `symbol` over `[from, to]`.
+///
+/// The endpoint caps each request at ~1 year, so this function issues multiple
+/// requests when the range is longer and concatenates the bars.
+/// Bars are returned in ascending date order.
+///
+/// # Errors
+///
+/// Returns an error if `from > to`, or on network or deserialization failure.
+pub async fn fetch_candles(
+    http: &reqwest::Client,
+    symbol: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<FugleCandlesResponse> {
+    if from > to {
+        return Err(Error::InvalidRow(format!(
+            "from ({from}) is after to ({to})"
+        )));
     }
 
-    let mut rows = Vec::with_capacity(response.data.len());
-    for row in &response.data {
-        if row.len() < 9 {
-            continue;
-        }
-        let Some(date) = roc_to_date(&row[0]) else {
-            continue;
-        };
-        rows.push(OhlcvRow {
-            date,
-            stock_code_id: code.to_owned(),
-            capacity: clean_u64(&row[1]),
-            turnover: clean_u64(&row[2]),
-            open: Some(clean_f64(&row[3])),
-            high: Some(clean_f64(&row[4])),
-            low: Some(clean_f64(&row[5])),
-            close: Some(clean_f64(&row[6])),
-            change: Some(clean_f64(&row[7])),
-            transaction_volume: clean_u64(&row[8]),
-        });
+    let first_to = (from + chrono::Duration::days(CANDLE_CHUNK_DAYS)).min(to);
+    let mut result = fetch_candles_chunk(http, symbol, from, first_to).await?;
+    let mut chunk_from = first_to + chrono::Duration::days(1);
+
+    while chunk_from <= to {
+        let chunk_to = (chunk_from + chrono::Duration::days(CANDLE_CHUNK_DAYS)).min(to);
+        let chunk = fetch_candles_chunk(http, symbol, chunk_from, chunk_to).await?;
+        result.data.extend(chunk.data);
+        chunk_from = chunk_to + chrono::Duration::days(1);
     }
-    Ok(rows)
+
+    Ok(result)
 }
 
-#[derive(serde::Deserialize)]
-struct TpexTable {
-    #[serde(default)]
-    data: Vec<Vec<String>>,
-}
-
-#[derive(serde::Deserialize)]
-struct TpexResponse {
-    stat: String,
-    #[serde(default)]
-    tables: Vec<TpexTable>,
-}
-
-async fn fetch_tpex(http: &reqwest::Client, code: &str, month: NaiveDate) -> Result<Vec<OhlcvRow>> {
-    let response: TpexResponse = http
-        .get(urls::TPEX_TRADING_STOCK)
+/// Fetch adjusted daily candles for `symbol` over a single `[from, to]` window.
+///
+/// The window must be at most [`CANDLE_CHUNK_DAYS`] days. For longer ranges use
+/// [`fetch_candles`], which handles chunking automatically.
+///
+/// # Errors
+///
+/// Returns an error on network or deserialization failure.
+pub async fn fetch_candles_chunk(
+    http: &reqwest::Client,
+    symbol: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<FugleCandlesResponse> {
+    let url = format!("{}/{}", urls::FUGLE_HISTORICAL_CANDLES, symbol);
+    Ok(http
+        .get(&url)
         .query(&[
-            ("code", code),
-            ("date", &month.format("%Y/%m/%d").to_string()),
-            ("id", ""),
-            ("response", "json"),
+            ("timeframe", "D"),
+            ("adjusted", "true"),
+            ("sort", "asc"),
+            ("from", from.to_string().as_str()),
+            ("to", to.to_string().as_str()),
         ])
         .send()
         .await?
-        .json()
-        .await?;
+        .error_for_status()?
+        .json::<FugleCandlesResponse>()
+        .await?)
+}
 
-    if !response.stat.eq_ignore_ascii_case("ok") {
-        return Ok(vec![]);
-    }
+// --- Market enum ---
 
-    let Some(table) = response.tables.first() else {
-        return Ok(vec![]);
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FugleMarket {
+    Tse,
+    Otc,
+    Esb,
+    Tib,
+    Psb,
+}
 
-    let mut rows = Vec::with_capacity(table.data.len());
-    for row in &table.data {
-        // columns: date, capacity(lots), turnover(thousands), open, high, low, close, change, txn
-        if row.len() < 9 {
-            continue;
+impl FugleMarket {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FugleMarket::Tse => "TSE",
+            FugleMarket::Otc => "OTC",
+            FugleMarket::Esb => "ESB",
+            FugleMarket::Tib => "TIB",
+            FugleMarket::Psb => "PSB",
         }
-        let Some(date) = roc_to_date(&row[0]) else {
-            continue;
-        };
-        rows.push(OhlcvRow {
-            date,
-            stock_code_id: code.to_owned(),
-            capacity: clean_u64(&row[1]) * 1000,
-            turnover: clean_u64(&row[2]) * 1000,
-            open: Some(clean_f64(&row[3])),
-            high: Some(clean_f64(&row[4])),
-            low: Some(clean_f64(&row[5])),
-            close: Some(clean_f64(&row[6])),
-            change: Some(clean_f64(&row[7])),
-            transaction_volume: clean_u64(&row[8]),
-        });
-    }
-    Ok(rows)
-}
-
-async fn fetch_esb(http: &reqwest::Client, code: &str, month: NaiveDate) -> Result<Vec<OhlcvRow>> {
-    let response: TpexResponse = http
-        .get(urls::TPEX_EMERGING_HISTORICAL)
-        .query(&[
-            ("type", "Monthly"),
-            ("date", &month.format("%Y/%m/%d").to_string()),
-            ("code", code),
-            ("id", ""),
-            ("response", "json"),
-        ])
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    if !response.stat.eq_ignore_ascii_case("ok") {
-        return Ok(vec![]);
     }
 
-    let Some(table) = response.tables.first() else {
-        return Ok(vec![]);
-    };
-
-    let mut rows = Vec::with_capacity(table.data.len());
-    for row in &table.data {
-        // 13 columns: date, capacity1, turnover1, high1, low1, avg1, transaction1, capacity2, turnover2, high2, low2, avg2, transaction2
-        if row.len() < 13 {
-            continue;
+    #[must_use]
+    pub fn exchange(self) -> &'static str {
+        match self {
+            FugleMarket::Tse => "TWSE",
+            FugleMarket::Otc | FugleMarket::Esb | FugleMarket::Tib | FugleMarket::Psb => "TPEx",
         }
-        let Some(date) = roc_to_date(&row[0]) else {
-            continue;
-        };
-        let capacity_1 = clean_u64(&row[1]);
-        let turnover_1 = clean_u64(&row[2]);
-        let high_1 = clean_f64(&row[3]);
-        let low_1 = clean_f64(&row[4]);
-        let transaction_1 = clean_u64(&row[6]);
-        let capacity_2 = clean_u64(&row[7]);
-        let turnover_2 = clean_u64(&row[8]);
-        let high_2 = clean_f64(&row[9]);
-        let low_2 = clean_f64(&row[10]);
-        let transaction_2 = clean_u64(&row[12]);
-
-        let capacity = capacity_1 + capacity_2;
-        let turnover = turnover_1 + turnover_2;
-        // weighted average price as close proxy; no open available
-        #[allow(clippy::cast_precision_loss)]
-        let close = (capacity > 0).then(|| turnover as f64 / capacity as f64);
-        let high = nonzero_max(high_1, high_2);
-        let low = nonzero_min(low_1, low_2);
-
-        rows.push(OhlcvRow {
-            date,
-            stock_code_id: code.to_owned(),
-            capacity,
-            turnover,
-            open: None,
-            high,
-            low,
-            close,
-            change: None,
-            transaction_volume: transaction_1 + transaction_2,
-        });
-    }
-    Ok(rows)
-}
-
-fn nonzero_max(a: f64, b: f64) -> Option<f64> {
-    match (a > 0.0, b > 0.0) {
-        (true, true) => Some(a.max(b)),
-        (true, false) => Some(a),
-        (false, true) => Some(b),
-        (false, false) => None,
     }
 }
 
-fn nonzero_min(a: f64, b: f64) -> Option<f64> {
-    match (a > 0.0, b > 0.0) {
-        (true, true) => Some(a.min(b)),
-        (true, false) => Some(a),
-        (false, true) => Some(b),
-        (false, false) => None,
+impl std::fmt::Display for FugleMarket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
-fn roc_to_date(s: &str) -> Option<NaiveDate> {
-    let mut parts = s.split('/');
-    let (Some(y), Some(m), Some(d)) = (parts.next(), parts.next(), parts.next()) else {
-        return None;
-    };
-    let year: i32 = y.trim().parse::<i32>().ok()? + 1911;
-    let month: u32 = m.trim().parse().ok()?;
-    let day: u32 = d.trim().parse().ok()?;
-    NaiveDate::from_ymd_opt(year, month, day)
+// --- Response types ---
+
+#[derive(Debug, Deserialize)]
+pub struct FugleTickersResponse {
+    pub date: String,
+    pub data: Vec<FugleTickerItem>,
 }
 
-fn clean_u64(s: &str) -> u64 {
-    s.replace([',', 'X'], "").trim().parse().unwrap_or(0)
+#[derive(Debug, Clone, Deserialize)]
+pub struct FugleTickerItem {
+    pub symbol: String,
+    pub name: String,
 }
 
-fn clean_f64(s: &str) -> f64 {
-    s.replace([',', 'X'], "").trim().parse().unwrap_or(0.0)
+#[derive(Debug, Clone, Deserialize)]
+pub struct FugleCandlesResponse {
+    pub symbol: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub exchange: String,
+    pub market: String,
+    pub timeframe: String,
+    pub data: Vec<FugleCandleBar>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FugleCandleBar {
+    pub date: NaiveDate,
+    pub open: Option<f64>,
+    pub high: Option<f64>,
+    pub low: Option<f64>,
+    pub close: Option<f64>,
+    pub volume: Option<f64>,
+    pub turnover: Option<f64>,
+    pub change: Option<f64>,
 }

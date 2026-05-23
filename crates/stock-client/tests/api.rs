@@ -1,59 +1,47 @@
 use chrono::NaiveDate;
+use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::LazyLock;
 use stock_client::client::StockClient;
-use stock_client::market_data::fetch_stock_data;
-use stock_client::types::{ApiMarket, MarketType, OhlcvRow};
+use stock_client::market_data::{FugleMarket, fetch_candles, fetch_tickers};
 
 static CLIENT: LazyLock<StockClient> = LazyLock::new(|| {
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv().unwrap();
+
+    let api_key = std::env::var("FUGLE_API_KEY").expect("`FUGLE_API_KEY` must be set");
 
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    StockClient::from_env().expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "X-API-KEY",
+        HeaderValue::from_str(&api_key).expect("invalid API key"),
+    );
+
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("failed to build reqwest client");
+
+    StockClient::from_env(client).expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
 });
 
 fn date(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
 }
 
-fn assert_ohlcv_rows(rows: &[OhlcvRow], start: NaiveDate, end: NaiveDate) {
-    assert!(!rows.is_empty(), "expected at least one row");
-
-    for row in rows {
-        assert!(
-            row.date >= start && row.date <= end,
-            "date out of range: {}",
-            row.date
-        );
-        if let Some(v) = row.open {
-            assert!(!v.is_sign_negative(), "open negative");
-        }
-        if let Some(v) = row.high {
-            assert!(!v.is_sign_negative(), "high negative");
-        }
-        if let Some(v) = row.low {
-            assert!(!v.is_sign_negative(), "low negative");
-        }
-        if let Some(v) = row.close {
-            assert!(!v.is_sign_negative(), "close negative");
-        }
-    }
-}
-
-// --- trading API ---
+// --- Trading API ---
 
 #[tokio::test]
 #[ignore = "requires network access"]
 async fn test_stock_list_schema() {
     let stocks = CLIENT.stock_list().await.unwrap();
-    let (sample_code, sample_info) = stocks.iter().next().unwrap();
+    let (code, stock_info) = stocks.iter().next().unwrap();
     tracing::info!(
         total = stocks.len(),
-        code = sample_code,
-        name = %sample_info.name,
-        kind = %sample_info.kind,
+        first.code = code,
+        first.stock_info = ?stock_info,
         "stock list"
     );
 }
@@ -75,69 +63,96 @@ async fn test_user_stocks_schema() {
     }
 }
 
-// --- market data ---
+// --- Fugle market data ---
 
 #[tokio::test]
-#[ignore = "requires network access"]
-async fn test_fetch_twse_schema() {
-    let start = date("2024-03-01");
-    let end = date("2024-03-31");
-    let rows = fetch_stock_data(CLIENT.http(), "2330", start, end, ApiMarket::Twse)
+#[ignore = "requires network access and FUGLE_API_KEY"]
+async fn test_fugle_tickers_tse() {
+    let tickers = fetch_tickers(CLIENT.http(), FugleMarket::Tse)
         .await
         .unwrap();
-    tracing::info!(count = rows.len(), "twse rows");
-    assert_ohlcv_rows(&rows, start, end);
+
+    tracing::info!(count = tickers.len(), "TSE tickers");
+
+    assert!(
+        tickers.len() > 500,
+        "expected hundreds of TSE stocks, got {}",
+        tickers.len()
+    );
+
+    let tsmc = tickers.iter().find(|t| t.symbol == "2330");
+
+    assert!(tsmc.is_some(), "TSMC (2330) not found in TSE tickers");
+
+    tracing::info!(name = tsmc.unwrap().name, "TSMC");
 }
 
 #[tokio::test]
-#[ignore = "requires network access"]
-async fn test_fetch_tpex_schema() {
-    let start = date("2024-03-01");
-    let end = date("2024-03-31");
-
-    let stocks = CLIENT.stock_list().await.unwrap();
-    let code = stocks
-        .iter()
-        .find(|(_, info)| info.kind == MarketType::Otc)
-        .map(|(code, _)| code.clone())
-        .expect("no OTC stock in list");
-
-    let rows = fetch_stock_data(CLIENT.http(), &code, start, end, ApiMarket::Tpex)
+#[ignore = "requires network access and FUGLE_API_KEY"]
+async fn test_fugle_tickers_otc() {
+    let tickers = fetch_tickers(CLIENT.http(), FugleMarket::Otc)
         .await
         .unwrap();
-    tracing::info!(count = rows.len(), code, "tpex rows");
-    assert_ohlcv_rows(&rows, start, end);
+
+    tracing::info!(count = tickers.len(), "OTC tickers");
+
+    assert!(!tickers.is_empty(), "expected at least one OTC ticker");
 }
 
 #[tokio::test]
-#[ignore = "requires network access"]
-async fn test_fetch_esb_schema() {
-    let start = date("2024-01-01");
-    let end = date("2024-12-31");
+#[ignore = "requires network access and FUGLE_API_KEY"]
+async fn test_fugle_candles_tsmc() {
+    let from = date("2024-01-01");
+    let to = date("2024-12-31");
+    let response = fetch_candles(CLIENT.http(), "2330", from, to)
+        .await
+        .unwrap();
 
-    let stocks = CLIENT.stock_list().await.unwrap();
-    let esb_codes: Vec<_> = stocks
-        .iter()
-        .filter(|(_, info)| info.kind == MarketType::Esb)
-        .map(|(code, _)| code.clone())
-        .take(20)
-        .collect();
+    tracing::info!(
+        symbol = response.symbol,
+        market = response.market,
+        bars = response.data.len(),
+        "TSMC candles"
+    );
+    assert_eq!(response.symbol, "2330");
+    assert!(!response.data.is_empty(), "expected at least one candle");
 
-    assert!(!esb_codes.is_empty(), "no ESB stocks in list");
+    let first = &response.data[0];
+    assert!(first.date >= from, "first bar date before requested from");
+    assert!(first.close.is_some(), "expected close price");
+    assert!(first.volume.is_some(), "expected volume");
 
-    for code in &esb_codes {
-        let rows = fetch_stock_data(CLIENT.http(), code, start, end, ApiMarket::Esb)
-            .await
-            .unwrap();
-        if !rows.is_empty() {
-            tracing::info!(count = rows.len(), code, "esb rows");
-            assert_ohlcv_rows(&rows, start, end);
-            return;
-        }
+    // Bars should be in ascending date order.
+    for window in response.data.windows(2) {
+        assert!(
+            window[0].date < window[1].date,
+            "candles not in ascending order"
+        );
     }
 
-    panic!(
-        "no ESB data found for any of {} candidates in {start}..{end}",
-        esb_codes.len()
+    tracing::info!(
+        date = %first.date,
+        open = ?first.open,
+        close = ?first.close,
+        volume = ?first.volume,
+        "first bar"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires network access and FUGLE_API_KEY"]
+async fn test_fugle_candles_ten_years() {
+    let from = date("2016-01-01");
+    let to = chrono::Local::now().date_naive();
+    let response = fetch_candles(CLIENT.http(), "2330", from, to)
+        .await
+        .unwrap();
+
+    tracing::info!(bars = response.data.len(), "TSMC 10-year candles");
+
+    assert!(
+        response.data.len() > 1000,
+        "expected >1000 daily bars, got {}",
+        response.data.len()
     );
 }

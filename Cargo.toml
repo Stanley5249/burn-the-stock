@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/downloader",
   "crates/stock-client",
   "crates/trader",
   "crates/trainer",

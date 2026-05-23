@@ -1,0 +1,21 @@
+[package]
+name = "downloader"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "downloader"
+path = "src/main.rs"
+
+[dependencies]
+stock-client = { path = "../stock-client" }
+
+chrono = { workspace = true, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+csv = "1"
+miette = { workspace = true, features = ["fancy"] }
+reqwest = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+dotenvy.workspace = true
