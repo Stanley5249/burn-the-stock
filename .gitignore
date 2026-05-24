@@ -1,6 +1,9 @@
 # rust build output
 /target/
 
+# pythno
+__pycache__/
+
 # credentials
 .env
 

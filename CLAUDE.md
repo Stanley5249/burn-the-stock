@@ -1,8 +1,10 @@
 # burn-the-stock
 
-Taiwan stock trading bot with a burn NN backend.
+Taiwan stock trading bot with a burn NN backend. See `pyproject.toml` for Python project config, dependencies, and layout settings.
 
 Workspace: `stock-client` (lib), `trainer` (bin), `trader` (bin).
+
+The course evaluation platform is sim stock (https://ciot.imis.ncku.edu.tw/sim_stock).
 
 ## Project Conventions
 
