@@ -1,15 +1,16 @@
 use crate::error::{Error, Result};
-use crate::types::{ApiMarket, ApiResponse, MarketType, StockInfo, UserStock};
+use crate::types::{MarketType, StockInfo, UserStock};
 use crate::urls;
+use serde::Deserialize;
 use std::collections::HashMap;
 
-pub struct StockClient {
+pub struct SimStockClient {
     http: reqwest::Client,
     account: String,
     password: String,
 }
 
-impl StockClient {
+impl SimStockClient {
     #[must_use]
     pub fn http(&self) -> &reqwest::Client {
         &self.http
@@ -35,80 +36,109 @@ impl StockClient {
     ///
     /// Returns an error on network or deserialization failure.
     pub async fn stock_list(&self) -> Result<HashMap<String, StockInfo>> {
-        Ok(self
+        let list = self
             .http
-            .get(format!("{}/stock_list", urls::TRADING_API_BASE))
+            .get(format!("{}/stock_list", urls::SIM_STOCK_API_BASE))
             .send()
             .await?
+            .error_for_status()?
             .json()
-            .await?)
+            .await?;
+
+        tracing::info!("stock_list");
+
+        Ok(list)
     }
 
     /// # Errors
     ///
     /// Returns an error on network or deserialization failure.
-    pub async fn stock_market(&self, code: &str) -> Result<ApiMarket> {
-        #[derive(serde::Deserialize)]
-        struct Response {
-            #[serde(rename = "type")]
-            kind: MarketType,
+    pub async fn stock_market(&self, code: &str) -> Result<MarketType> {
+        #[derive(Debug, Deserialize)]
+        #[serde(tag = "result", deny_unknown_fields)]
+        enum Response {
+            #[serde(rename = "success")]
+            Success {
+                #[allow(dead_code)]
+                stock_code: String,
+                r#type: MarketType,
+            },
+            #[serde(rename = "failed")]
+            Failed { status: String },
         }
+
         let response: Response = self
             .http
-            .get(format!("{}/stock_type", urls::TRADING_API_BASE))
+            .get(format!("{}/stock_type", urls::SIM_STOCK_API_BASE))
             .query(&[("stock_code", code)])
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
 
-        Ok(response.kind.into())
+        tracing::info!(?response, "stock_type");
+
+        match response {
+            Response::Success { r#type, .. } => Ok(r#type),
+            Response::Failed { status } => Err(Error::Api { status }),
+        }
     }
 
     /// # Errors
     ///
     /// Returns an error on network or deserialization failure.
     pub async fn user_stocks(&self) -> Result<Vec<UserStock>> {
-        #[derive(serde::Deserialize)]
-        struct UserStocksResponse {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Response {
             result: String,
-            #[serde(default)]
-            data: Vec<UserStock>,
+            status: String,
+            data: Option<Vec<UserStock>>,
         }
 
-        let response: UserStocksResponse = self
+        let response: Response = self
             .http
-            .post(format!("{}/get_user_stocks", urls::TRADING_API_BASE))
+            .post(format!("{}/get_user_stocks", urls::SIM_STOCK_API_BASE))
             .form(&[("account", &self.account), ("password", &self.password)])
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
 
-        if response.result != "success" {
-            return Ok(vec![]);
-        }
-        Ok(response.data)
+        tracing::info!(response.result, response.status, "get_user_stocks");
+
+        response.data.ok_or_else(|| Error::Api {
+            status: response.status,
+        })
     }
 
     /// # Errors
     ///
     /// Returns an error on network failure or if the server rejects the order.
-    pub async fn buy(&self, code: &str, shares: u64, price: f64) -> Result<bool> {
+    pub async fn buy(&self, code: &str, shares: u64, price: f64) -> Result<()> {
         self.order("buy", code, shares, price).await
     }
 
     /// # Errors
     ///
     /// Returns an error on network failure or if the server rejects the order.
-    pub async fn sell(&self, code: &str, shares: u64, price: f64) -> Result<bool> {
+    pub async fn sell(&self, code: &str, shares: u64, price: f64) -> Result<()> {
         self.order("sell", code, shares, price).await
     }
 
-    async fn order(&self, action: &str, code: &str, shares: u64, price: f64) -> Result<bool> {
-        let response: ApiResponse = self
+    async fn order(&self, action: &str, code: &str, shares: u64, price: f64) -> Result<()> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Response {
+            result: String,
+            status: String,
+        }
+
+        let response: Response = self
             .http
-            .post(format!("{}/{}", urls::TRADING_API_BASE, action))
+            .post(format!("{}/{}", urls::SIM_STOCK_API_BASE, action))
             .form(&[
                 ("account", self.account.as_str()),
                 ("password", self.password.as_str()),
@@ -118,14 +148,18 @@ impl StockClient {
             ])
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
 
+        tracing::info!(response.result, response.status, "{action}");
+
         if response.result != "success" {
-            return Err(Error::ApiFailure {
+            return Err(Error::Api {
                 status: response.status,
             });
         }
-        Ok(true)
+
+        Ok(())
     }
 }

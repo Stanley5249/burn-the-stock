@@ -13,7 +13,7 @@ pub enum Error {
 
     #[error("API returned failure: {status}")]
     #[diagnostic(code(stock::api))]
-    ApiFailure { status: String },
+    Api { status: String },
 
     #[error("invalid row: {0}")]
     #[diagnostic(code(stock::invalid_row))]

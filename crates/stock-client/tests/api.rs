@@ -1,10 +1,10 @@
 use chrono::NaiveDate;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::LazyLock;
-use stock_client::client::StockClient;
 use stock_client::market_data::{FugleMarket, fetch_candles, fetch_tickers};
+use stock_client::sim_stock::SimStockClient;
 
-static CLIENT: LazyLock<StockClient> = LazyLock::new(|| {
+static CLIENT: LazyLock<SimStockClient> = LazyLock::new(|| {
     dotenvy::dotenv().unwrap();
 
     let api_key = std::env::var("FUGLE_API_KEY").expect("`FUGLE_API_KEY` must be set");
@@ -24,7 +24,7 @@ static CLIENT: LazyLock<StockClient> = LazyLock::new(|| {
         .build()
         .expect("failed to build reqwest client");
 
-    StockClient::from_env(client).expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
+    SimStockClient::from_env(client).expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
 });
 
 fn date(s: &str) -> NaiveDate {

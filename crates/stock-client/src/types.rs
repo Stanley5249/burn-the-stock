@@ -5,21 +5,14 @@ use serde::{Deserialize, Serialize};
 
 // sim server types
 
-#[derive(Debug, Deserialize)]
-pub struct ApiResponse {
-    pub result: String,
-    pub status: String,
-}
-
-/// One entry from the sim server's [`stock_list`] endpoint.
+/// One entry from the sim server's `stock_list` endpoint.
 #[derive(Debug, Deserialize)]
 pub struct StockInfo {
     pub name: String,
-    #[serde(rename = "type")]
-    pub kind: MarketType,
+    pub r#type: MarketType,
 }
 
-/// One position as returned by the sim server's [`get_user_stocks`] endpoint.
+/// One position as returned by the sim server's `get_user_stocks` endpoint.
 #[derive(Debug, Deserialize)]
 pub struct UserStock {
     pub usid: u64,
