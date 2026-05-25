@@ -10,7 +10,7 @@ import pandas as pd
 import yfinance as yf
 from pydantic import BaseModel, TypeAdapter
 
-import burn_the_stock
+import burn_the_stock.logging
 
 logger = logging.getLogger(__name__)
 

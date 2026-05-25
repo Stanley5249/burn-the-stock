@@ -6,7 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
-import burn_the_stock
+import burn_the_stock.logging
 
 logger = logging.getLogger(__name__)
 
