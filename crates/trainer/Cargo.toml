@@ -7,7 +7,10 @@ edition = "2024"
 stock-client = { path = "../stock-client" }
 
 arrow-array = "58"
-burn = { workspace = true, features = ["train"] }
+burn = {
+  workspace = true,
+  features = ["autotune", "fusion", "std", "train", "tui"]
+}
 miette = { workspace = true, features = ["fancy"] }
 parquet = {
   version = "58",
@@ -19,7 +22,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [features]
 default = ["wgpu"]
-ndarray = ["burn/ndarray"]
 wgpu = ["burn/wgpu"]
 
 [lints]

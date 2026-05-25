@@ -12,7 +12,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [features]
 default = ["wgpu"]
-ndarray = ["burn/ndarray"]
 wgpu = ["burn/wgpu"]
 
 [lints]
