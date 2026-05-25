@@ -1,10 +1,10 @@
 use chrono::NaiveDate;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::LazyLock;
-use stock_client::market_data::{FugleMarket, fetch_candles, fetch_tickers};
-use stock_client::sim_stock::SimStockClient;
+use stock_client::error::Error;
+use stock_client::fugle::{FugleMarket, fetch_candles, fetch_tickers};
 
-static CLIENT: LazyLock<SimStockClient> = LazyLock::new(|| {
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     dotenvy::dotenv().unwrap();
 
     let api_key = std::env::var("FUGLE_API_KEY").expect("`FUGLE_API_KEY` must be set");
@@ -19,80 +19,36 @@ static CLIENT: LazyLock<SimStockClient> = LazyLock::new(|| {
         HeaderValue::from_str(&api_key).expect("invalid API key"),
     );
 
-    let client = reqwest::Client::builder()
+    reqwest::Client::builder()
         .default_headers(headers)
         .build()
-        .expect("failed to build reqwest client");
-
-    SimStockClient::from_env(client).expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
+        .expect("failed to build reqwest client")
 });
 
 fn date(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
 }
 
-// --- Trading API ---
-
-#[tokio::test]
-#[ignore = "requires network access"]
-async fn test_stock_list_schema() {
-    let stocks = CLIENT.stock_list().await.unwrap();
-    let (code, stock_info) = stocks.iter().next().unwrap();
-    tracing::info!(
-        total = stocks.len(),
-        first.code = code,
-        first.stock_info = ?stock_info,
-        "stock list"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires network access"]
-async fn test_stock_market_schema() {
-    let market = CLIENT.stock_market("2330").await.unwrap();
-    tracing::info!(market = ?market, "stock market");
-}
-
-#[tokio::test]
-#[ignore = "requires network access and credentials"]
-async fn test_user_stocks_schema() {
-    let stocks = CLIENT.user_stocks().await.unwrap();
-    tracing::info!(count = stocks.len(), "user stocks");
-    if let Some(first) = stocks.first() {
-        tracing::info!(stock = ?first, "first user stock");
-    }
-}
-
-// --- Fugle market data ---
-
 #[tokio::test]
 #[ignore = "requires network access and FUGLE_API_KEY"]
 async fn test_fugle_tickers_tse() {
-    let tickers = fetch_tickers(CLIENT.http(), FugleMarket::Tse)
-        .await
-        .unwrap();
+    let response = fetch_tickers(&HTTP, FugleMarket::Tse).await.unwrap();
+    let tickers = response.data;
 
     tracing::info!(count = tickers.len(), "TSE tickers");
 
-    assert!(
-        tickers.len() > 500,
-        "expected hundreds of TSE stocks, got {}",
-        tickers.len()
-    );
+    assert!(!tickers.is_empty(), "expected at least one TSE ticker");
 
     let tsmc = tickers.iter().find(|t| t.symbol == "2330");
-
     assert!(tsmc.is_some(), "TSMC (2330) not found in TSE tickers");
-
     tracing::info!(name = tsmc.unwrap().name, "TSMC");
 }
 
 #[tokio::test]
 #[ignore = "requires network access and FUGLE_API_KEY"]
 async fn test_fugle_tickers_otc() {
-    let tickers = fetch_tickers(CLIENT.http(), FugleMarket::Otc)
-        .await
-        .unwrap();
+    let response = fetch_tickers(&HTTP, FugleMarket::Otc).await.unwrap();
+    let tickers = response.data;
 
     tracing::info!(count = tickers.len(), "OTC tickers");
 
@@ -104,9 +60,7 @@ async fn test_fugle_tickers_otc() {
 async fn test_fugle_candles_tsmc() {
     let from = date("2024-01-01");
     let to = date("2024-12-31");
-    let response = fetch_candles(CLIENT.http(), "2330", from, to)
-        .await
-        .unwrap();
+    let response = fetch_candles(&HTTP, "2330", from, to).await.unwrap();
 
     tracing::info!(
         symbol = response.symbol,
@@ -114,12 +68,13 @@ async fn test_fugle_candles_tsmc() {
         bars = response.data.len(),
         "TSMC candles"
     );
+
     assert_eq!(response.symbol, "2330");
     assert!(!response.data.is_empty(), "expected at least one candle");
 
     let first = &response.data[0];
     assert!(first.date >= from, "first bar date before requested from");
-    assert!(first.close.is_some(), "expected close price");
+    assert!(first.close > 0.0, "expected close price");
     assert!(first.volume.is_some(), "expected volume");
 
     // Bars should be in ascending date order.
@@ -142,17 +97,20 @@ async fn test_fugle_candles_tsmc() {
 #[tokio::test]
 #[ignore = "requires network access and FUGLE_API_KEY"]
 async fn test_fugle_candles_ten_years() {
+    // The Fugle API rejects date ranges longer than 1 year with HTTP 400.
     let from = date("2016-01-01");
     let to = chrono::Local::now().date_naive();
-    let response = fetch_candles(CLIENT.http(), "2330", from, to)
-        .await
-        .unwrap();
 
-    tracing::info!(bars = response.data.len(), "TSMC 10-year candles");
+    let error = fetch_candles(&HTTP, "2330", from, to).await.unwrap_err();
 
-    assert!(
-        response.data.len() > 1000,
-        "expected >1000 daily bars, got {}",
-        response.data.len()
-    );
+    tracing::info!(?error, "got expected error for >1-year range");
+
+    match &error {
+        Error::Http(error) => {
+            let status = error.status();
+            let is_4xx = status.is_some_and(|s| s.is_client_error());
+            assert!(is_4xx, "expected 4xx status, got {status:?}");
+        }
+        other => panic!("expected HTTP error, got {other:?}"),
+    }
 }

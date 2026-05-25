@@ -1,10 +1,7 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::urls;
 use chrono::NaiveDate;
 use serde::Deserialize;
-
-/// Maximum number of days per historical candles request (API limit is ~1 year).
-pub const CANDLE_CHUNK_DAYS: i64 = 364;
 
 // --- Public API ---
 
@@ -16,8 +13,8 @@ pub const CANDLE_CHUNK_DAYS: i64 = 364;
 pub async fn fetch_tickers(
     http: &reqwest::Client,
     market: FugleMarket,
-) -> Result<Vec<FugleTickerItem>> {
-    let response = http
+) -> Result<FugleTickersResponse> {
+    let response: FugleTickersResponse = http
         .get(urls::FUGLE_INTRADAY_TICKERS)
         .query(&[
             ("type", "EQUITY"),
@@ -27,63 +24,29 @@ pub async fn fetch_tickers(
         .send()
         .await?
         .error_for_status()?
-        .json::<FugleTickersResponse>()
+        .json()
         .await?;
-    Ok(response.data)
+
+    Ok(response)
 }
 
-/// Fetch adjusted daily candles for `symbol` over `[from, to]`.
+/// Fetch adjusted daily candles for `symbol` over a single `[from, to]` window.
 ///
-/// The endpoint caps each request at ~1 year, so this function issues multiple
-/// requests when the range is longer and concatenates the bars.
-/// Bars are returned in ascending date order.
+/// The window must be at most [`CANDLE_CHUNK_DAYS`] days.
 ///
 /// # Errors
 ///
-/// Returns an error if `from > to`, or on network or deserialization failure.
+/// Returns an error on network or deserialization failure.
 pub async fn fetch_candles(
     http: &reqwest::Client,
     symbol: &str,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<FugleCandlesResponse> {
-    if from > to {
-        return Err(Error::InvalidRow(format!(
-            "from ({from}) is after to ({to})"
-        )));
-    }
-
-    let first_to = (from + chrono::Duration::days(CANDLE_CHUNK_DAYS)).min(to);
-    let mut result = fetch_candles_chunk(http, symbol, from, first_to).await?;
-    let mut chunk_from = first_to + chrono::Duration::days(1);
-
-    while chunk_from <= to {
-        let chunk_to = (chunk_from + chrono::Duration::days(CANDLE_CHUNK_DAYS)).min(to);
-        let chunk = fetch_candles_chunk(http, symbol, chunk_from, chunk_to).await?;
-        result.data.extend(chunk.data);
-        chunk_from = chunk_to + chrono::Duration::days(1);
-    }
-
-    Ok(result)
-}
-
-/// Fetch adjusted daily candles for `symbol` over a single `[from, to]` window.
-///
-/// The window must be at most [`CANDLE_CHUNK_DAYS`] days. For longer ranges use
-/// [`fetch_candles`], which handles chunking automatically.
-///
-/// # Errors
-///
-/// Returns an error on network or deserialization failure.
-pub async fn fetch_candles_chunk(
-    http: &reqwest::Client,
-    symbol: &str,
-    from: NaiveDate,
-    to: NaiveDate,
-) -> Result<FugleCandlesResponse> {
     let url = format!("{}/{}", urls::FUGLE_HISTORICAL_CANDLES, symbol);
-    Ok(http
-        .get(&url)
+
+    let response = http
+        .get(url)
         .query(&[
             ("timeframe", "D"),
             ("adjusted", "true"),
@@ -94,13 +57,15 @@ pub async fn fetch_candles_chunk(
         .send()
         .await?
         .error_for_status()?
-        .json::<FugleCandlesResponse>()
-        .await?)
+        .json()
+        .await?;
+
+    Ok(response)
 }
 
 // --- Market enum ---
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum FugleMarket {
     Tse,
     Otc,
@@ -139,35 +104,52 @@ impl std::fmt::Display for FugleMarket {
 // --- Response types ---
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FugleTickersResponse {
     pub date: String,
+    pub r#type: String,
+    pub exchange: String,
+    pub market: Option<String>,
+    #[serde(rename = "isNormal")]
+    pub is_normal: Option<bool>,
+    #[serde(rename = "isAttention")]
+    pub is_attention: Option<bool>,
+    #[serde(rename = "isDisposition")]
+    pub is_disposition: Option<bool>,
+    #[serde(rename = "isHalted")]
+    pub is_halted: Option<bool>,
     pub data: Vec<FugleTickerItem>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FugleTickerItem {
     pub symbol: String,
     pub name: String,
+    pub industry: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FugleCandlesResponse {
     pub symbol: String,
-    #[serde(rename = "type")]
-    pub kind: String,
+    pub r#type: String,
     pub exchange: String,
     pub market: String,
     pub timeframe: String,
+    pub sort: Option<String>,
+    pub adjusted: Option<bool>,
     pub data: Vec<FugleCandleBar>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FugleCandleBar {
     pub date: NaiveDate,
-    pub open: Option<f64>,
-    pub high: Option<f64>,
-    pub low: Option<f64>,
-    pub close: Option<f64>,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
     pub volume: Option<f64>,
     pub turnover: Option<f64>,
     pub change: Option<f64>,
