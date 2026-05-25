@@ -4,9 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+stock-client = { path = "../stock-client" }
+
+arrow-array = "58"
 burn = { workspace = true, features = ["train"] }
 miette = { workspace = true, features = ["fancy"] }
-stock-client = { path = "../stock-client" }
+parquet = {
+  version = "58",
+  default-features = false,
+  features = ["arrow", "zstd"]
+}
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
