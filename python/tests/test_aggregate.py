@@ -47,4 +47,5 @@ def test_run(tmp_path: Path) -> None:
     df = pl.read_parquet(output)
     expected_cols = ["market", "code", "date", "open", "high", "low", "close", "volume"]
     assert df.columns == expected_cols
+    assert df["market"].dtype == pl.Categorical
     assert not df.is_empty()

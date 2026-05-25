@@ -69,6 +69,7 @@ def run(input_dir: Path, output: Path) -> None:
             "volume",
         ],
     )
+    combined = combined.with_columns(pl.col("market").cast(pl.Categorical))
     combined = combined.sort(["market", "code", "date"])
 
     output.parent.mkdir(parents=True, exist_ok=True)
