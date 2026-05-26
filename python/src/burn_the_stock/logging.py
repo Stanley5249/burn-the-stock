@@ -5,11 +5,10 @@ import sys
 
 
 def setup() -> None:
-    """Configure root logging to stdout with a plain message formatter.
+    """Configure root logging to stdout with brace-style formatting.
 
-    Uses brace-style formatting so log records print as bare messages
-    without timestamps or level prefixes, matching script output style.
+    Uses brace-style formatting so log records print as
+    levelname:name:message without timestamps.
     """
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("{message}", style="{"))
-    logging.basicConfig(level=logging.INFO, handlers=[handler])
+    logging.basicConfig(level=logging.INFO, handlers=[handler], style="{")

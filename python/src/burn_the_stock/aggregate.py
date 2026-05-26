@@ -11,7 +11,7 @@ import burn_the_stock.logging
 logger = logging.getLogger(__name__)
 
 
-def read_market(market_dir: Path, market: str) -> pl.DataFrame:
+def read_market(market_dir: Path, market: str) -> pl.LazyFrame:
     """Read all CSV files from a market directory and combine them.
 
     Args:
@@ -22,20 +22,15 @@ def read_market(market_dir: Path, market: str) -> pl.DataFrame:
         Combined DataFrame with a market column, or an empty DataFrame when
         no CSV files are found.
     """
-    csv_files = sorted(market_dir.glob("*.csv"))
-    if not csv_files:
-        return pl.DataFrame()
+    market_col = pl.lit(market).cast(pl.Categorical).alias("market")
 
-    schema_overrides = {"code": pl.String, "volume": pl.Float64}
-    frames = [
-        pl.read_csv(path, try_parse_dates=True, schema_overrides=schema_overrides)
-        for path in csv_files
-    ]
+    df = pl.scan_csv(
+        market_dir,
+        try_parse_dates=True,
+        schema_overrides=({"code": pl.String}),
+    )
 
-    combined = pl.concat(frames)
-    combined = combined.with_columns(pl.lit(market).alias("market"))
-    logger.info("market=%s files=%s rows=%s", market, len(csv_files), len(combined))
-    return combined
+    return df.with_columns(market_col)
 
 
 def run(input_dir: Path, output: Path) -> None:
@@ -48,34 +43,19 @@ def run(input_dir: Path, output: Path) -> None:
         input_dir: Root directory with tse/ and otc/ subdirectories.
         output: Destination parquet file path.
     """
+    output.parent.mkdir(parents=True, exist_ok=True)
+
     tse = read_market(input_dir / "tse", "tse")
     otc = read_market(input_dir / "otc", "otc")
 
-    frames = [df for df in (tse, otc) if not df.is_empty()]
-    if not frames:
-        logger.error("no data found")
-        return
+    df = pl.concat([tse, otc]).sort(["market", "code", "date"]).collect()
 
-    combined = pl.concat(frames)
-    combined = combined.select(
-        [
-            "market",
-            "code",
-            "date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-        ],
-    )
-    combined = combined.with_columns(pl.col("market").cast(pl.Categorical))
-    combined = combined.sort(["market", "code", "date"])
+    df.write_parquet(output, compression="zstd")
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    combined.write_parquet(output, compression="zstd", compression_level=3)
-    size_mb = output.stat().st_size / 1_048_576
-    logger.info("done rows=%s output=%s size_mb=%.1f", len(combined), output, size_mb)
+    size_mb = output.stat().st_size / 1024 / 1024
+    logger.info("done output=%s size_mb=%.1f", output, size_mb)
+
+    print(df)
 
 
 def parse_args() -> argparse.Namespace:

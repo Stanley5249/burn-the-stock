@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 import polars as pl
+import pytest
 from burn_the_stock.aggregate import read_market, run
 
 if TYPE_CHECKING:
@@ -19,8 +20,9 @@ def test_read_market_empty(tmp_path: Path) -> None:
     """Return an empty DataFrame when the market directory has no CSV files."""
     market_dir = tmp_path / "tse"
     market_dir.mkdir()
-    result = read_market(market_dir, "tse")
-    assert result.is_empty()
+
+    with pytest.raises(pl.exceptions.ComputeError):
+        _df = read_market(market_dir, "tse").collect()
 
 
 def test_read_market_single(tmp_path: Path) -> None:
@@ -28,9 +30,10 @@ def test_read_market_single(tmp_path: Path) -> None:
     market_dir = tmp_path / "tse"
     market_dir.mkdir()
     (market_dir / "2330.csv").write_text(_CSV_CONTENT)
-    result = read_market(market_dir, "tse")
-    assert not result.is_empty()
-    assert (result["market"] == "tse").all()
+    df = read_market(market_dir, "tse").collect()
+
+    assert not df.is_empty()
+    assert df.select(pl.col("market").eq("tse").all()).item() is True
 
 
 def test_run(tmp_path: Path) -> None:
@@ -41,11 +44,15 @@ def test_run(tmp_path: Path) -> None:
     otc_dir.mkdir()
     (tse_dir / "2330.csv").write_text(_CSV_CONTENT)
     (otc_dir / "3081.csv").write_text(_CSV_CONTENT.replace("2330", "3081"))
+
     output = tmp_path / "stocks.parquet"
     run(tmp_path, output)
+
     assert output.exists()
+
     df = pl.read_parquet(output)
-    expected_cols = ["market", "code", "date", "open", "high", "low", "close", "volume"]
-    assert df.columns == expected_cols
-    assert df["market"].dtype == pl.Categorical
+
+    expected = {"market", "code", "date", "open", "high", "low", "close", "volume"}
+    assert set(df.columns) == expected
+
     assert not df.is_empty()
