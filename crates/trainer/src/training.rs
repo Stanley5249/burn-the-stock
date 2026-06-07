@@ -1,12 +1,8 @@
-use std::path::Path;
-
-use burn::data::dataset::Dataset;
 use burn::optim::AdamConfig;
 use burn::prelude::*;
 use burn::tensor::backend::AutodiffBackend;
 use miette::Result;
 
-use crate::dataset::StockDataset;
 use crate::model::StockModelConfig;
 
 /// Top-level training configuration.
@@ -33,11 +29,11 @@ pub struct TrainingConfig {
 ///
 /// # Errors
 ///
-/// Returns an error if the dataset cannot be loaded.
+/// Returns an error if the dataloader cannot be built.
 #[allow(clippy::needless_pass_by_value)]
 pub fn train<B: AutodiffBackend>(
     device: B::Device,
-    data_path: &Path,
+    _data_path: &str,
     artifact_dir: &str,
     config: TrainingConfig,
 ) -> Result<()> {
@@ -48,17 +44,7 @@ pub fn train<B: AutodiffBackend>(
 
     B::seed(&device, config.seed);
 
-    let dataset = StockDataset::load(data_path)?;
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let split = (dataset.len() as f64 * 0.8) as usize;
-    let _ = split;
-
-    // TODO: split dataset into train/valid partitions (stratified by symbol).
-    // TODO: build DataLoaders using StockBatcher.
+    // TODO: build StockDataLoader for train/valid splits.
     // TODO: call config.model.init::<B>(&device).
     // TODO: configure SupervisedTraining with AccuracyMetric + LossMetric.
     // TODO: launch Learner::new(model, config.optimizer.init(), config.learning_rate).

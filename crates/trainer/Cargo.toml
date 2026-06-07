@@ -6,19 +6,31 @@ edition = "2024"
 [dependencies]
 stock-client = { path = "../stock-client" }
 
-arrow-array = "58"
 burn = {
   workspace = true,
   features = ["autotune", "fusion", "std", "train", "tui"]
 }
+chrono.workspace = true
+fastrand = "2.4.1"
 miette = { workspace = true, features = ["fancy"] }
-parquet = {
-  version = "58",
-  default-features = false,
-  features = ["arrow", "zstd"]
+polars = {
+  version = "0.53.0",
+  features = [
+    "concat_str",
+    "dtype-array",
+    "dtype-date",
+    "lazy",
+    "parquet",
+    "partition_by",
+    "performant",
+    "strings"
+  ]
 }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+burn = { workspace = true, features = ["flex"] }
 
 [features]
 default = ["wgpu"]

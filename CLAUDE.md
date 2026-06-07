@@ -45,6 +45,6 @@ Single-letter loop counters are fine (`i`, `j`, `k`), but prefer meaningful name
 
 Favor explicit conjunctions and transition words to connect your thoughts. Use natural phrasing instead of colons or semicolons, and limit punctuation to standard ASCII characters.
 
-Comments explain why and should be concise and minimal.
+Comments explain why, not what. Only add a comment when the reason is non-obvious.
 
 Commits use conventional commit format. Subject under 50 chars (hard limit 72).

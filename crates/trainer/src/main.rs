@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-mod batcher;
-mod dataset;
+mod dataloader;
+mod label;
 mod model;
 mod training;
 

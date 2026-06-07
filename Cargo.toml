@@ -8,7 +8,7 @@ members = [
 
 [workspace.dependencies]
 burn = { version = "0.21.0", default-features = false }
-chrono = { version = "0.4.44", default-features = false }
+chrono = { version = "0.4.41", default-features = false }
 chrono-tz = "0.10.4"
 dotenvy = "0.15.7"
 miette = "7.6.0"
