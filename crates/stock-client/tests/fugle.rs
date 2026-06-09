@@ -2,7 +2,7 @@ use chrono::NaiveDate;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::LazyLock;
 use stock_client::error::Error;
-use stock_client::fugle::{FugleMarket, fetch_candles, fetch_tickers};
+use stock_client::fugle::{FugleMarket, fetch_candles, fetch_ticker, fetch_tickers};
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     dotenvy::dotenv().unwrap();
@@ -53,6 +53,29 @@ async fn test_fugle_tickers_otc() {
     tracing::info!(count = tickers.len(), "OTC tickers");
 
     assert!(!tickers.is_empty(), "expected at least one OTC ticker");
+}
+
+#[tokio::test]
+#[ignore = "requires network access and FUGLE_API_KEY"]
+async fn test_fugle_ticker_industry() {
+    // Fetch only two tickers to confirm the end-to-end path: a general stock
+    // and an ETF, both of which should carry an industry classification.
+    for symbol in ["2330", "0050"] {
+        let detail = fetch_ticker(&HTTP, symbol).await.unwrap();
+
+        tracing::info!(
+            symbol = detail.symbol,
+            name = detail.name,
+            industry = ?detail.industry,
+            security_type = ?detail.security_type,
+            "ticker detail"
+        );
+
+        assert_eq!(detail.symbol, symbol);
+
+        let industry = detail.industry.as_deref().unwrap_or_default();
+        assert!(!industry.is_empty(), "expected industry for {symbol}");
+    }
 }
 
 #[tokio::test]

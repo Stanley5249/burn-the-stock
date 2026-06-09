@@ -30,6 +30,28 @@ pub async fn fetch_tickers(
     Ok(response)
 }
 
+/// Fetch the static metadata for a single `symbol`.
+///
+/// Used to read per-ticker fields like `industry` and `securityType` that the
+/// list endpoint does not return per row.
+///
+/// # Errors
+///
+/// Returns an error on network or deserialization failure.
+pub async fn fetch_ticker(http: &reqwest::Client, symbol: &str) -> Result<FugleTickerDetail> {
+    let url = format!("{}/{}", urls::FUGLE_INTRADAY_TICKER, symbol);
+
+    let response = http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    Ok(response)
+}
+
 /// Fetch adjusted daily candles for `symbol` over a single `[from, to]` window.
 ///
 /// The window must be at most [`CANDLE_CHUNK_DAYS`] days.
@@ -127,6 +149,23 @@ pub struct FugleTickerItem {
     pub symbol: String,
     pub name: String,
     pub industry: Option<String>,
+}
+
+/// Static metadata for a single ticker from the `intraday/ticker` endpoint.
+///
+/// The endpoint returns many extra fields (warrant and index specifics) that we
+/// do not model, so this type does not use `deny_unknown_fields` and lets serde
+/// ignore the rest.
+#[derive(Clone, Debug, Deserialize)]
+pub struct FugleTickerDetail {
+    pub symbol: String,
+    pub name: String,
+    pub r#type: String,
+    pub exchange: String,
+    pub market: String,
+    pub industry: Option<String>,
+    #[serde(rename = "securityType")]
+    pub security_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
