@@ -132,7 +132,7 @@ enum Sampling {
 /// ticker, so samples are not date-aligned across the batch. That is fine for
 /// the per-sample classification this model does.
 #[derive(Clone)]
-struct StockDataLoader<B: Backend> {
+pub(crate) struct StockDataLoader<B: Backend> {
     frames: Vec<(PlSmallStr, DataFrame)>,
     steps: usize,
     n_tickers: usize,
@@ -161,7 +161,7 @@ impl<B: Backend> StockDataLoader<B> {
     /// label-less row) are discarded. `epoch_size` sets how many batches one
     /// iteration pass yields.
     pub fn load(
-        path: PlRefPath,
+        path: &str,
         steps: usize,
         n_tickers: usize,
         epoch_size: usize,
@@ -188,7 +188,7 @@ impl<B: Backend> StockDataLoader<B> {
 
         let feature_expr = concat_arr(FEATURE_NAMES.map(col).to_vec()).unwrap();
 
-        let long = LazyFrame::scan_parquet(path, args)?
+        let long = LazyFrame::scan_parquet(PlRefPath::new(path), args)?
             .select([
                 ticker_expr.alias(TICKER),
                 col(DATE),
@@ -243,8 +243,8 @@ impl<B: Backend> StockDataLoader<B> {
     /// bucket absorbs every ticker whose industry is null or absent from the
     /// file. Must run before [`Self::train_valid_split`] so the mapping, which
     /// is keyed by ticker name, propagates to both sides.
-    pub fn attach_industries(mut self, path: PlRefPath) -> PolarsResult<Self> {
-        let frame = LazyFrame::scan_parquet(path, ScanArgsParquet::default())?
+    pub fn attach_industries(mut self, path: &str) -> PolarsResult<Self> {
+        let frame = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())?
             .select([
                 concat_str([col(MARKET), col(CODE)], &SEP, false).alias(TICKER),
                 col(INDUSTRY).cast(DataType::String),
@@ -300,6 +300,30 @@ impl<B: Backend> StockDataLoader<B> {
         Self {
             frames,
             ..self.clone()
+        }
+    }
+
+    /// One-hot width of the industry feature, needed to size the model's
+    /// categorical branch.
+    pub fn n_industries(&self) -> usize {
+        self.n_industries
+    }
+
+    /// Rebuild the loader on a different backend. The frames are backend-free,
+    /// so this only swaps the device and tensor type. Used to lift the train
+    /// split onto the autodiff backend while validation stays on the inner one.
+    pub fn to_backend<B2: Backend>(&self, device: B2::Device) -> StockDataLoader<B2> {
+        StockDataLoader {
+            frames: self.frames.clone(),
+            steps: self.steps,
+            n_tickers: self.n_tickers,
+            seed: self.seed,
+            device,
+            index_range: self.index_range.clone(),
+            sampling: self.sampling,
+            windows: self.windows.clone(),
+            industry_codes: self.industry_codes.clone(),
+            n_industries: self.n_industries,
         }
     }
 

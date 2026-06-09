@@ -1,9 +1,17 @@
+use burn::data::dataloader::DataLoader;
+use burn::module::Module;
 use burn::optim::AdamConfig;
 use burn::prelude::*;
+use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
-use miette::Result;
+use burn::train::metric::{AccuracyMetric, LossMetric};
+use burn::train::{Learner, SupervisedTraining};
+use chrono::NaiveDate;
+use miette::{IntoDiagnostic, Result};
+use std::sync::Arc;
 
-use crate::model::StockModelConfig;
+use crate::dataloader::{StockBatch, StockDataLoader};
+use crate::model::{StockModel, StockModelConfig};
 
 /// Top-level training configuration.
 #[derive(Config, Debug)]
@@ -14,40 +22,92 @@ pub struct TrainingConfig {
     pub learning_rate: f64,
     #[config(default = 10)]
     pub num_epochs: usize,
+    /// Window length fed to the GRU.
+    #[config(default = 30)]
+    pub steps: usize,
+    /// Tickers per batch, which is the batch size.
     #[config(default = 64)]
     pub batch_size: usize,
-    #[config(default = 4)]
-    pub num_workers: usize,
+    /// Random batches drawn per training epoch.
+    #[config(default = 200)]
+    pub epoch_size: usize,
     #[config(default = 42)]
     pub seed: u64,
 }
 
+/// First day of the validation split. Earlier rows train, this day onward validates.
+const SPLIT_DATE: (i32, u32, u32) = (2024, 6, 1);
+
 /// Run the full training loop.
 ///
-/// `data_path`    - path to the aggregated `stocks.parquet` file.
-/// `artifact_dir` - directory where checkpoints and config are saved.
+/// `data_path`    - aggregated `stocks.parquet` with the OHLCV history.
+/// `tickers_path` - `tickers.parquet` with the per-ticker industry metadata.
+/// `artifact_dir` - directory where checkpoints, config, and the final model land.
 ///
 /// # Errors
 ///
-/// Returns an error if the dataloader cannot be built.
+/// Returns an error if the data cannot be loaded or the artifacts cannot be saved.
 #[allow(clippy::needless_pass_by_value)]
 pub fn train<B: AutodiffBackend>(
     device: B::Device,
-    _data_path: &str,
+    data_path: &str,
+    tickers_path: &str,
     artifact_dir: &str,
-    config: TrainingConfig,
+    mut config: TrainingConfig,
 ) -> Result<()> {
-    std::fs::create_dir_all(artifact_dir).ok();
+    std::fs::create_dir_all(artifact_dir).into_diagnostic()?;
+
+    B::seed(&device, config.seed);
+
+    let (year, month, day) = SPLIT_DATE;
+    let cutoff = NaiveDate::from_ymd_opt(year, month, day).expect("split date is valid");
+
+    // Load once on the inner backend, then lift the train split up to the
+    // autodiff backend. Validation stays on the inner backend, as burn expects.
+    let base = StockDataLoader::<B::InnerBackend>::load(
+        data_path,
+        config.steps,
+        config.batch_size,
+        config.epoch_size,
+        Some(config.seed),
+        device.clone(),
+    )
+    .into_diagnostic()?
+    .attach_industries(tickers_path)
+    .into_diagnostic()?;
+
+    let (train_inner, valid) = base.train_valid_split(cutoff).into_diagnostic()?;
+    let train = train_inner.to_backend::<B>(device.clone());
+
+    // The industry encoding is only known once the data is loaded, so size the
+    // categorical branch from it before building the model and saving the config.
+    config.model.n_industries = train.n_industries();
     config
         .save(format!("{artifact_dir}/config.json"))
         .expect("config should be saved successfully");
 
-    B::seed(&device, config.seed);
+    let dataloader_train: Arc<dyn DataLoader<B, StockBatch<B>>> = Arc::new(train);
+    let dataloader_valid: Arc<dyn DataLoader<B::InnerBackend, StockBatch<B::InnerBackend>>> =
+        Arc::new(valid);
 
-    // TODO: build StockDataLoader for train/valid splits.
-    // TODO: call config.model.init::<B>(&device).
-    // TODO: configure SupervisedTraining with AccuracyMetric + LossMetric.
-    // TODO: launch Learner::new(model, config.optimizer.init(), config.learning_rate).
-    // TODO: save result.model to artifact_dir.
-    todo!("implement training loop")
+    let model = config.model.init::<B>(&device);
+    let optimizer = config.optimizer.init::<B, StockModel<B>>();
+    let learner = Learner::new(model, optimizer, config.learning_rate);
+
+    let result = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
+        .metric_train_numeric(AccuracyMetric::new())
+        .metric_valid_numeric(AccuracyMetric::new())
+        .metric_train_numeric(LossMetric::new())
+        .metric_valid_numeric(LossMetric::new())
+        .with_file_checkpointer(CompactRecorder::new())
+        .num_epochs(config.num_epochs)
+        .summary()
+        .launch(learner);
+
+    result
+        .model
+        .save_file(format!("{artifact_dir}/model"), &CompactRecorder::new())
+        .into_diagnostic()?;
+
+    Ok(())
 }
