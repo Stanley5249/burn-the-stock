@@ -1,33 +1,70 @@
 use crate::dataloader::StockBatch;
+use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::loss::CrossEntropyLossConfig;
+use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::ClassificationOutput;
 use burn::train::{InferenceStep, TrainOutput, TrainStep};
-use std::marker::PhantomData;
 
 pub const NUM_CLASSES: usize = 3;
 
-/// Burn model for stock action classification.
+/// OHLCV width of the technical input, matching the dataloader's feature column.
+const NUM_FEATURES: usize = 5;
+
+/// Multi-branch late-fusion classifier.
 ///
-/// Input:  technical `[batch, steps, 5]`, ticker `[batch, ticker_features]`
+/// A GRU summarizes the OHLCV window into its last hidden state, a linear layer
+/// embeds the industry one-hot, and the two branches are concatenated and run
+/// through a small MLP head that emits the action logits.
+///
+/// Input:  technical `[batch, steps, 5]`, ticker `[batch, n_industries]`
 /// Output: `[batch, NUM_CLASSES]` (logits)
 #[derive(Module, Debug)]
 pub struct StockModel<B: Backend> {
-    // TODO: define layers (linear, norm, activation, dropout, …)
-    phantom: PhantomData<B>,
+    gru: Gru<B>,
+    industry: Linear<B>,
+    fusion: Linear<B>,
+    head: Linear<B>,
+    activation: Gelu,
+    dropout: Dropout,
 }
 
 impl<B: Backend> StockModel<B> {
-    pub fn new(_config: &StockModelConfig, _device: &B::Device) -> Self {
-        todo!("initialize layers")
+    pub fn new(config: &StockModelConfig, device: &B::Device) -> Self {
+        let gru = GruConfig::new(NUM_FEATURES, config.d_hidden, true).init(device);
+        let industry = LinearConfig::new(config.n_industries, config.d_industry).init(device);
+        let fusion =
+            LinearConfig::new(config.d_hidden + config.d_industry, config.d_fusion).init(device);
+        let head = LinearConfig::new(config.d_fusion, NUM_CLASSES).init(device);
+
+        Self {
+            gru,
+            industry,
+            fusion,
+            head,
+            activation: Gelu::new(),
+            dropout: DropoutConfig::new(config.dropout).init(),
+        }
     }
 
     /// Returns logits with shape `[batch, NUM_CLASSES]`.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn forward(&self, technical: Tensor<B, 3>, ticker: Tensor<B, 2>) -> Tensor<B, 2> {
-        let _ = (technical, ticker);
-        todo!("forward pass")
+        let temporal = self.gru.forward(technical, None);
+
+        // Summarize the window by its last hidden state: [batch, d_hidden].
+        let [batch, sequence, d_hidden] = temporal.dims();
+        let summary = temporal
+            .slice([0..batch, sequence - 1..sequence, 0..d_hidden])
+            .reshape([batch, d_hidden]);
+
+        let categorical = self.industry.forward(ticker);
+
+        let fused = Tensor::cat(vec![summary, categorical], 1);
+        let hidden = self.activation.forward(self.fusion.forward(fused));
+        let hidden = self.dropout.forward(hidden);
+
+        self.head.forward(hidden)
     }
 
     fn forward_classification(&self, batch: &StockBatch<B>) -> ClassificationOutput<B> {
@@ -61,11 +98,44 @@ impl<B: Backend> InferenceStep for StockModel<B> {
 /// Hyperparameters for `StockModel`.
 #[derive(Config, Debug)]
 pub struct StockModelConfig {
-    // TODO: add hidden size, dropout, num layers, …
+    /// One-hot width of the industry feature, set from the dataloader.
+    pub n_industries: usize,
+    /// GRU hidden size, the temporal branch summary width.
+    #[config(default = 64)]
+    pub d_hidden: usize,
+    /// Output width of the industry branch.
+    #[config(default = 16)]
+    pub d_industry: usize,
+    /// Hidden width of the fusion head.
+    #[config(default = 32)]
+    pub d_fusion: usize,
+    /// Dropout probability applied in the fusion head.
+    #[config(default = 0.2)]
+    pub dropout: f64,
 }
 
 impl StockModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> StockModel<B> {
         StockModel::new(self, device)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::backend::flex::{Flex, FlexDevice};
+
+    #[test]
+    fn forward_outputs_logits() {
+        let device = FlexDevice;
+        let config = StockModelConfig::new(7);
+        let model = config.init::<Flex>(&device);
+
+        let technical = Tensor::<Flex, 3>::zeros([2, 8, NUM_FEATURES], &device);
+        let ticker = Tensor::<Flex, 2>::zeros([2, 7], &device);
+
+        let logits = model.forward(technical, ticker);
+
+        assert_eq!(logits.dims(), [2, NUM_CLASSES]);
     }
 }
