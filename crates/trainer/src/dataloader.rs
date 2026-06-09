@@ -24,8 +24,49 @@ const VOLUME: PlSmallStr = PlSmallStr::from_static("volume");
 
 const FEATURE_NAMES: [PlSmallStr; 5] = [OPEN, HIGH, LOW, CLOSE, VOLUME];
 
+/// Offsets into a flattened OHLCV row. OHLC occupy the first four slots, so the
+/// close sits at index 3 and volume, the lone non-price feature, sits last.
+const CLOSE_OFFSET: usize = 3;
+const VOLUME_OFFSET: usize = 4;
+
 const fn col(name: PlSmallStr) -> Expr {
     Expr::Column(name)
+}
+
+/// Normalize one flattened `[steps * 5]` OHLCV window in place.
+///
+/// A GRU should learn the shape of a window, not the price level it happens to
+/// sit at, so OHLC are divided by the window's last close and land near 1.0.
+/// Volume lives on a wildly different scale, so it is `log1p` compressed and
+/// then z-scored within the window to match the price ratios.
+#[allow(clippy::cast_precision_loss)] // `steps` is a small window length
+fn normalize_window(window: &mut [f32], steps: usize) {
+    let stride = FEATURE_NAMES.len();
+
+    let last_close = window[(steps - 1) * stride + CLOSE_OFFSET];
+
+    for row in window.chunks_mut(stride) {
+        if last_close != 0.0 {
+            for price in &mut row[..VOLUME_OFFSET] {
+                *price /= last_close;
+            }
+        }
+        row[VOLUME_OFFSET] = row[VOLUME_OFFSET].max(0.0).ln_1p();
+    }
+
+    let volumes = || window.iter().skip(VOLUME_OFFSET).step_by(stride);
+
+    let mean = volumes().sum::<f32>() / steps as f32;
+    let variance = volumes().map(|v| (v - mean).powi(2)).sum::<f32>() / steps as f32;
+    let std = variance.sqrt();
+
+    for row in window.chunks_mut(stride) {
+        row[VOLUME_OFFSET] = if std > f32::EPSILON {
+            (row[VOLUME_OFFSET] - mean) / std
+        } else {
+            0.0
+        };
+    }
 }
 
 pub struct StockBatch<B: Backend> {
@@ -211,7 +252,16 @@ impl<B: Backend> StockDataLoader<B> {
 
             let features = window.column(&FEATURE)?;
 
-            technical_data.extend(features.array()?.get_inner().f32()?.into_no_null_iter());
+            let mut flat: Vec<f32> = features
+                .array()?
+                .get_inner()
+                .f32()?
+                .into_no_null_iter()
+                .collect();
+
+            normalize_window(&mut flat, self.steps);
+
+            technical_data.extend(flat);
 
             let label = window.column(&LABEL)?.u8()?.last().unwrap();
 
@@ -369,6 +419,28 @@ mod tests {
             device: FlexDevice,
             index_range: 0..epoch_size,
         }
+    }
+
+    #[test]
+    fn normalize_window_scales_price_and_volume() {
+        // Three rows of (open, high, low, close, volume), last close is 16.
+        let mut window = vec![
+            10.0, 11.0, 9.0, 10.0, 100.0, //
+            12.0, 13.0, 11.0, 12.0, 200.0, //
+            14.0, 15.0, 13.0, 16.0, 300.0, //
+        ];
+
+        normalize_window(&mut window, 3);
+
+        // OHLC are divided by the window's last close, so it lands exactly on 1.
+        assert!((window[2 * 5 + CLOSE_OFFSET] - 1.0).abs() < 1e-6);
+        assert!((window[3] - 10.0 / 16.0).abs() < 1e-6);
+
+        // Volume is z-scored, so it has near-zero mean and stays monotonic.
+        let volumes = [window[4], window[9], window[14]];
+        let mean = volumes.iter().sum::<f32>() / 3.0;
+        assert!(mean.abs() < 1e-6);
+        assert!(volumes[0] < volumes[1] && volumes[1] < volumes[2]);
     }
 
     #[test]
