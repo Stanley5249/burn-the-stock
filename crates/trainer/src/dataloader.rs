@@ -89,6 +89,17 @@ pub struct StockBatch<B: Backend> {
 /// Each batch draws `n_tickers` tickers and an independent random window per
 /// ticker, so samples are not date-aligned across the batch. That is fine for
 /// the per-sample classification this model does.
+/// How a loader picks the windows that make up each batch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sampling {
+    /// Random tickers and random windows per batch, reseeded by batch index.
+    /// Used for training, where stochastic coverage is what we want.
+    Random,
+    /// Deterministic sweep over every window of every ticker, in order. Used
+    /// for validation, so metrics are stable from one epoch to the next.
+    Sequential,
+}
+
 #[derive(Clone)]
 struct StockDataLoader<B: Backend> {
     frames: Vec<(PlSmallStr, DataFrame)>,
@@ -97,6 +108,11 @@ struct StockDataLoader<B: Backend> {
     seed: Option<u64>,
     device: B::Device,
     index_range: Range<usize>,
+    sampling: Sampling,
+    /// Every `(ticker_index, window_start)` pair, only populated in
+    /// [`Sampling::Sequential`]. Shared behind an `Arc` so cloning a loader for
+    /// `slice`/`to_device` stays cheap.
+    windows: Arc<Vec<(usize, i64)>>,
 }
 
 impl<B: Backend> StockDataLoader<B> {
@@ -174,6 +190,8 @@ impl<B: Backend> StockDataLoader<B> {
             seed,
             device,
             index_range: 0..epoch_size,
+            sampling: Sampling::Random,
+            windows: Arc::new(Vec::new()),
         })
     }
 
@@ -209,7 +227,7 @@ impl<B: Backend> StockDataLoader<B> {
         );
 
         let train = self.with_frames(train_frames);
-        let valid = self.with_frames(valid_frames);
+        let valid = self.with_frames(valid_frames).into_sequential();
 
         Ok((train, valid))
     }
@@ -221,15 +239,47 @@ impl<B: Backend> StockDataLoader<B> {
         }
     }
 
+    /// Switch the loader to a deterministic full sweep. Enumerates every
+    /// `steps`-length window of every ticker and sizes the epoch to cover them
+    /// all in batches of `n_tickers`, so the final batch may be short.
+    fn into_sequential(mut self) -> Self {
+        let mut windows = Vec::new();
+
+        for (ticker_index, (_, frame)) in self.frames.iter().enumerate() {
+            let last_start = i64::try_from(frame.height() - self.steps).unwrap();
+            for start in 0..=last_start {
+                windows.push((ticker_index, start));
+            }
+        }
+
+        let batches = windows.len().div_ceil(self.n_tickers);
+
+        self.sampling = Sampling::Sequential;
+        self.windows = Arc::new(windows);
+        self.index_range = 0..batches;
+        self
+    }
+
     fn epoch_size(&self) -> usize {
         self.index_range.end - self.index_range.start
     }
 
-    /// Assemble one [`StockBatch`] from `n_tickers` random tickers, each over
-    /// its own random `steps`-length window. The whole batch is a pure function
-    /// of `seed + index`, so iterating the same index range twice yields the
-    /// same data.
+    /// Assemble one [`StockBatch`] for batch `index`. The windows come from the
+    /// active [`Sampling`] mode, then share the same extraction and tensor
+    /// packing.
     fn batch(&self, index: usize) -> PolarsResult<StockBatch<B>> {
+        let selection = match self.sampling {
+            Sampling::Random => self.random_selection(index),
+            Sampling::Sequential => self.sequential_selection(index),
+        };
+
+        self.assemble(&selection)
+    }
+
+    /// Pick `n_tickers` random tickers, each over its own random window. The
+    /// choice is a pure function of `seed + index`, so the same index yields the
+    /// same windows.
+    fn random_selection(&self, index: usize) -> Vec<(usize, i64)> {
         let mut rng = match self.seed {
             Some(seed) => Rng::with_seed(seed.wrapping_add(u64::try_from(index).unwrap())),
             None => Rng::new(),
@@ -238,17 +288,35 @@ impl<B: Backend> StockDataLoader<B> {
         let count = self.n_tickers.min(self.frames.len());
         let chosen = rng.choose_multiple(0..self.frames.len(), count);
 
+        chosen
+            .into_iter()
+            .map(|ticker_index| {
+                let height = self.frames[ticker_index].1.height();
+                let end = i64::try_from(height - self.steps).unwrap();
+                (ticker_index, rng.i64(0..=end))
+            })
+            .collect()
+    }
+
+    /// Take the `index`-th contiguous slice of `n_tickers` windows from the
+    /// precomputed sweep. The last batch may be short.
+    fn sequential_selection(&self, index: usize) -> Vec<(usize, i64)> {
+        let start = index * self.n_tickers;
+        let end = (start + self.n_tickers).min(self.windows.len());
+
+        self.windows[start..end].to_vec()
+    }
+
+    /// Slice each chosen window, normalize it, and pack the batch into tensors.
+    fn assemble(&self, selection: &[(usize, i64)]) -> PolarsResult<StockBatch<B>> {
+        let count = selection.len();
+
         let mut technical_data = Vec::with_capacity(count * self.steps * FEATURE_NAMES.len());
 
         let mut label_data = Vec::with_capacity(count);
 
-        for &ticker_index in &chosen {
-            let dataframe = &self.frames[ticker_index].1;
-
-            let end = i64::try_from(dataframe.height() - self.steps).unwrap();
-            let start = rng.i64(0..=end);
-
-            let window = dataframe.slice(start, self.steps);
+        for &(ticker_index, start) in selection {
+            let window = self.frames[ticker_index].1.slice(start, self.steps);
 
             let features = window.column(&FEATURE)?;
 
@@ -418,6 +486,8 @@ mod tests {
             seed,
             device: FlexDevice,
             index_range: 0..epoch_size,
+            sampling: Sampling::Random,
+            windows: Arc::new(Vec::new()),
         }
     }
 
@@ -461,6 +531,23 @@ mod tests {
             .label
             .to_data()
             .assert_eq(&again.label.to_data(), true);
+    }
+
+    #[test]
+    fn sequential_sweeps_every_window_once() {
+        // 3 tickers of 20 rows, window of 4, two windows per batch.
+        let loader = make_loader(3, 20, 4, 2, None, 8).into_sequential();
+
+        // Each ticker yields 20 - 4 + 1 = 17 windows, so 51 across 26 batches.
+        let windows_per_ticker = 20 - 4 + 1;
+        let total_windows: usize = windows_per_ticker * 3;
+        assert_eq!(loader.num_items(), total_windows.div_ceil(2));
+
+        let swept: usize = (0..loader.epoch_size())
+            .map(|index| loader.batch(index).unwrap().label.dims()[0])
+            .sum();
+
+        assert_eq!(swept, total_windows);
     }
 
     #[test]
