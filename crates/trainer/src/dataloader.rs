@@ -4,6 +4,7 @@ use burn::prelude::*;
 use chrono::NaiveDate;
 use fastrand::Rng;
 use polars::prelude::*;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ const TICKER: PlSmallStr = PlSmallStr::from_static("ticker");
 const DATE: PlSmallStr = PlSmallStr::from_static("date");
 const FEATURE: PlSmallStr = PlSmallStr::from_static("feature");
 const LABEL: PlSmallStr = PlSmallStr::from_static("label");
+const INDUSTRY: PlSmallStr = PlSmallStr::from_static("industry");
 
 const OPEN: PlSmallStr = PlSmallStr::from_static("open");
 const HIGH: PlSmallStr = PlSmallStr::from_static("high");
@@ -69,6 +71,35 @@ fn normalize_window(window: &mut [f32], steps: usize) {
     }
 }
 
+/// Build the `ticker name -> industry index` map from a frame with `ticker`
+/// and `industry` string columns. Distinct industries are indexed in sorted
+/// order for a stable encoding, and the returned width includes one extra
+/// bucket for tickers with an unknown industry.
+fn index_industries(frame: &DataFrame) -> PolarsResult<(HashMap<PlSmallStr, usize>, usize)> {
+    let names = frame.column(&TICKER)?.str()?;
+    let industries = frame.column(&INDUSTRY)?.str()?;
+
+    let mut distinct: Vec<&str> = industries.into_iter().flatten().collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+
+    let index_of: HashMap<&str, usize> = distinct
+        .iter()
+        .enumerate()
+        .map(|(index, industry)| (*industry, index))
+        .collect();
+
+    let mut codes = HashMap::new();
+    for (name, industry) in names.into_iter().zip(industries) {
+        if let (Some(name), Some(industry)) = (name, industry) {
+            codes.insert(name.into(), index_of[industry]);
+        }
+    }
+
+    // The trailing bucket catches tickers whose industry is null or missing.
+    Ok((codes, distinct.len() + 1))
+}
+
 pub struct StockBatch<B: Backend> {
     /// Shape `[batch_size, steps, ohlcv_features]`.
     pub technical: Tensor<B, 3>,
@@ -76,6 +107,17 @@ pub struct StockBatch<B: Backend> {
     pub ticker: Tensor<B, 2>,
     /// Shape `[batch_size]` — class index 0/1/2.
     pub label: Tensor<B, 1, Int>,
+}
+
+/// How a loader picks the windows that make up each batch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sampling {
+    /// Random tickers and random windows per batch, reseeded by batch index.
+    /// Used for training, where stochastic coverage is what we want.
+    Random,
+    /// Deterministic sweep over every window of every ticker, in order. Used
+    /// for validation, so metrics are stable from one epoch to the next.
+    Sequential,
 }
 
 /// Per-ticker dataloader.
@@ -89,17 +131,6 @@ pub struct StockBatch<B: Backend> {
 /// Each batch draws `n_tickers` tickers and an independent random window per
 /// ticker, so samples are not date-aligned across the batch. That is fine for
 /// the per-sample classification this model does.
-/// How a loader picks the windows that make up each batch.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Sampling {
-    /// Random tickers and random windows per batch, reseeded by batch index.
-    /// Used for training, where stochastic coverage is what we want.
-    Random,
-    /// Deterministic sweep over every window of every ticker, in order. Used
-    /// for validation, so metrics are stable from one epoch to the next.
-    Sequential,
-}
-
 #[derive(Clone)]
 struct StockDataLoader<B: Backend> {
     frames: Vec<(PlSmallStr, DataFrame)>,
@@ -113,6 +144,14 @@ struct StockDataLoader<B: Backend> {
     /// [`Sampling::Sequential`]. Shared behind an `Arc` so cloning a loader for
     /// `slice`/`to_device` stays cheap.
     windows: Arc<Vec<(usize, i64)>>,
+    /// Maps a ticker name (`market_code`) to its industry index. Empty until
+    /// [`Self::attach_industries`] runs, in which case [`Self::assemble`] leaves
+    /// the `ticker` tensor width-0.
+    industry_codes: Arc<HashMap<PlSmallStr, usize>>,
+    /// One-hot width for the industry feature: distinct industries plus a final
+    /// bucket for tickers with no known industry. Zero means no categorical
+    /// feature is attached.
+    n_industries: usize,
 }
 
 impl<B: Backend> StockDataLoader<B> {
@@ -192,7 +231,32 @@ impl<B: Backend> StockDataLoader<B> {
             index_range: 0..epoch_size,
             sampling: Sampling::Random,
             windows: Arc::new(Vec::new()),
+            industry_codes: Arc::new(HashMap::new()),
+            n_industries: 0,
         })
+    }
+
+    /// Attach the industry categorical feature from a `tickers.parquet` written
+    /// by the `tickers` prefetch bin (columns `market`, `code`, `industry`).
+    ///
+    /// Distinct industries get stable indices in sorted order, and a final
+    /// bucket absorbs every ticker whose industry is null or absent from the
+    /// file. Must run before [`Self::train_valid_split`] so the mapping, which
+    /// is keyed by ticker name, propagates to both sides.
+    pub fn attach_industries(mut self, path: PlRefPath) -> PolarsResult<Self> {
+        let frame = LazyFrame::scan_parquet(path, ScanArgsParquet::default())?
+            .select([
+                concat_str([col(MARKET), col(CODE)], &SEP, false).alias(TICKER),
+                col(INDUSTRY).cast(DataType::String),
+            ])
+            .collect()?;
+
+        let (industry_codes, n_industries) = index_industries(&frame)?;
+
+        self.industry_codes = Arc::new(industry_codes);
+        self.n_industries = n_industries;
+
+        Ok(self)
     }
 
     /// Split every ticker frame at `cutoff` into an earlier train loader and a
@@ -343,14 +407,40 @@ impl<B: Backend> StockDataLoader<B> {
 
         let label = Tensor::from_data(TensorData::new(label_data, [count]), &self.device);
 
-        // TODO: No ticker-level features yet; placeholder empty second dimension.
-        let ticker: Tensor<B, 2> = Tensor::zeros([count, 0], &self.device);
+        let ticker = self.one_hot_industries(selection);
 
         Ok(StockBatch {
             technical,
             ticker,
             label,
         })
+    }
+
+    /// One-hot encode the industry of each selected ticker into a
+    /// `[count, n_industries]` tensor. With no industries attached this stays a
+    /// width-0 placeholder. Tickers absent from the map fall into the trailing
+    /// unknown bucket.
+    fn one_hot_industries(&self, selection: &[(usize, i64)]) -> Tensor<B, 2> {
+        let count = selection.len();
+
+        if self.n_industries == 0 {
+            return Tensor::zeros([count, 0], &self.device);
+        }
+
+        let unknown = self.n_industries - 1;
+
+        let mut data = vec![0.0f32; count * self.n_industries];
+
+        for (row, &(ticker_index, _)) in selection.iter().enumerate() {
+            let name = &self.frames[ticker_index].0;
+            let industry = self.industry_codes.get(name).copied().unwrap_or(unknown);
+            data[row * self.n_industries + industry] = 1.0;
+        }
+
+        Tensor::from_data(
+            TensorData::new(data, [count, self.n_industries]),
+            &self.device,
+        )
     }
 }
 
@@ -488,6 +578,8 @@ mod tests {
             index_range: 0..epoch_size,
             sampling: Sampling::Random,
             windows: Arc::new(Vec::new()),
+            industry_codes: Arc::new(HashMap::new()),
+            n_industries: 0,
         }
     }
 
@@ -511,6 +603,49 @@ mod tests {
         let mean = volumes.iter().sum::<f32>() / 3.0;
         assert!(mean.abs() < 1e-6);
         assert!(volumes[0] < volumes[1] && volumes[1] < volumes[2]);
+    }
+
+    #[test]
+    fn index_industries_encodes_and_buckets_unknown() {
+        let frame = df!(
+            "ticker" => ["tse_2330", "otc_1240", "tse_2317", "tse_9999"],
+            "industry" => [Some("24"), Some("16"), Some("24"), None],
+        )
+        .unwrap();
+
+        let (codes, n_industries) = index_industries(&frame).unwrap();
+
+        // Two distinct industries ("16", "24") plus the unknown bucket.
+        assert_eq!(n_industries, 3);
+        // Sorted order: "16" -> 0, "24" -> 1.
+        assert_eq!(codes[&PlSmallStr::from_static("otc_1240")], 0);
+        assert_eq!(codes[&PlSmallStr::from_static("tse_2330")], 1);
+        assert_eq!(codes[&PlSmallStr::from_static("tse_2317")], 1);
+        // The null-industry ticker is left out of the map entirely.
+        assert!(!codes.contains_key(&PlSmallStr::from_static("tse_9999")));
+    }
+
+    #[test]
+    fn industry_feature_is_one_hot() {
+        let mut loader = make_loader(3, 20, 4, 3, Some(7), 4);
+
+        // make_loader names tickers t0, t1, t2; leave t2 to the unknown bucket.
+        let codes = HashMap::from([
+            (PlSmallStr::from_static("t0"), 0),
+            (PlSmallStr::from_static("t1"), 1),
+        ]);
+        loader.industry_codes = Arc::new(codes);
+        loader.n_industries = 3;
+
+        let batch = loader.batch(0).unwrap();
+
+        assert_eq!(batch.ticker.dims(), [3, 3]);
+
+        // Every row is one-hot, so each row sums to exactly one.
+        let row_sums = batch.ticker.sum_dim(1).into_data();
+        for value in row_sums.to_vec::<f32>().unwrap() {
+            assert!((value - 1.0).abs() < 1e-6);
+        }
     }
 
     #[test]
