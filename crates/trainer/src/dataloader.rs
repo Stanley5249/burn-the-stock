@@ -357,6 +357,26 @@ impl<B: Backend> StockDataLoader<B> {
         self.n_industries
     }
 
+    /// The latest date across every frame, used to anchor a recent-window
+    /// train/valid split. `None` only when no frame has a dated row.
+    pub fn max_date(&self) -> Option<NaiveDate> {
+        self.frames
+            .iter()
+            .filter_map(|(_, frame)| {
+                // Frames are sorted ascending by date, so the last row is the
+                // latest. `as_date_iter` yields `NaiveDate` with no manual cast.
+                frame
+                    .column(&DATE)
+                    .ok()?
+                    .date()
+                    .ok()?
+                    .as_date_iter()
+                    .last()
+                    .flatten()
+            })
+            .max()
+    }
+
     /// Rebuild the loader on a different backend. The frames are backend-free,
     /// so this only swaps the device and tensor type. Used to lift the train
     /// split onto the autodiff backend while validation stays on the inner one.

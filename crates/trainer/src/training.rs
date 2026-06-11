@@ -6,7 +6,6 @@ use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::{AccuracyMetric, LossMetric};
 use burn::train::{Learner, SupervisedTraining};
-use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 use std::sync::Arc;
 
@@ -37,17 +36,28 @@ pub struct TrainingConfig {
     pub seed: u64,
 }
 
-/// First day of the validation split. Earlier rows train, this day onward validates.
-const SPLIT_DATE: (i32, u32, u32) = (2024, 6, 1);
+/// Runtime knobs that shape one run without touching the model or optimizer
+/// config, kept separate so a baseline run and a diagnostic run differ only
+/// here.
+#[derive(Debug, Clone, Copy)]
+pub struct RunOptions {
+    /// Fixed-seed validation subsample size in batches; `None` sweeps every
+    /// window.
+    pub valid_batches: Option<usize>,
+    /// Random ticker-subset cap for overfit diagnostics; `None` uses every
+    /// ticker.
+    pub max_tickers: Option<usize>,
+    /// Length in days of the recent window that validates; everything before it
+    /// trains.
+    pub valid_days: i64,
+}
 
 /// Run the full training loop.
 ///
 /// `data_path`    - aggregated `stocks.parquet` with the OHLCV history.
 /// `tickers_path` - `tickers.parquet` with the per-ticker industry metadata.
 /// `artifact_dir` - directory where checkpoints, config, and the final model land.
-/// `valid_batches` - optional cap on the validation sweep, for quick smoke runs.
-/// `max_tickers` - optional cap on the ticker universe, drawn at random by the
-///   seed, for overfit diagnostics on a small subset.
+/// `options`      - runtime knobs, see [`RunOptions`].
 ///
 /// # Errors
 ///
@@ -59,15 +69,17 @@ pub fn train<B: AutodiffBackend>(
     tickers_path: &str,
     artifact_dir: &str,
     mut config: TrainingConfig,
-    valid_batches: Option<usize>,
-    max_tickers: Option<usize>,
+    options: RunOptions,
 ) -> Result<()> {
+    let RunOptions {
+        valid_batches,
+        max_tickers,
+        valid_days,
+    } = options;
+
     std::fs::create_dir_all(artifact_dir).into_diagnostic()?;
 
     B::seed(&device, config.seed);
-
-    let (year, month, day) = SPLIT_DATE;
-    let cutoff = NaiveDate::from_ymd_opt(year, month, day).expect("split date is valid");
 
     // Load once on the inner backend, then lift the train split up to the
     // autodiff backend. Validation stays on the inner backend, as burn expects.
@@ -89,6 +101,14 @@ pub fn train<B: AutodiffBackend>(
         Some(count) => base.sample_tickers(count, config.seed),
         None => base,
     };
+
+    // Anchor the split to the most recent date in the data so the last
+    // `valid_days` validate and everything earlier trains. One global cutoff
+    // keeps the split aligned across tickers.
+    let max_date = base
+        .max_date()
+        .expect("loaded data should have at least one dated row");
+    let cutoff = max_date - chrono::Duration::days(valid_days);
 
     let (train_inner, valid) = base.train_valid_split(cutoff).into_diagnostic()?;
 

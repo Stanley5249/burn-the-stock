@@ -12,7 +12,7 @@ use clap::Parser;
 use miette::Result;
 
 use crate::model::StockModelConfig;
-use crate::training::{TrainingConfig, train};
+use crate::training::{RunOptions, TrainingConfig, train};
 
 #[derive(Parser, Debug)]
 #[command(about = "Train the stock action classifier")]
@@ -52,6 +52,11 @@ struct Args {
     #[arg(long)]
     valid_batches: Option<usize>,
 
+    /// Length in days of the recent window used for validation. Everything
+    /// before it trains, so a smaller value leaves more data for training.
+    #[arg(long, default_value_t = 180)]
+    valid_days: i64,
+
     /// Keep only this many tickers, drawn at random by the seed. For overfit
     /// diagnostics on a small subset; omit to train on every ticker.
     #[arg(long)]
@@ -81,13 +86,18 @@ fn main() -> Result<()> {
         .with_steps(args.steps)
         .with_learning_rate(args.learning_rate);
 
+    let options = RunOptions {
+        valid_batches: args.valid_batches,
+        max_tickers: args.max_tickers,
+        valid_days: args.valid_days,
+    };
+
     train::<Backend>(
         device,
         &args.data,
         &args.tickers,
         &args.artifact_dir,
         config,
-        args.valid_batches,
-        args.max_tickers,
+        options,
     )
 }
