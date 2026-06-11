@@ -1,6 +1,6 @@
 use crate::dataloader::StockBatch;
 use burn::nn::gru::{Gru, GruConfig};
-use burn::nn::loss::CrossEntropyLossConfig;
+use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::backend::AutodiffBackend;
@@ -8,6 +8,9 @@ use burn::train::ClassificationOutput;
 use burn::train::{InferenceStep, TrainOutput, TrainStep};
 
 pub const NUM_CLASSES: usize = 3;
+
+/// Sell, Hold, Buy
+pub const CLASS_WEIGHTS: [f32; NUM_CLASSES] = [2.0, 1.0, 2.0];
 
 /// OHLCV width of the technical input, matching the dataloader's feature column.
 const NUM_FEATURES: usize = 5;
@@ -28,15 +31,23 @@ pub struct StockModel<B: Backend> {
     head: Linear<B>,
     activation: Gelu,
     dropout: Dropout,
+    loss: CrossEntropyLoss<B>,
 }
 
 impl<B: Backend> StockModel<B> {
     pub fn new(config: &StockModelConfig, device: &B::Device) -> Self {
         let gru = GruConfig::new(NUM_FEATURES, config.d_hidden, true).init(device);
+
         let industry = LinearConfig::new(config.n_industries, config.d_industry).init(device);
+
         let fusion =
             LinearConfig::new(config.d_hidden + config.d_industry, config.d_fusion).init(device);
+
         let head = LinearConfig::new(config.d_fusion, NUM_CLASSES).init(device);
+
+        let loss = CrossEntropyLossConfig::new()
+            .with_weights(Some(CLASS_WEIGHTS.to_vec()))
+            .init(device);
 
         Self {
             gru,
@@ -45,6 +56,7 @@ impl<B: Backend> StockModel<B> {
             head,
             activation: Gelu::new(),
             dropout: DropoutConfig::new(config.dropout).init(),
+            loss,
         }
     }
 
@@ -54,6 +66,7 @@ impl<B: Backend> StockModel<B> {
 
         // Summarize the window by its last hidden state: [batch, d_hidden].
         let [batch, sequence, d_hidden] = temporal.dims();
+
         let summary = temporal
             .slice([0..batch, sequence - 1..sequence, 0..d_hidden])
             .reshape([batch, d_hidden]);
@@ -69,9 +82,9 @@ impl<B: Backend> StockModel<B> {
 
     fn forward_classification(&self, batch: &StockBatch<B>) -> ClassificationOutput<B> {
         let logits = self.forward(batch.technical.clone(), batch.ticker.clone());
-        let loss = CrossEntropyLossConfig::new()
-            .init(&logits.device())
-            .forward(logits.clone(), batch.label.clone());
+
+        let loss = self.loss.forward(logits.clone(), batch.label.clone());
+
         ClassificationOutput::new(loss, logits, batch.label.clone())
     }
 }
