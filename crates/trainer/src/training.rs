@@ -24,6 +24,10 @@ pub struct TrainingConfig {
     pub optimizer: AdamWConfig,
     #[config(default = 1.0e-3)]
     pub learning_rate: f64,
+    /// Swing-reversal magnitude for the oracle labels, as a fraction of price.
+    /// Mirrors [`crate::label::LABEL_THRESHOLD`].
+    #[config(default = 0.03)]
+    pub label_threshold: f32,
     /// Number of full passes over the training data. With a fixed `epoch_size`
     /// this sets how many epochs run: `passes * windows / epoch_size`.
     #[config(default = 1)]
@@ -94,7 +98,7 @@ pub fn train<B: AutodiffBackend>(
     // Load the backend-free store once. The store carries the train/valid split
     // and tensors are produced later by two batchers, so there is no per-backend
     // copy of the data.
-    let store = TickerStore::load(data_path)
+    let store = TickerStore::load(data_path, config.label_threshold)
         .into_diagnostic()?
         .attach_industries(tickers_path)
         .into_diagnostic()?;

@@ -69,6 +69,10 @@ struct Args {
     #[arg(long)]
     learning_rate: Option<f64>,
 
+    /// Swing-reversal magnitude for the oracle labels, as a fraction of price.
+    #[arg(long)]
+    label_threshold: Option<f32>,
+
     /// L2 weight decay for the optimizer.
     #[arg(long)]
     weight_decay: Option<f32>,
@@ -128,6 +132,9 @@ fn main() -> Result<()> {
     }
     if let Some(learning_rate) = args.learning_rate {
         training_config = training_config.with_learning_rate(learning_rate);
+    }
+    if let Some(label_threshold) = args.label_threshold {
+        training_config = training_config.with_label_threshold(label_threshold);
     }
 
     let options = RunOptions {

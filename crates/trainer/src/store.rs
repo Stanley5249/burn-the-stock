@@ -1,4 +1,4 @@
-use crate::label::{LABEL_THRESHOLD, compute_labels};
+use crate::label::compute_labels_rewards;
 use chrono::NaiveDate;
 use fastrand::Rng;
 use polars::prelude::*;
@@ -8,7 +8,6 @@ const CODE: PlSmallStr = PlSmallStr::from_static("code");
 const TICKER: PlSmallStr = PlSmallStr::from_static("ticker");
 const DATE: PlSmallStr = PlSmallStr::from_static("date");
 const FEATURE: PlSmallStr = PlSmallStr::from_static("feature");
-const LABEL: PlSmallStr = PlSmallStr::from_static("label");
 const INDUSTRY: PlSmallStr = PlSmallStr::from_static("industry");
 
 const OPEN: PlSmallStr = PlSmallStr::from_static("open");
@@ -109,6 +108,8 @@ struct Ticker {
     features: Vec<f32>,
     /// One action label per row.
     labels: Vec<u8>,
+    /// Signed forward return to the next swing extreme, one per row.
+    rewards: Vec<f32>,
 }
 
 impl Ticker {
@@ -122,18 +123,21 @@ impl Ticker {
         let (dates_left, dates_right) = self.dates.split_at(at);
         let (features_left, features_right) = self.features.split_at(at * FEATURE_NAMES.len());
         let (labels_left, labels_right) = self.labels.split_at(at);
+        let (rewards_left, rewards_right) = self.rewards.split_at(at);
 
         let left = Ticker {
             name: self.name.clone(),
             dates: dates_left.to_vec(),
             features: features_left.to_vec(),
             labels: labels_left.to_vec(),
+            rewards: rewards_left.to_vec(),
         };
         let right = Ticker {
             name: self.name.clone(),
             dates: dates_right.to_vec(),
             features: features_right.to_vec(),
             labels: labels_right.to_vec(),
+            rewards: rewards_right.to_vec(),
         };
 
         (left, right)
@@ -161,8 +165,14 @@ impl TickerStore {
     ///
     /// The final label-less row of each ticker is dropped so every kept row has
     /// a forward window for its label. Tickers too short to yield a single
-    /// window are kept but simply produce no windows later.
-    pub fn load(path: &str) -> PolarsResult<Self> {
+    /// window are kept but simply produce no windows later. `threshold` sets the
+    /// swing-reversal magnitude passed to [`compute_labels_rewards`].
+    ///
+    /// Rows with a non-positive close are dropped as corrupt. yfinance back
+    /// adjustment can drive a delisted ticker's whole history negative, which
+    /// would otherwise poison the per-window normalization that divides by the
+    /// last close and the swing labels that compare prices.
+    pub fn load(path: &str, threshold: f32) -> PolarsResult<Self> {
         let feature_expr = concat_arr(
             FEATURE_NAMES
                 .map(|name| col(name).cast(DataType::Float32))
@@ -171,6 +181,7 @@ impl TickerStore {
         .unwrap();
 
         let long = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())?
+            .filter(col(CLOSE).gt(lit(0.0)))
             .select([
                 col(CODE).cast(DataType::String).alias(TICKER),
                 col(DATE).cast(DataType::Date),
@@ -195,12 +206,10 @@ impl TickerStore {
 
             let name: PlSmallStr = group.column(&TICKER)?.str()?.get(0).unwrap().into();
 
-            // Labels come from the full close series but are one short, already
-            // aligned to the rows we keep after dropping the label-less last row.
-            let labels: Vec<u8> = compute_labels(group.column(&CLOSE)?, LABEL, LABEL_THRESHOLD)?
-                .u8()?
-                .into_no_null_iter()
-                .collect();
+            // Labels and rewards come from the full close series but are one short,
+            // already aligned to the rows we keep after dropping the label-less last
+            // row.
+            let (labels, rewards) = compute_labels_rewards(group.column(&CLOSE)?, threshold)?;
 
             let head = group.head(Some(height - 1));
 
@@ -226,6 +235,7 @@ impl TickerStore {
                 dates,
                 features,
                 labels,
+                rewards,
             });
         }
 
@@ -459,12 +469,14 @@ fn make_ticker(name: &str, base: f32, rows: i16) -> Ticker {
     }
 
     let labels = (0..rows).map(|i| u8::try_from(i % 3).unwrap()).collect();
+    let rewards = (0..rows).map(|i| f32::from(i) * 0.01).collect();
 
     Ticker {
         name: name.into(),
         dates,
         features,
         labels,
+        rewards,
     }
 }
 
