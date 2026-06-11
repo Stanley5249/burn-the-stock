@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
-mod dataloader;
+mod batcher;
+mod dataset;
 mod label;
 mod model;
+mod store;
 mod training;
 
 use burn::backend::wgpu::WgpuDevice;
@@ -29,12 +31,13 @@ struct Args {
     #[arg(long, default_value = "artifacts")]
     artifact_dir: String,
 
-    /// Training epochs.
+    /// Number of full passes over the training data. Validation runs every
+    /// epoch, so smaller epochs validate more often within a pass.
     #[arg(long)]
-    num_epochs: Option<usize>,
+    passes: Option<usize>,
 
-    /// Batches per training epoch. Omit for one full pass over every window;
-    /// set it to cap each epoch and make validation run more often.
+    /// Batches per training epoch, which sets the validation cadence. Each epoch
+    /// samples this many batches without replacement.
     #[arg(long)]
     epoch_size: Option<usize>,
 
@@ -111,11 +114,11 @@ fn main() -> Result<()> {
     }
 
     let mut training_config = TrainingConfig::new(model, optimizer_config);
-    if let Some(num_epochs) = args.num_epochs {
-        training_config = training_config.with_num_epochs(num_epochs);
+    if let Some(passes) = args.passes {
+        training_config = training_config.with_passes(passes);
     }
     if let Some(epoch_size) = args.epoch_size {
-        training_config = training_config.with_epoch_size(Some(epoch_size));
+        training_config = training_config.with_epoch_size(epoch_size);
     }
     if let Some(batch_size) = args.batch_size {
         training_config = training_config.with_batch_size(batch_size);

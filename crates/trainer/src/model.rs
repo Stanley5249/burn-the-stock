@@ -1,4 +1,4 @@
-use crate::dataloader::StockBatch;
+use crate::batcher::StockBatch;
 use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig, RmsNorm, RmsNormConfig};

@@ -1,4 +1,6 @@
-use burn::data::dataloader::DataLoader;
+use burn::data::dataloader::DataLoaderBuilder;
+use burn::data::dataset::Dataset;
+use burn::data::dataset::transform::{PartialDataset, SamplerDataset, SamplerDatasetOptions};
 use burn::module::Module;
 use burn::optim::AdamWConfig;
 use burn::prelude::*;
@@ -7,11 +9,13 @@ use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{AccuracyMetric, ClassReduction, FBetaScoreMetric, LossMetric};
 use burn::train::{Learner, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining};
-use miette::{IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, bail};
 use std::sync::Arc;
 
-use crate::dataloader::{StockBatch, StockDataLoader};
+use crate::batcher::StockBatcher;
+use crate::dataset::WindowDataset;
 use crate::model::{StockModel, StockModelConfig};
+use crate::store::TickerStore;
 
 /// Top-level training configuration.
 #[derive(Config, Debug)]
@@ -20,19 +24,21 @@ pub struct TrainingConfig {
     pub optimizer: AdamWConfig,
     #[config(default = 1.0e-3)]
     pub learning_rate: f64,
-    #[config(default = 10)]
-    pub num_epochs: usize,
+    /// Number of full passes over the training data. With a fixed `epoch_size`
+    /// this sets how many epochs run: `passes * windows / epoch_size`.
+    #[config(default = 1)]
+    pub passes: usize,
     /// Window length fed to the GRU.
     #[config(default = 20)]
     pub steps: usize,
     /// Tickers per batch, which is the batch size.
     #[config(default = 64)]
     pub batch_size: usize,
-    /// Batches per epoch. `None` is one full pass over every window; `Some(k)`
-    /// emits `k` reshuffled batches per epoch, which controls how often
-    /// validation runs since burn only validates between epochs.
-    #[config(default = "None")]
-    pub epoch_size: Option<usize>,
+    /// Batches per epoch, which sets the validation cadence. Each epoch samples
+    /// `epoch_size * batch_size` windows without replacement, so on a large
+    /// dataset validation runs long before a full pass completes.
+    #[config(default = 1000)]
+    pub epoch_size: usize,
     #[config(default = 42)]
     pub seed: u64,
 }
@@ -85,57 +91,89 @@ pub fn train<B: AutodiffBackend>(
 
     B::seed(device, config.seed);
 
-    // Load once on the inner backend, then lift the train split up to the
-    // autodiff backend. Validation stays on the inner backend, as burn expects.
-    let base = StockDataLoader::<B::InnerBackend>::load(
-        data_path,
-        config.steps,
-        config.batch_size,
-        config.epoch_size,
-        Some(config.seed),
-        device.clone(),
-    )
-    .into_diagnostic()?
-    .attach_industries(tickers_path)
-    .into_diagnostic()?;
+    // Load the backend-free store once. The store carries the train/valid split
+    // and tensors are produced later by two batchers, so there is no per-backend
+    // copy of the data.
+    let store = TickerStore::load(data_path)
+        .into_diagnostic()?
+        .attach_industries(tickers_path)
+        .into_diagnostic()?;
 
     // Trim to a random ticker subset before the split so both sides shrink
-    // together. Done after attach_industries, whose name-keyed map is unaffected.
-    let base = match max_tickers {
-        Some(count) => base.sample_tickers(count, config.seed),
-        None => base,
+    // together. Done after attach_industries, whose per-ticker encoding follows.
+    let store = match max_tickers {
+        Some(count) => store.sample_tickers(count, config.seed),
+        None => store,
     };
 
     // Anchor the split to the most recent date in the data so the last
     // `valid_days` validate and everything earlier trains. One global cutoff
     // keeps the split aligned across tickers.
-    let max_date = base
+    let max_date = store
         .max_date()
         .expect("loaded data should have at least one dated row");
     let cutoff = max_date - chrono::Duration::days(valid_days);
 
-    let (train_inner, valid) = base.train_valid_split(cutoff).into_diagnostic()?;
+    let (train_store, valid_store) = store
+        .train_valid_split(cutoff, config.steps)
+        .into_diagnostic()?;
+    let train_store = Arc::new(train_store);
+    let valid_store = Arc::new(valid_store);
 
-    let train = train_inner.to_backend::<B>(device.clone());
+    let n_industries = train_store.n_industries();
 
     // The industry encoding is only known once the data is loaded, so size the
     // categorical branch from it before building the model and saving the config.
-    config.model.n_industries = train.n_industries();
+    config.model.n_industries = n_industries;
     config
         .save(format!("{artifact_dir}/config.json"))
         .expect("config should be saved successfully");
 
-    let dataloader_train: Arc<dyn DataLoader<B, StockBatch<B>>> = Arc::new(train);
+    // Build the train pipeline. `SamplerDataset` caps each epoch to a fixed
+    // window budget independent of the pool size and walks a reshuffled
+    // permutation across the run, so `passes` full passes take
+    // `passes * windows / epoch_size` epochs.
+    let train_windows = WindowDataset::new(train_store, config.steps);
+    let total_windows = train_windows.len();
+    if total_windows == 0 {
+        bail!("no training windows; check steps and the train/valid split");
+    }
 
-    // A full validation sweep over every window dwarfs a training run, so when
-    // asked, replace it with a fixed-seed subsample: representative across all
-    // tickers and dates, and stable from one epoch to the next.
-    let valid = match valid_batches {
-        Some(n) => valid.into_subsample(Some(n), config.seed),
-        None => valid,
+    let epoch_items = (config.epoch_size * config.batch_size).min(total_windows);
+    let num_epochs = (config.passes * total_windows).div_ceil(epoch_items).max(1);
+
+    let train_sampler = SamplerDataset::new(
+        train_windows,
+        SamplerDatasetOptions::from(epoch_items)
+            .without_replacement()
+            .with_seed(config.seed),
+    );
+
+    let dataloader_train =
+        DataLoaderBuilder::new(StockBatcher::<B>::new(config.steps, n_industries))
+            .batch_size(config.batch_size)
+            .set_device(device.clone())
+            .build(train_sampler);
+
+    // Build the valid pipeline on the inner backend, as burn expects. A full
+    // sweep over every window dwarfs a training run, so when asked, cap a
+    // once-shuffled pool: representative across tickers and dates, and stable
+    // from one epoch to the next.
+    let valid_batcher = StockBatcher::<B::InnerBackend>::new(config.steps, n_industries);
+    let valid_builder = || {
+        DataLoaderBuilder::new(valid_batcher.clone())
+            .batch_size(config.batch_size)
+            .set_device(device.clone())
     };
 
-    let dataloader_valid = Arc::new(valid);
+    let dataloader_valid = match valid_batches {
+        Some(batches) => {
+            let dataset = WindowDataset::subsample(valid_store, config.steps, config.seed);
+            let cap = (batches * config.batch_size).min(dataset.len());
+            valid_builder().build(PartialDataset::new(dataset, 0, cap))
+        }
+        None => valid_builder().build(WindowDataset::new(valid_store, config.steps)),
+    };
 
     let model = config.model.init::<B>(device);
 
@@ -150,7 +188,7 @@ pub fn train<B: AutodiffBackend>(
             LossMetric::new(),
         ))
         .with_file_checkpointer(CompactRecorder::new())
-        .num_epochs(config.num_epochs)
+        .num_epochs(num_epochs)
         .summary();
 
     // Halt once validation loss stops improving, so a run does not sail past its
