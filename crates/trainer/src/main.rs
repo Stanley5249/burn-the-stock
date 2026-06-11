@@ -7,8 +7,7 @@ mod training;
 
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{Autodiff, Wgpu};
-use burn::optim::AdamConfig;
-use burn::optim::decay::WeightDecayConfig;
+use burn::optim::AdamWConfig;
 use clap::Parser;
 use miette::Result;
 
@@ -44,7 +43,7 @@ struct Args {
     batch_size: usize,
 
     /// Window length fed to the GRU.
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = 20)]
     steps: usize,
 
     /// Validate on a fixed-seed subsample of this many batches, drawn across all
@@ -67,9 +66,9 @@ struct Args {
     #[arg(long, default_value_t = 1.0e-3)]
     learning_rate: f64,
 
-    /// L2 weight decay for the optimizer; 0 disables it.
-    #[arg(long, default_value_t = 0.0)]
-    weight_decay: f32,
+    /// L2 weight decay for the optimizer.
+    #[arg(long)]
+    weight_decay: Option<f32>,
 
     /// Dropout probability in the fusion head.
     #[arg(long, default_value_t = 0.2)]
@@ -96,18 +95,18 @@ fn main() -> Result<()> {
 
     let device = WgpuDevice::default();
 
-    let optimizer = if args.weight_decay > 0.0 {
-        AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(args.weight_decay)))
-    } else {
-        AdamConfig::new()
-    };
-
     // `n_industries` is a placeholder; `train` fills it from the loaded data.
     let model = StockModelConfig::new(0)
         .with_d_hidden(args.d_hidden)
         .with_dropout(args.dropout);
 
-    let config = TrainingConfig::new(model, optimizer)
+    let mut optimizer_config = AdamWConfig::new();
+
+    if let Some(weight_decay) = args.weight_decay {
+        optimizer_config = optimizer_config.with_weight_decay(weight_decay);
+    }
+
+    let training_config = TrainingConfig::new(model, optimizer_config)
         .with_num_epochs(args.num_epochs)
         .with_epoch_size(args.epoch_size)
         .with_batch_size(args.batch_size)
@@ -126,7 +125,7 @@ fn main() -> Result<()> {
         &args.data,
         &args.tickers,
         &args.artifact_dir,
-        config,
+        training_config,
         options,
     )
 }

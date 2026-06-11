@@ -1,6 +1,6 @@
 use burn::data::dataloader::DataLoader;
 use burn::module::Module;
-use burn::optim::AdamConfig;
+use burn::optim::AdamWConfig;
 use burn::prelude::*;
 use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
@@ -17,13 +17,13 @@ use crate::model::{StockModel, StockModelConfig};
 #[derive(Config, Debug)]
 pub struct TrainingConfig {
     pub model: StockModelConfig,
-    pub optimizer: AdamConfig,
-    #[config(default = 1.0e-4)]
+    pub optimizer: AdamWConfig,
+    #[config(default = 1.0e-3)]
     pub learning_rate: f64,
     #[config(default = 10)]
     pub num_epochs: usize,
     /// Window length fed to the GRU.
-    #[config(default = 30)]
+    #[config(default = 20)]
     pub steps: usize,
     /// Tickers per batch, which is the batch size.
     #[config(default = 64)]
