@@ -97,15 +97,60 @@ fn index_industries(frame: &DataFrame) -> PolarsResult<(HashMap<PlSmallStr, usiz
     Ok((codes, distinct.len() + 1))
 }
 
-/// Enumerate every `steps`-length window of every frame as a
+/// One ticker's history flattened out of polars into plain buffers, so window
+/// extraction in the hot path is pointer-offset indexing rather than Arrow array
+/// traversal. Rows are sorted ascending by date, and the three vectors share that
+/// row order: `dates[i]`, `labels[i]`, and `features[i*5 .. i*5+5]` are the same
+/// trading day.
+#[derive(Clone)]
+struct Ticker {
+    name: PlSmallStr,
+    /// Trading dates, ascending.
+    dates: Vec<NaiveDate>,
+    /// Row-major OHLCV, length `dates.len() * 5`.
+    features: Vec<f32>,
+    /// One action label per row.
+    labels: Vec<u8>,
+}
+
+impl Ticker {
+    fn rows(&self) -> usize {
+        self.dates.len()
+    }
+
+    /// Split into rows `[0, at)` and `[at, rows)`, keeping the three buffers
+    /// aligned (features are five wide per row).
+    fn split_at(&self, at: usize) -> (Ticker, Ticker) {
+        let (dates_left, dates_right) = self.dates.split_at(at);
+        let (features_left, features_right) = self.features.split_at(at * FEATURE_NAMES.len());
+        let (labels_left, labels_right) = self.labels.split_at(at);
+
+        let left = Ticker {
+            name: self.name.clone(),
+            dates: dates_left.to_vec(),
+            features: features_left.to_vec(),
+            labels: labels_left.to_vec(),
+        };
+        let right = Ticker {
+            name: self.name.clone(),
+            dates: dates_right.to_vec(),
+            features: features_right.to_vec(),
+            labels: labels_right.to_vec(),
+        };
+
+        (left, right)
+    }
+}
+
+/// Enumerate every `steps`-length window of every ticker as a
 /// `(ticker_index, window_start)` pair. This is the pool both sampling modes
-/// draw from, so it is rebuilt whenever `frames` change.
-fn enumerate_windows(frames: &[(PlSmallStr, DataFrame)], steps: usize) -> Vec<(u32, u32)> {
+/// draw from, so it is rebuilt whenever `tickers` change.
+fn enumerate_windows(tickers: &[Ticker], steps: usize) -> Vec<(u32, u32)> {
     let mut windows = Vec::new();
 
-    for (ticker_index, (_, frame)) in frames.iter().enumerate() {
+    for (ticker_index, ticker) in tickers.iter().enumerate() {
         let ticker_index = u32::try_from(ticker_index).unwrap();
-        let last_start = frame.height() - steps;
+        let last_start = ticker.rows() - steps;
         for start in 0..=u32::try_from(last_start).unwrap() {
             windows.push((ticker_index, start));
         }
@@ -147,8 +192,7 @@ enum Sampling {
 
 /// Per-ticker dataloader.
 ///
-/// `frames` holds one `(name, dense DataFrame)` per ticker, each frame with
-/// columns `date`, `feature` (Array<f32, 5>) and `label` (u8), sorted by date.
+/// `tickers` holds one flattened [`Ticker`] per stock, rows sorted by date.
 /// Because a single ticker trades on contiguous rows, any `steps`-length window
 /// is null-free.
 ///
@@ -158,7 +202,7 @@ enum Sampling {
 /// is fine for the per-sample classification this model does.
 #[derive(Clone)]
 pub(crate) struct StockDataLoader<B: Backend> {
-    pub(crate) frames: Vec<(PlSmallStr, DataFrame)>,
+    tickers: Vec<Ticker>,
     steps: usize,
     batch_size: usize,
     seed: Option<u64>,
@@ -189,7 +233,7 @@ pub(crate) struct StockDataLoader<B: Backend> {
 }
 
 impl<B: Backend> StockDataLoader<B> {
-    /// Load the parquet file into one dense frame per ticker.
+    /// Load the parquet file into one flat [`Ticker`] per stock.
     ///
     /// Tickers with fewer than `steps` usable rows (after dropping the final
     /// label-less row) are discarded. `max_batches` caps how many batches one
@@ -221,12 +265,12 @@ impl<B: Backend> StockDataLoader<B> {
 
         let groups = long.partition_by_stable([TICKER], true)?;
 
-        let mut frames = Vec::with_capacity(groups.len());
+        let mut tickers = Vec::with_capacity(groups.len());
 
         for group in groups {
             let height = group.height();
 
-            // The last row has no forward window, so a usable frame needs more
+            // The last row has no forward window, so a usable ticker needs more
             // than `steps` rows to keep at least `steps` after trimming it.
             if height <= steps {
                 continue;
@@ -234,19 +278,44 @@ impl<B: Backend> StockDataLoader<B> {
 
             let name: PlSmallStr = group.column(&TICKER)?.str()?.get(0).unwrap().into();
 
-            let labels = compute_labels(group.column(&CLOSE)?, LABEL, LABEL_THRESHOLD)?;
+            // Labels come from the full close series but are one short, already
+            // aligned to the rows we keep after dropping the label-less last row.
+            let labels: Vec<u8> = compute_labels(group.column(&CLOSE)?, LABEL, LABEL_THRESHOLD)?
+                .u8()?
+                .into_no_null_iter()
+                .collect();
 
-            let mut frame = group.select([DATE, FEATURE])?.head(Some(height - 1));
+            let head = group.head(Some(height - 1));
 
-            frame.with_column(labels)?;
+            // Flatten the Array<f32, 5> feature column into row-major OHLCV once,
+            // so window extraction later is a contiguous slice.
+            let features: Vec<f32> = head
+                .column(&FEATURE)?
+                .array()?
+                .get_inner()
+                .f32()?
+                .into_no_null_iter()
+                .collect();
 
-            frames.push((name, frame));
+            let dates: Vec<NaiveDate> = head
+                .column(&DATE)?
+                .date()?
+                .as_date_iter()
+                .flatten()
+                .collect();
+
+            tickers.push(Ticker {
+                name,
+                dates,
+                features,
+                labels,
+            });
         }
 
-        let windows = Arc::new(enumerate_windows(&frames, steps));
+        let windows = Arc::new(enumerate_windows(&tickers, steps));
 
         Ok(Self {
-            frames,
+            tickers,
             steps,
             batch_size,
             seed,
@@ -289,63 +358,59 @@ impl<B: Backend> StockDataLoader<B> {
     /// Used to carve a small subset for overfit diagnostics, where we want a
     /// representative random sample rather than the first `count` by sort order.
     pub fn sample_tickers(mut self, count: usize, seed: u64) -> Self {
-        if count >= self.frames.len() {
+        if count >= self.tickers.len() {
             return self;
         }
 
         let mut rng = Rng::with_seed(seed);
-        let indices = rng.choose_multiple(0..self.frames.len(), count);
+        let indices = rng.choose_multiple(0..self.tickers.len(), count);
 
-        let frames: Vec<_> = indices
+        let tickers: Vec<_> = indices
             .into_iter()
-            .map(|index| self.frames[index].clone())
+            .map(|index| self.tickers[index].clone())
             .collect();
-        self.windows = Arc::new(enumerate_windows(&frames, self.steps));
-        self.frames = frames;
+        self.windows = Arc::new(enumerate_windows(&tickers, self.steps));
+        self.tickers = tickers;
         self
     }
 
-    /// Split every ticker frame at `cutoff` into an earlier train loader and a
-    /// later valid loader. Tickers whose train or valid side has fewer than
-    /// `steps` rows are dropped from that side. Both loaders share the same
-    /// config; errors if either side ends up empty.
+    /// Split every ticker at `cutoff` into an earlier train loader and a later
+    /// valid loader. Tickers whose train or valid side has fewer than `steps`
+    /// rows are dropped from that side. Both loaders share the same config;
+    /// errors if either side ends up empty.
     pub fn train_valid_split(&self, cutoff: NaiveDate) -> PolarsResult<(Self, Self)> {
-        let mut train_frames = Vec::with_capacity(self.frames.len());
-        let mut valid_frames = Vec::with_capacity(self.frames.len());
+        let mut train_tickers = Vec::with_capacity(self.tickers.len());
+        let mut valid_tickers = Vec::with_capacity(self.tickers.len());
 
-        for (name, frame) in &self.frames {
-            let split = frame
-                .clone()
-                .lazy()
-                .filter(col(DATE).lt(lit(cutoff)))
-                .collect()?
-                .height();
+        for ticker in &self.tickers {
+            // Dates are ascending, so `partition_point` is the count of rows
+            // strictly before the cutoff.
+            let split = ticker.dates.partition_point(|&day| day < cutoff);
+            let (train, valid) = ticker.split_at(split);
 
-            let (train, valid) = frame.split_at(i64::try_from(split).unwrap());
-
-            if train.height() >= self.steps {
-                train_frames.push((name.clone(), train));
+            if train.rows() >= self.steps {
+                train_tickers.push(train);
             }
-            if valid.height() >= self.steps {
-                valid_frames.push((name.clone(), valid));
+            if valid.rows() >= self.steps {
+                valid_tickers.push(valid);
             }
         }
 
         polars_ensure!(
-            !train_frames.is_empty() && !valid_frames.is_empty(),
+            !train_tickers.is_empty() && !valid_tickers.is_empty(),
             NoData: "train/valid split left one side empty; check cutoff and steps"
         );
 
-        let train = self.with_frames(train_frames);
-        let valid = self.with_frames(valid_frames).into_fixed();
+        let train = self.with_tickers(train_tickers);
+        let valid = self.with_tickers(valid_tickers).into_fixed();
 
         Ok((train, valid))
     }
 
-    fn with_frames(&self, frames: Vec<(PlSmallStr, DataFrame)>) -> Self {
-        let windows = Arc::new(enumerate_windows(&frames, self.steps));
+    fn with_tickers(&self, tickers: Vec<Ticker>) -> Self {
+        let windows = Arc::new(enumerate_windows(&tickers, self.steps));
         Self {
-            frames,
+            tickers,
             windows,
             ..self.clone()
         }
@@ -357,32 +422,22 @@ impl<B: Backend> StockDataLoader<B> {
         self.n_industries
     }
 
-    /// The latest date across every frame, used to anchor a recent-window
-    /// train/valid split. `None` only when no frame has a dated row.
+    /// The latest date across every ticker, used to anchor a recent-window
+    /// train/valid split. `None` only when no ticker has a dated row.
     pub fn max_date(&self) -> Option<NaiveDate> {
-        self.frames
+        self.tickers
             .iter()
-            .filter_map(|(_, frame)| {
-                // Frames are sorted ascending by date, so the last row is the
-                // latest. `as_date_iter` yields `NaiveDate` with no manual cast.
-                frame
-                    .column(&DATE)
-                    .ok()?
-                    .date()
-                    .ok()?
-                    .as_date_iter()
-                    .last()
-                    .flatten()
-            })
+            // Dates are ascending, so the last is the ticker's latest.
+            .filter_map(|ticker| ticker.dates.last().copied())
             .max()
     }
 
-    /// Rebuild the loader on a different backend. The frames are backend-free,
+    /// Rebuild the loader on a different backend. The tickers are backend-free,
     /// so this only swaps the device and tensor type. Used to lift the train
     /// split onto the autodiff backend while validation stays on the inner one.
     pub fn to_backend<B2: Backend>(&self, device: B2::Device) -> StockDataLoader<B2> {
         StockDataLoader {
-            frames: self.frames.clone(),
+            tickers: self.tickers.clone(),
             steps: self.steps,
             batch_size: self.batch_size,
             seed: self.seed,
@@ -401,7 +456,7 @@ impl<B: Backend> StockDataLoader<B> {
     /// pool, used for validation so the metric is stable across epochs. Clears
     /// any virtual-epoch cap so one pass covers every window.
     fn into_fixed(mut self) -> Self {
-        // `windows` already matches `frames` from the preceding `with_frames`,
+        // `windows` already matches `tickers` from the preceding `with_tickers`,
         // so only the sweep policy needs to change here.
         self.sampling = Sampling::Fixed;
         self.max_batches = None;
@@ -454,32 +509,31 @@ impl<B: Backend> StockDataLoader<B> {
     }
 
     /// Slice each chosen window, normalize it, and pack the batch into tensors.
-    fn assemble(&self, selection: &[(u32, u32)]) -> PolarsResult<StockBatch<B>> {
+    fn assemble(&self, selection: &[(u32, u32)]) -> StockBatch<B> {
         let count = selection.len();
 
         let mut technical_data = Vec::with_capacity(count * self.steps * FEATURE_NAMES.len());
 
         let mut label_data = Vec::with_capacity(count);
 
+        let stride = FEATURE_NAMES.len();
+
         for &(ticker_index, start) in selection {
-            let window = self.frames[ticker_index as usize]
-                .1
-                .slice(i64::from(start), self.steps);
+            let ticker = &self.tickers[ticker_index as usize];
+            let start = start as usize;
 
-            let features = window.column(&FEATURE)?;
-
-            let mut flat: Vec<f32> = features
-                .array()?
-                .get_inner()
-                .f32()?
-                .into_no_null_iter()
-                .collect();
+            // The window is a contiguous span of the flat OHLCV buffer; copy it
+            // out and normalize that copy in place.
+            let begin = start * stride;
+            let end = begin + self.steps * stride;
+            let mut flat = ticker.features[begin..end].to_vec();
 
             normalize_window(&mut flat, self.steps);
 
             technical_data.extend(flat);
 
-            let label = window.column(&LABEL)?.u8()?.last().unwrap();
+            // The label is the action on the window's last day.
+            let label = ticker.labels[start + self.steps - 1];
 
             label_data.push(i32::from(label));
         }
@@ -493,11 +547,11 @@ impl<B: Backend> StockDataLoader<B> {
 
         let ticker = self.one_hot_industries(selection);
 
-        Ok(StockBatch {
+        StockBatch {
             technical,
             ticker,
             label,
-        })
+        }
     }
 
     /// One-hot encode the industry of each selected ticker into a
@@ -516,7 +570,7 @@ impl<B: Backend> StockDataLoader<B> {
         let mut data = vec![0.0f32; count * self.n_industries];
 
         for (row, &(ticker_index, _)) in selection.iter().enumerate() {
-            let name = &self.frames[ticker_index as usize].0;
+            let name = &self.tickers[ticker_index as usize].name;
             let industry = self.industry_codes.get(name).copied().unwrap_or(unknown);
             data[row * self.n_industries + industry] = 1.0;
         }
@@ -562,7 +616,7 @@ impl<B: Backend> Iterator for StockIterator<'_, B> {
 
         self.batch += 1;
 
-        self.loader.assemble(&selection).ok()
+        Some(self.loader.assemble(&selection))
     }
 }
 
@@ -618,58 +672,49 @@ mod tests {
 
     type TestBackend = Flex;
 
-    /// Build one dense ticker frame of `rows` rows with a `feature` `Array<f32,
-    /// 5>` column and a `u8` `label` column. `base` offsets the values so
-    /// frames differ.
-    fn make_frame(base: f32, rows: i16) -> DataFrame {
-        let dates: Vec<i32> = (0..i32::from(rows)).collect();
-        let values: Vec<f32> = (0..rows).map(|i| base + f32::from(i)).collect();
-        let labels: Vec<u8> = (0..rows).map(|i| u8::try_from(i % 3).unwrap()).collect();
+    /// Build one flat ticker of `rows` rows. Every OHLCV slot in a row shares the
+    /// same value `base + row`, so `base` separates tickers and the per-row value
+    /// rises monotonically. Labels cycle 0/1/2. Dates ascend from the epoch.
+    fn make_ticker(name: &str, base: f32, rows: i16) -> Ticker {
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        let stride = FEATURE_NAMES.len();
 
-        let df = df!(
-            "date" => dates,
-            "open" => values.clone(),
-            "high" => values.clone(),
-            "low" => values.clone(),
-            "close" => values.clone(),
-            "volume" => values,
-            "label" => labels,
-        )
-        .unwrap();
+        let dates = (0..i64::from(rows))
+            .map(|i| epoch + chrono::Duration::days(i))
+            .collect();
 
-        df.lazy()
-            .select([
-                col(DATE).cast(DataType::Date),
-                concat_arr(FEATURE_NAMES.map(col).to_vec())
-                    .unwrap()
-                    .alias(FEATURE),
-                col(LABEL),
-            ])
-            .collect()
-            .unwrap()
+        let mut features = Vec::with_capacity(usize::from(rows.unsigned_abs()) * stride);
+        for i in 0..rows {
+            let value = base + f32::from(i);
+            features.extend(std::iter::repeat_n(value, stride));
+        }
+
+        let labels = (0..rows).map(|i| u8::try_from(i % 3).unwrap()).collect();
+
+        Ticker {
+            name: name.into(),
+            dates,
+            features,
+            labels,
+        }
     }
 
     fn make_loader(
-        n_frames: i16,
+        n_tickers: i16,
         rows: i16,
         steps: usize,
         batch_size: usize,
         seed: Option<u64>,
         max_batches: usize,
     ) -> StockDataLoader<TestBackend> {
-        let frames: Vec<(PlSmallStr, DataFrame)> = (0..n_frames)
-            .map(|t| {
-                (
-                    format!("t{t}").into(),
-                    make_frame(f32::from(t) * 1000.0, rows),
-                )
-            })
+        let tickers: Vec<Ticker> = (0..n_tickers)
+            .map(|t| make_ticker(&format!("t{t}"), f32::from(t) * 1000.0, rows))
             .collect();
 
-        let windows = Arc::new(enumerate_windows(&frames, steps));
+        let windows = Arc::new(enumerate_windows(&tickers, steps));
 
         StockDataLoader {
-            frames,
+            tickers,
             steps,
             batch_size,
             seed,
@@ -842,9 +887,9 @@ mod tests {
 
         let (train, valid) = loader.train_valid_split(cutoff).unwrap();
 
-        assert_eq!(train.frames.len(), 3);
-        assert_eq!(valid.frames.len(), 3);
-        assert_eq!(train.frames[0].1.height(), 10);
-        assert_eq!(valid.frames[0].1.height(), 10);
+        assert_eq!(train.tickers.len(), 3);
+        assert_eq!(valid.tickers.len(), 3);
+        assert_eq!(train.tickers[0].rows(), 10);
+        assert_eq!(valid.tickers[0].rows(), 10);
     }
 }
