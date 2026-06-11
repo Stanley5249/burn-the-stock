@@ -8,9 +8,6 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-const SEP: PlSmallStr = PlSmallStr::from_static("_");
-
-const MARKET: PlSmallStr = PlSmallStr::from_static("market");
 const CODE: PlSmallStr = PlSmallStr::from_static("code");
 const TICKER: PlSmallStr = PlSmallStr::from_static("ticker");
 const DATE: PlSmallStr = PlSmallStr::from_static("date");
@@ -133,7 +130,7 @@ enum Sampling {
 /// the per-sample classification this model does.
 #[derive(Clone)]
 pub(crate) struct StockDataLoader<B: Backend> {
-    frames: Vec<(PlSmallStr, DataFrame)>,
+    pub(crate) frames: Vec<(PlSmallStr, DataFrame)>,
     steps: usize,
     n_tickers: usize,
     seed: Option<u64>,
@@ -144,7 +141,7 @@ pub(crate) struct StockDataLoader<B: Backend> {
     /// [`Sampling::Sequential`]. Shared behind an `Arc` so cloning a loader for
     /// `slice`/`to_device` stays cheap.
     windows: Arc<Vec<(usize, i64)>>,
-    /// Maps a ticker name (`market_code`) to its industry index. Empty until
+    /// Maps a ticker name (stock `code`) to its industry index. Empty until
     /// [`Self::attach_industries`] runs, in which case [`Self::assemble`] leaves
     /// the `ticker` tensor width-0.
     industry_codes: Arc<HashMap<PlSmallStr, usize>>,
@@ -168,32 +165,19 @@ impl<B: Backend> StockDataLoader<B> {
         seed: Option<u64>,
         device: B::Device,
     ) -> PolarsResult<Self> {
-        let schema = Some(Arc::new(Schema::from_iter([
-            (MARKET, DataType::String),
-            (CODE, DataType::String),
-            (DATE, DataType::Date),
-            (OPEN, DataType::Float32),
-            (HIGH, DataType::Float32),
-            (LOW, DataType::Float32),
-            (CLOSE, DataType::Float32),
-            (VOLUME, DataType::Float32),
-        ])));
+        let feature_expr = concat_arr(
+            FEATURE_NAMES
+                .map(|name| col(name).cast(DataType::Float32))
+                .to_vec(),
+        )
+        .unwrap();
 
-        let args = ScanArgsParquet {
-            schema,
-            ..Default::default()
-        };
-
-        let ticker_expr = concat_str([col(MARKET), col(CODE)], &SEP, false);
-
-        let feature_expr = concat_arr(FEATURE_NAMES.map(col).to_vec()).unwrap();
-
-        let long = LazyFrame::scan_parquet(PlRefPath::new(path), args)?
+        let long = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())?
             .select([
-                ticker_expr.alias(TICKER),
-                col(DATE),
+                col(CODE).cast(DataType::String).alias(TICKER),
+                col(DATE).cast(DataType::Date),
                 feature_expr.alias(FEATURE),
-                col(CLOSE),
+                col(CLOSE).cast(DataType::Float32),
             ])
             .sort([TICKER, DATE], SortMultipleOptions::new())
             .collect()?;
@@ -246,7 +230,7 @@ impl<B: Backend> StockDataLoader<B> {
     pub fn attach_industries(mut self, path: &str) -> PolarsResult<Self> {
         let frame = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())?
             .select([
-                concat_str([col(MARKET), col(CODE)], &SEP, false).alias(TICKER),
+                col(CODE).cast(DataType::String).alias(TICKER),
                 col(INDUSTRY).cast(DataType::String),
             ])
             .collect()?;
@@ -257,6 +241,26 @@ impl<B: Backend> StockDataLoader<B> {
         self.n_industries = n_industries;
 
         Ok(self)
+    }
+
+    /// Randomly keep `count` tickers, chosen with `seed` so the subset is
+    /// reproducible. Asking for at least as many tickers as exist is a no-op.
+    /// Used to carve a small subset for overfit diagnostics, where we want a
+    /// representative random sample rather than the first `count` by sort order.
+    pub fn sample_tickers(mut self, count: usize, seed: u64) -> Self {
+        if count >= self.frames.len() {
+            return self;
+        }
+
+        let mut rng = Rng::with_seed(seed);
+        let indices = rng.choose_multiple(0..self.frames.len(), count);
+
+        let frames = indices
+            .into_iter()
+            .map(|index| self.frames[index].clone())
+            .collect();
+        self.frames = frames;
+        self
     }
 
     /// Split every ticker frame at `cutoff` into an earlier train loader and a
