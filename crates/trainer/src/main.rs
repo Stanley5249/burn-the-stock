@@ -122,7 +122,7 @@ fn main() -> Result<()> {
     };
 
     train::<Backend>(
-        device,
+        &device,
         &args.data,
         &args.tickers,
         &args.artifact_dir,

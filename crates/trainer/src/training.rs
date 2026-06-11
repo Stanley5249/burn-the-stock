@@ -5,7 +5,7 @@ use burn::prelude::*;
 use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::store::{Aggregate, Direction, Split};
-use burn::train::metric::{AccuracyMetric, LossMetric};
+use burn::train::metric::{AccuracyMetric, ClassReduction, FBetaScoreMetric, LossMetric};
 use burn::train::{Learner, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining};
 use miette::{IntoDiagnostic, Result};
 use std::sync::Arc;
@@ -66,9 +66,8 @@ pub struct RunOptions {
 /// # Errors
 ///
 /// Returns an error if the data cannot be loaded or the artifacts cannot be saved.
-#[allow(clippy::needless_pass_by_value)]
 pub fn train<B: AutodiffBackend>(
-    device: B::Device,
+    device: &B::Device,
     data_path: &str,
     tickers_path: &str,
     artifact_dir: &str,
@@ -84,7 +83,7 @@ pub fn train<B: AutodiffBackend>(
 
     std::fs::create_dir_all(artifact_dir).into_diagnostic()?;
 
-    B::seed(&device, config.seed);
+    B::seed(device, config.seed);
 
     // Load once on the inner backend, then lift the train split up to the
     // autodiff backend. Validation stays on the inner backend, as burn expects.
@@ -136,18 +135,20 @@ pub fn train<B: AutodiffBackend>(
         None => valid,
     };
 
-    let dataloader_valid: Arc<dyn DataLoader<B::InnerBackend, StockBatch<B::InnerBackend>>> =
-        Arc::new(valid);
+    let dataloader_valid = Arc::new(valid);
 
-    let model = config.model.init::<B>(&device);
+    let model = config.model.init::<B>(device);
+
     let optimizer = config.optimizer.init::<B, StockModel<B>>();
+
     let learner = Learner::new(model, optimizer, config.learning_rate);
 
     let mut training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
-        .metric_train_numeric(AccuracyMetric::new())
-        .metric_valid_numeric(AccuracyMetric::new())
-        .metric_train_numeric(LossMetric::new())
-        .metric_valid_numeric(LossMetric::new())
+        .metrics((
+            AccuracyMetric::new(),
+            FBetaScoreMetric::multiclass(1.0, 1, ClassReduction::Macro),
+            LossMetric::new(),
+        ))
         .with_file_checkpointer(CompactRecorder::new())
         .num_epochs(config.num_epochs)
         .summary();
