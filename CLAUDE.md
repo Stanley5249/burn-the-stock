@@ -16,12 +16,18 @@ Use `cargo add` to add dependencies.
 
 Use `[workspace.dependencies]` for shared dependencies with minimal features and use `.workspace = true` and features in members.
 
-All subcommands take `--workspace --all-targets` if possible.
+Always scope by `--workspace`, never `--package`/`-p`. A package filter resolves a narrower feature set and forces recompilation, while `--workspace` keeps the unified feature union warm across runs. Use `--all-targets` where it applies.
 
 ```bash
-cargo check --workspace --all-targets
+cargo check  --workspace --all-targets
 cargo build  --workspace --all-targets [--release]
 cargo test   --workspace --all-targets
+```
+
+To run a binary or example, select it by `--bin`/`--example` (still no `-p`) so it builds under the same workspace feature union.
+
+```bash
+cargo run --bin tickers -- <args>
 ```
 
 Before finishing any task, run clippy and fmt.
