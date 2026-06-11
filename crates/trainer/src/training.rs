@@ -103,14 +103,16 @@ pub fn train<B: AutodiffBackend>(
 
     let dataloader_train: Arc<dyn DataLoader<B, StockBatch<B>>> = Arc::new(train);
 
+    // A full validation sweep over every window dwarfs a training run, so when
+    // asked, replace it with a fixed-seed subsample: representative across all
+    // tickers and dates, and stable from one epoch to the next.
+    let valid = match valid_batches {
+        Some(n) => valid.into_subsample(Some(n), config.seed),
+        None => valid,
+    };
+
     let dataloader_valid: Arc<dyn DataLoader<B::InnerBackend, StockBatch<B::InnerBackend>>> =
         Arc::new(valid);
-    // Validation is a full sequential sweep, so cap it when asked, otherwise a
-    // short training run spends nearly all its time validating.
-    let dataloader_valid = match valid_batches {
-        Some(n) => dataloader_valid.slice(0, n.min(dataloader_valid.num_items())),
-        None => dataloader_valid,
-    };
 
     let model = config.model.init::<B>(&device);
     let optimizer = config.optimizer.init::<B, StockModel<B>>();

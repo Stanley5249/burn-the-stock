@@ -46,9 +46,9 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     steps: usize,
 
-    /// Cap the validation sweep to the first N batches. Validation otherwise
-    /// walks every window of every ticker, which dwarfs a short training run.
-    /// Set this low for a quick end-to-end smoke test.
+    /// Validate on a fixed-seed subsample of this many batches, drawn across all
+    /// tickers and dates and stable across epochs. Omit to sweep every window,
+    /// which dwarfs a short training run.
     #[arg(long)]
     valid_batches: Option<usize>,
 

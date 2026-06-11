@@ -389,6 +389,23 @@ impl<B: Backend> StockDataLoader<B> {
         self
     }
 
+    /// Shuffle the window pool once with a fixed `seed` and keep the first
+    /// `max_batches` batches as a representative validation subsample. A full
+    /// sweep over two years of every ticker is far too large to validate every
+    /// epoch, and capping the natural order instead would bias the sample to the
+    /// earliest tickers and dates. The pool is shuffled once, not per epoch, so
+    /// the metric stays comparable across epochs.
+    pub fn into_subsample(mut self, max_batches: Option<usize>, seed: u64) -> Self {
+        let mut windows = (*self.windows).clone();
+        Rng::with_seed(seed).shuffle(&mut windows);
+
+        self.windows = Arc::new(windows);
+        self.sampling = Sampling::Fixed;
+        self.max_batches = max_batches;
+        self.batch_offset = 0;
+        self
+    }
+
     /// Number of batches one epoch yields, honoring both the `batch_offset` from
     /// a `slice` and the `max_batches` virtual-epoch cap.
     fn batch_count(&self) -> usize {
@@ -777,6 +794,25 @@ mod tests {
         let shard = loader.slice(2, 7);
 
         assert_eq!(shard.num_items(), 5);
+    }
+
+    #[test]
+    fn subsample_is_capped_and_stable() {
+        // 4 tickers of 30 rows, window 4, three windows per batch.
+        let loader = make_loader(4, 30, 4, 3, None, 0).into_subsample(Some(2), 99);
+
+        // The cap holds regardless of how many windows the pool actually has.
+        assert_eq!(loader.num_items(), 2);
+
+        // Fixed mode does not advance the epoch counter, so repeated passes see
+        // the same subsample in the same order.
+        let first = first_batch(&loader).technical.to_data();
+        let again = first_batch(&loader).technical.to_data();
+
+        assert_eq!(
+            first.to_vec::<f32>().unwrap(),
+            again.to_vec::<f32>().unwrap()
+        );
     }
 
     #[test]
