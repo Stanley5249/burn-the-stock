@@ -8,6 +8,7 @@ mod training;
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{Autodiff, Wgpu};
 use burn::optim::AdamConfig;
+use burn::optim::decay::WeightDecayConfig;
 use clap::Parser;
 use miette::Result;
 
@@ -65,6 +66,23 @@ struct Args {
     /// Learning rate for the optimizer.
     #[arg(long, default_value_t = 1.0e-3)]
     learning_rate: f64,
+
+    /// L2 weight decay for the optimizer; 0 disables it.
+    #[arg(long, default_value_t = 0.0)]
+    weight_decay: f32,
+
+    /// Dropout probability in the fusion head.
+    #[arg(long, default_value_t = 0.2)]
+    dropout: f64,
+
+    /// GRU hidden size. A smaller value trains faster.
+    #[arg(long, default_value_t = 64)]
+    d_hidden: usize,
+
+    /// Stop early if validation loss does not improve for this many epochs.
+    /// Omit to disable early stopping.
+    #[arg(long)]
+    patience: Option<usize>,
 }
 
 type Backend = Autodiff<Wgpu>;
@@ -78,8 +96,18 @@ fn main() -> Result<()> {
 
     let device = WgpuDevice::default();
 
+    let optimizer = if args.weight_decay > 0.0 {
+        AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(args.weight_decay)))
+    } else {
+        AdamConfig::new()
+    };
+
     // `n_industries` is a placeholder; `train` fills it from the loaded data.
-    let config = TrainingConfig::new(StockModelConfig::new(0), AdamConfig::new())
+    let model = StockModelConfig::new(0)
+        .with_d_hidden(args.d_hidden)
+        .with_dropout(args.dropout);
+
+    let config = TrainingConfig::new(model, optimizer)
         .with_num_epochs(args.num_epochs)
         .with_epoch_size(args.epoch_size)
         .with_batch_size(args.batch_size)
@@ -90,6 +118,7 @@ fn main() -> Result<()> {
         valid_batches: args.valid_batches,
         max_tickers: args.max_tickers,
         valid_days: args.valid_days,
+        patience: args.patience,
     };
 
     train::<Backend>(

@@ -4,8 +4,9 @@ use burn::optim::AdamConfig;
 use burn::prelude::*;
 use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
+use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{AccuracyMetric, LossMetric};
-use burn::train::{Learner, SupervisedTraining};
+use burn::train::{Learner, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining};
 use miette::{IntoDiagnostic, Result};
 use std::sync::Arc;
 
@@ -50,6 +51,9 @@ pub struct RunOptions {
     /// Length in days of the recent window that validates; everything before it
     /// trains.
     pub valid_days: i64,
+    /// Stop early if validation loss does not improve for this many epochs;
+    /// `None` disables early stopping.
+    pub patience: Option<usize>,
 }
 
 /// Run the full training loop.
@@ -75,6 +79,7 @@ pub fn train<B: AutodiffBackend>(
         valid_batches,
         max_tickers,
         valid_days,
+        patience,
     } = options;
 
     std::fs::create_dir_all(artifact_dir).into_diagnostic()?;
@@ -138,15 +143,29 @@ pub fn train<B: AutodiffBackend>(
     let optimizer = config.optimizer.init::<B, StockModel<B>>();
     let learner = Learner::new(model, optimizer, config.learning_rate);
 
-    let result = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
+    let mut training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
         .metric_train_numeric(AccuracyMetric::new())
         .metric_valid_numeric(AccuracyMetric::new())
         .metric_train_numeric(LossMetric::new())
         .metric_valid_numeric(LossMetric::new())
         .with_file_checkpointer(CompactRecorder::new())
         .num_epochs(config.num_epochs)
-        .summary()
-        .launch(learner);
+        .summary();
+
+    // Halt once validation loss stops improving, so a run does not sail past its
+    // optimum and overfit. Monitors the same valid Loss metric registered above.
+    if let Some(patience) = patience {
+        let strategy = MetricEarlyStoppingStrategy::new::<LossMetric<B::InnerBackend>>(
+            &LossMetric::new(),
+            Aggregate::Mean,
+            Direction::Lowest,
+            Split::Valid,
+            StoppingCondition::NoImprovementSince { n_epochs: patience },
+        );
+        training = training.early_stopping(strategy);
+    }
+
+    let result = training.launch(learner);
 
     result
         .model
