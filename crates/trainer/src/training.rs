@@ -28,9 +28,11 @@ pub struct TrainingConfig {
     /// Tickers per batch, which is the batch size.
     #[config(default = 64)]
     pub batch_size: usize,
-    /// Random batches drawn per training epoch.
-    #[config(default = 200)]
-    pub epoch_size: usize,
+    /// Batches per epoch. `None` is one full pass over every window; `Some(k)`
+    /// emits `k` reshuffled batches per epoch, which controls how often
+    /// validation runs since burn only validates between epochs.
+    #[config(default = "None")]
+    pub epoch_size: Option<usize>,
     #[config(default = 42)]
     pub seed: u64,
 }

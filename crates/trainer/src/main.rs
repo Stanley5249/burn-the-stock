@@ -33,9 +33,10 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     num_epochs: usize,
 
-    /// Random batches drawn per training epoch.
-    #[arg(long, default_value_t = 200)]
-    epoch_size: usize,
+    /// Batches per training epoch. Omit for one full pass over every window;
+    /// set it to cap each epoch and make validation run more often.
+    #[arg(long)]
+    epoch_size: Option<usize>,
 
     /// Tickers per batch.
     #[arg(long, default_value_t = 64)]
