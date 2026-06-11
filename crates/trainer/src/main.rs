@@ -30,8 +30,8 @@ struct Args {
     artifact_dir: String,
 
     /// Training epochs.
-    #[arg(long, default_value_t = 10)]
-    num_epochs: usize,
+    #[arg(long)]
+    num_epochs: Option<usize>,
 
     /// Batches per training epoch. Omit for one full pass over every window;
     /// set it to cap each epoch and make validation run more often.
@@ -39,12 +39,12 @@ struct Args {
     epoch_size: Option<usize>,
 
     /// Tickers per batch.
-    #[arg(long, default_value_t = 64)]
-    batch_size: usize,
+    #[arg(long)]
+    batch_size: Option<usize>,
 
     /// Window length fed to the GRU.
-    #[arg(long, default_value_t = 20)]
-    steps: usize,
+    #[arg(long)]
+    steps: Option<usize>,
 
     /// Validate on a fixed-seed subsample of this many batches, drawn across all
     /// tickers and dates and stable across epochs. Omit to sweep every window,
@@ -63,20 +63,20 @@ struct Args {
     max_tickers: Option<usize>,
 
     /// Learning rate for the optimizer.
-    #[arg(long, default_value_t = 1.0e-3)]
-    learning_rate: f64,
+    #[arg(long)]
+    learning_rate: Option<f64>,
 
     /// L2 weight decay for the optimizer.
     #[arg(long)]
     weight_decay: Option<f32>,
 
     /// Dropout probability in the fusion head.
-    #[arg(long, default_value_t = 0.2)]
-    dropout: f64,
+    #[arg(long)]
+    dropout: Option<f64>,
 
     /// GRU hidden size. A smaller value trains faster.
-    #[arg(long, default_value_t = 64)]
-    d_hidden: usize,
+    #[arg(long)]
+    d_hidden: Option<usize>,
 
     /// Stop early if validation loss does not improve for this many epochs.
     /// Omit to disable early stopping.
@@ -96,9 +96,13 @@ fn main() -> Result<()> {
     let device = WgpuDevice::default();
 
     // `n_industries` is a placeholder; `train` fills it from the loaded data.
-    let model = StockModelConfig::new(0)
-        .with_d_hidden(args.d_hidden)
-        .with_dropout(args.dropout);
+    let mut model = StockModelConfig::new(0);
+    if let Some(d_hidden) = args.d_hidden {
+        model = model.with_d_hidden(d_hidden);
+    }
+    if let Some(dropout) = args.dropout {
+        model = model.with_dropout(dropout);
+    }
 
     let mut optimizer_config = AdamWConfig::new();
 
@@ -106,12 +110,22 @@ fn main() -> Result<()> {
         optimizer_config = optimizer_config.with_weight_decay(weight_decay);
     }
 
-    let training_config = TrainingConfig::new(model, optimizer_config)
-        .with_num_epochs(args.num_epochs)
-        .with_epoch_size(args.epoch_size)
-        .with_batch_size(args.batch_size)
-        .with_steps(args.steps)
-        .with_learning_rate(args.learning_rate);
+    let mut training_config = TrainingConfig::new(model, optimizer_config);
+    if let Some(num_epochs) = args.num_epochs {
+        training_config = training_config.with_num_epochs(num_epochs);
+    }
+    if let Some(epoch_size) = args.epoch_size {
+        training_config = training_config.with_epoch_size(Some(epoch_size));
+    }
+    if let Some(batch_size) = args.batch_size {
+        training_config = training_config.with_batch_size(batch_size);
+    }
+    if let Some(steps) = args.steps {
+        training_config = training_config.with_steps(steps);
+    }
+    if let Some(learning_rate) = args.learning_rate {
+        training_config = training_config.with_learning_rate(learning_rate);
+    }
 
     let options = RunOptions {
         valid_batches: args.valid_batches,
