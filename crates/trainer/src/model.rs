@@ -1,4 +1,5 @@
 use crate::batcher::StockBatch;
+use crate::metric::StockEvalInput;
 use burn::backend::flex::{Flex, FlexDevice};
 use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
@@ -160,6 +161,16 @@ impl<B: Backend> Adaptor<ConfusionStatsInput<B>> for StockOutput<B> {
         ConfusionStatsInput::new(
             self.output.clone(),
             self.targets.clone().one_hot(NUM_CLASSES).bool(),
+        )
+    }
+}
+
+impl<B: Backend> Adaptor<StockEvalInput<B>> for StockOutput<B> {
+    fn adapt(&self) -> StockEvalInput<B> {
+        StockEvalInput::new(
+            self.output.clone(),
+            self.targets.clone(),
+            self.reward.clone(),
         )
     }
 }

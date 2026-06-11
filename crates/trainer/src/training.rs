@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::batcher::StockBatcher;
 use crate::dataset::WindowDataset;
+use crate::metric::{ExpectedValueMetric, PrecisionClassMetric};
 use crate::model::{StockModel, StockModelConfig};
 use crate::store::TickerStore;
 
@@ -28,6 +29,15 @@ pub struct TrainingConfig {
     /// Mirrors [`crate::label::LABEL_THRESHOLD`].
     #[config(default = 0.03)]
     pub label_threshold: f32,
+    /// Round-trip transaction cost charged to a Buy in the EV metric, as a
+    /// fraction. The `sim_stock` default is 0.1425% brokerage twice plus 0.3%
+    /// sell tax.
+    #[config(default = 0.005_85)]
+    pub fee: f32,
+    /// Symmetric clip on the per-row reward fed to the EV metric, taming
+    /// penny-stock and inverse-ETF moves that would otherwise dominate.
+    #[config(default = 1.0)]
+    pub reward_clip: f32,
     /// Number of full passes over the training data. With a fixed `epoch_size`
     /// this sets how many epochs run: `passes * windows / epoch_size`.
     #[config(default = 1)]
@@ -189,6 +199,9 @@ pub fn train<B: AutodiffBackend>(
         .metrics((
             AccuracyMetric::new(),
             FBetaScoreMetric::multiclass(1.0, 1, ClassReduction::Macro),
+            ExpectedValueMetric::new(config.fee, config.reward_clip),
+            PrecisionClassMetric::new(2, "Buy"),
+            PrecisionClassMetric::new(0, "Sell"),
             LossMetric::new(),
         ))
         .with_file_checkpointer(CompactRecorder::new())

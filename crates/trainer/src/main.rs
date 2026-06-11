@@ -3,6 +3,7 @@
 mod batcher;
 mod dataset;
 mod label;
+mod metric;
 mod model;
 mod store;
 mod training;
@@ -73,6 +74,15 @@ struct Args {
     #[arg(long)]
     label_threshold: Option<f32>,
 
+    /// Round-trip transaction cost charged to a Buy in the EV metric, as a
+    /// fraction of price.
+    #[arg(long)]
+    fee: Option<f32>,
+
+    /// Symmetric clip on the per-row reward fed to the EV metric.
+    #[arg(long)]
+    reward_clip: Option<f32>,
+
     /// L2 weight decay for the optimizer.
     #[arg(long)]
     weight_decay: Option<f32>,
@@ -135,6 +145,12 @@ fn main() -> Result<()> {
     }
     if let Some(label_threshold) = args.label_threshold {
         training_config = training_config.with_label_threshold(label_threshold);
+    }
+    if let Some(fee) = args.fee {
+        training_config = training_config.with_fee(fee);
+    }
+    if let Some(reward_clip) = args.reward_clip {
+        training_config = training_config.with_reward_clip(reward_clip);
     }
 
     let options = RunOptions {
