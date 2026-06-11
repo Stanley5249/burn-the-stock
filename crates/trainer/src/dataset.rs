@@ -14,6 +14,8 @@ pub struct StockItem {
     pub industry: usize,
     /// Action class index 0/1/2.
     pub label: i32,
+    /// Signed forward return to the window's next swing extreme.
+    pub reward: f32,
 }
 
 /// A [`Dataset`] over every `steps`-length window of a [`TickerStore`].
@@ -58,11 +60,13 @@ impl WindowDataset {
 impl Dataset<StockItem> for WindowDataset {
     fn get(&self, index: usize) -> Option<StockItem> {
         let &(ticker_index, start) = self.windows.get(index)?;
-        let (technical, industry, label) = self.store.window(ticker_index, start, self.steps);
+        let (technical, industry, label, reward) =
+            self.store.window(ticker_index, start, self.steps);
         Some(StockItem {
             technical,
             industry,
             label,
+            reward,
         })
     }
 

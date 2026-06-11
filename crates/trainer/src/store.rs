@@ -391,16 +391,16 @@ impl TickerStore {
     }
 
     /// Materialize one window into `(normalized OHLCV [steps * 5], industry
-    /// index, label)`. The window is a contiguous span of the flat OHLCV buffer
-    /// copied out and normalized in place, the label is the action on the
-    /// window's last day, and the industry is the resolved bucket (0 when no
-    /// industries are attached).
+    /// index, label, reward)`. The window is a contiguous span of the flat OHLCV
+    /// buffer copied out and normalized in place, the label and reward are the
+    /// action and forward return on the window's last day, and the industry is
+    /// the resolved bucket (0 when no industries are attached).
     pub(crate) fn window(
         &self,
         ticker_index: u32,
         start: u32,
         steps: usize,
-    ) -> (Vec<f32>, usize, i32) {
+    ) -> (Vec<f32>, usize, i32, f32) {
         let ticker = &self.tickers[ticker_index as usize];
         let start = start as usize;
         let stride = FEATURE_NAMES.len();
@@ -411,14 +411,16 @@ impl TickerStore {
 
         normalize_window(&mut technical, steps);
 
-        let label = i32::from(ticker.labels[start + steps - 1]);
+        let last_day = start + steps - 1;
+        let label = i32::from(ticker.labels[last_day]);
+        let reward = ticker.rewards[last_day];
         let industry = self
             .industry_of
             .get(ticker_index as usize)
             .copied()
             .unwrap_or(0);
 
-        (technical, industry, label)
+        (technical, industry, label, reward)
     }
 }
 

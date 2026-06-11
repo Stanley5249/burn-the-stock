@@ -8,9 +8,10 @@ stock-client = { path = "../stock-client" }
 
 burn = {
   workspace = true,
-  features = ["autotune", "fusion", "std", "train", "tui"]
+  features = ["autotune", "flex", "fusion", "std", "train", "tui"]
 }
 chrono.workspace = true
+clap = { workspace = true, features = ["derive"] }
 fastrand = "2.4.1"
 miette = { workspace = true, features = ["fancy"] }
 polars = {
@@ -27,10 +28,6 @@ polars = {
   ]
 }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-clap = { workspace = true, features = ["derive"] }
-
-[dev-dependencies]
-burn = { workspace = true, features = ["flex"] }
 
 [features]
 default = ["wgpu"]

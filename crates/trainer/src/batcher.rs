@@ -12,6 +12,8 @@ pub struct StockBatch<B: Backend> {
     pub ticker: Tensor<B, 2>,
     /// Shape `[batch_size]` -- class index 0/1/2.
     pub label: Tensor<B, 1, Int>,
+    /// Shape `[batch_size]` -- signed forward return to the next swing extreme.
+    pub reward: Tensor<B, 1>,
 }
 
 /// Packs a `Vec<StockItem>` into one [`StockBatch`] on the target device.
@@ -42,6 +44,7 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
 
         let mut technical_data = Vec::with_capacity(count * self.steps * FEATURE_NAMES.len());
         let mut label_data = Vec::with_capacity(count);
+        let mut reward_data = Vec::with_capacity(count);
 
         // One-hot industries, left empty when no categorical feature is attached.
         let mut industry_data = vec![0.0f32; count * self.n_industries];
@@ -49,6 +52,7 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
         for (row, item) in items.iter().enumerate() {
             technical_data.extend_from_slice(&item.technical);
             label_data.push(item.label);
+            reward_data.push(item.reward);
             if self.n_industries != 0 {
                 industry_data[row * self.n_industries + item.industry] = 1.0;
             }
@@ -60,6 +64,8 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
         );
 
         let label = Tensor::from_data(TensorData::new(label_data, [count]), device);
+
+        let reward = Tensor::from_data(TensorData::new(reward_data, [count]), device);
 
         let ticker = if self.n_industries == 0 {
             Tensor::zeros([count, 0], device)
@@ -74,6 +80,7 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
             technical,
             ticker,
             label,
+            reward,
         }
     }
 }
@@ -90,6 +97,7 @@ mod tests {
             technical: vec![0.0; 4 * FEATURE_NAMES.len()],
             industry,
             label,
+            reward: 0.0,
         }
     }
 
