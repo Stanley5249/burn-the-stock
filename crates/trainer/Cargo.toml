@@ -14,7 +14,7 @@ chrono.workspace = true
 fastrand = "2.4.1"
 miette = { workspace = true, features = ["fancy"] }
 polars = {
-  version = "0.53.0",
+  workspace = true,
   features = [
     "concat_str",
     "dtype-array",
@@ -27,8 +27,7 @@ polars = {
   ]
 }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 burn = { workspace = true, features = ["flex"] }
