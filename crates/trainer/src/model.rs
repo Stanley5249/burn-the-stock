@@ -1,7 +1,7 @@
 use crate::dataloader::StockBatch;
 use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
-use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig};
+use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig, RmsNorm, RmsNormConfig};
 use burn::prelude::*;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::ClassificationOutput;
@@ -26,7 +26,9 @@ const NUM_FEATURES: usize = 5;
 #[derive(Module, Debug)]
 pub struct StockModel<B: Backend> {
     gru: Gru<B>,
+    gru_norm: RmsNorm<B>,
     industry: Linear<B>,
+    industry_norm: RmsNorm<B>,
     fusion: Linear<B>,
     head: Linear<B>,
     activation: Gelu,
@@ -38,7 +40,11 @@ impl<B: Backend> StockModel<B> {
     pub fn new(config: &StockModelConfig, device: &B::Device) -> Self {
         let gru = GruConfig::new(NUM_FEATURES, config.d_hidden, true).init(device);
 
+        let gru_norm = RmsNormConfig::new(config.d_hidden).init(device);
+
         let industry = LinearConfig::new(config.n_industries, config.d_industry).init(device);
+
+        let industry_norm = RmsNormConfig::new(config.d_industry).init(device);
 
         let fusion =
             LinearConfig::new(config.d_hidden + config.d_industry, config.d_fusion).init(device);
@@ -51,7 +57,9 @@ impl<B: Backend> StockModel<B> {
 
         Self {
             gru,
+            gru_norm,
             industry,
+            industry_norm,
             fusion,
             head,
             activation: Gelu::new(),
