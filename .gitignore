@@ -1,13 +1,15 @@
 # rust build output
 /target/
 
-# pythno
+# python
 __pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
 
 # credentials
 .env
 
 # runtime artifacts
 data/
-model/
-state/
+artifacts/
