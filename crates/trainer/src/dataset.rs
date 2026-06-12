@@ -1,44 +1,35 @@
 use crate::store::TickerStore;
 use burn::data::dataset::Dataset;
 use fastrand::Rng;
-use std::sync::Arc;
 
-/// One materialized training sample: a stationary feature window plus its
-/// resolved industry index and action label. Backend-free, so the same item
-/// feeds the autodiff train batcher and the inner-backend valid batcher.
-#[derive(Clone, Debug)]
+/// One training sample, reduced to the absolute row where its window starts in the
+/// store's concatenated row numbering. The batcher gathers the feature window,
+/// label, reward, and industry from its resident device tensors using this index,
+/// so the item carries no feature data and stays backend-free.
+#[derive(Clone, Copy, Debug)]
 pub struct StockItem {
-    /// Row-major stationary features, length `steps * 5`.
-    pub technical: Vec<f32>,
-    /// Resolved industry bucket; 0 when no industries are attached.
-    pub industry: usize,
-    /// Action class index 0/1/2.
-    pub label: i32,
-    /// Signed forward return to the window's next swing extreme.
-    pub reward: f32,
+    /// Absolute row of the window's first day. The window spans `steps` consecutive
+    /// rows from here, and the label/reward/industry are read at its last day.
+    pub start: u32,
 }
 
 /// A [`Dataset`] over every `steps`-length window of a [`TickerStore`].
 ///
-/// The store is shared behind an `Arc` so the train and valid datasets are
-/// cheap to build and the dataset stays backend-free. `get` materializes one
-/// window on demand, which lets burn's data loader parallelize it across
-/// workers.
+/// Each `(ticker_index, window_start)` from the store is resolved once at
+/// construction into the single absolute start row the batcher gathers against, so
+/// the dataset owns only a flat `Vec<u32>` and borrows nothing. `get` is then a
+/// pointer-cheap lookup, which lets burn's data loader hand indices to the batcher
+/// without touching the store on the hot path.
 pub struct WindowDataset {
-    store: Arc<TickerStore>,
-    /// Every `(ticker_index, window_start)` pair this dataset indexes.
-    windows: Vec<(u32, u32)>,
-    steps: usize,
+    /// Absolute start row of every window, in ticker-then-date order.
+    windows: Vec<u32>,
 }
 
 impl WindowDataset {
     /// Index every window of the store in ticker-then-date order.
-    pub fn new(store: Arc<TickerStore>, steps: usize) -> Self {
-        let windows = store.enumerate_windows(steps);
+    pub fn new(store: &TickerStore, steps: usize) -> Self {
         Self {
-            store,
-            windows,
-            steps,
+            windows: Self::absolute_starts(store, steps),
         }
     }
 
@@ -46,28 +37,30 @@ impl WindowDataset {
     /// this with a [`burn::data::dataset::transform::PartialDataset`] cap yields
     /// a validation subsample drawn evenly across tickers and dates rather than
     /// biased to the earliest ones, and stable across epochs.
-    pub fn subsample(store: Arc<TickerStore>, steps: usize, seed: u64) -> Self {
-        let mut windows = store.enumerate_windows(steps);
+    pub fn subsample(store: &TickerStore, steps: usize, seed: u64) -> Self {
+        let mut windows = Self::absolute_starts(store, steps);
         Rng::with_seed(seed).shuffle(&mut windows);
-        Self {
-            store,
-            windows,
-            steps,
-        }
+        Self { windows }
+    }
+
+    /// Resolve every `(ticker_index, start)` window into its absolute start row via
+    /// the store's row-offset table.
+    fn absolute_starts(store: &TickerStore, steps: usize) -> Vec<u32> {
+        let offsets = store.row_offsets();
+        store
+            .enumerate_windows(steps)
+            .into_iter()
+            .map(|(ticker_index, start)| offsets[ticker_index as usize] + start)
+            .collect()
     }
 }
 
 impl Dataset<StockItem> for WindowDataset {
     fn get(&self, index: usize) -> Option<StockItem> {
-        let &(ticker_index, start) = self.windows.get(index)?;
-        let (technical, industry, label, reward) =
-            self.store.window(ticker_index, start, self.steps);
-        Some(StockItem {
-            technical,
-            industry,
-            label,
-            reward,
-        })
+        self.windows
+            .get(index)
+            .copied()
+            .map(|start| StockItem { start })
     }
 
     fn len(&self) -> usize {
@@ -81,37 +74,30 @@ mod tests {
 
     #[test]
     fn len_counts_every_window() {
-        let store = Arc::new(TickerStore::synthetic(3, 20));
-        let dataset = WindowDataset::new(store, 4);
+        let store = TickerStore::synthetic(3, 20);
+        let dataset = WindowDataset::new(&store, 4);
 
         // Each ticker yields 20 - 4 + 1 = 17 windows across 3 tickers.
         assert_eq!(dataset.len(), 17 * 3);
     }
 
     #[test]
-    fn get_materializes_a_window_item() {
-        let store = Arc::new(TickerStore::synthetic(2, 10).set_industries(vec![1, 0], 2));
-        let dataset = WindowDataset::new(store, 4);
+    fn get_maps_window_to_absolute_start() {
+        let store = TickerStore::synthetic(2, 10);
+        let dataset = WindowDataset::new(&store, 4);
 
-        let item = dataset.get(0).unwrap();
+        // The first ticker's first window starts at absolute row 0.
+        assert_eq!(dataset.get(0).unwrap().start, 0);
 
-        // A window of 4 steps over 5 features is 20 floats.
-        assert_eq!(item.technical.len(), 4 * 5);
-        // First window is the first ticker, whose industry was set to 1.
-        assert_eq!(item.industry, 1);
-        // Labels cycle 0/1/2; the window's last day is row index 3 -> label 0.
-        assert_eq!(item.label, 0);
-        // Synthetic row `i` fills every slot with `base + i`; the first ticker's
-        // base is 0, so the last row's slots pass through unscaled as 3.0.
-        assert!((item.technical[3 * 5 + 3] - 3.0).abs() < 1e-6);
+        // Each 10-row ticker yields 10 - 4 + 1 = 7 windows, so window index 7 is the
+        // second ticker's first window, whose absolute start is its row offset 10.
+        assert_eq!(dataset.get(7).unwrap().start, 10);
     }
 
     #[test]
     fn subsample_order_is_reproducible() {
-        let first =
-            WindowDataset::subsample(Arc::new(TickerStore::synthetic(4, 20)), 4, 99).windows;
-        let again =
-            WindowDataset::subsample(Arc::new(TickerStore::synthetic(4, 20)), 4, 99).windows;
+        let first = WindowDataset::subsample(&TickerStore::synthetic(4, 20), 4, 99).windows;
+        let again = WindowDataset::subsample(&TickerStore::synthetic(4, 20), 4, 99).windows;
         assert_eq!(first, again);
     }
 }

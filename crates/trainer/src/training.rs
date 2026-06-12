@@ -10,7 +10,6 @@ use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{AccuracyMetric, ClassReduction, FBetaScoreMetric, LossMetric};
 use burn::train::{Learner, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining};
 use miette::{IntoDiagnostic, Result, bail};
-use std::sync::Arc;
 
 use crate::batcher::StockBatcher;
 use crate::dataset::WindowDataset;
@@ -133,8 +132,6 @@ pub fn train<B: AutodiffBackend>(
     let (train_store, valid_store) = store
         .train_valid_split(cutoff, config.steps)
         .into_diagnostic()?;
-    let train_store = Arc::new(train_store);
-    let valid_store = Arc::new(valid_store);
 
     let n_industries = train_store.n_industries();
 
@@ -149,7 +146,7 @@ pub fn train<B: AutodiffBackend>(
     // window budget independent of the pool size and walks a reshuffled
     // permutation across the run, so `passes` full passes take
     // `passes * windows / epoch_size` epochs.
-    let train_windows = WindowDataset::new(train_store, config.steps);
+    let train_windows = WindowDataset::new(&train_store, config.steps);
     let total_windows = train_windows.len();
     if total_windows == 0 {
         bail!("no training windows; check steps and the train/valid split");
@@ -170,17 +167,22 @@ pub fn train<B: AutodiffBackend>(
             .with_seed(config.seed),
     );
 
-    let dataloader_train =
-        DataLoaderBuilder::new(StockBatcher::<B>::new(config.steps, n_industries))
-            .batch_size(config.batch_size)
-            .set_device(device.clone())
-            .build(train_sampler);
+    let dataloader_train = DataLoaderBuilder::new(StockBatcher::<B>::new(
+        config.steps,
+        n_industries,
+        &train_store,
+        device,
+    ))
+    .batch_size(config.batch_size)
+    .set_device(device.clone())
+    .build(train_sampler);
 
     // Build the valid pipeline on the inner backend, as burn expects. A full
     // sweep over every window dwarfs a training run, so when asked, cap a
     // once-shuffled pool: representative across tickers and dates, and stable
     // from one epoch to the next.
-    let valid_batcher = StockBatcher::<B::InnerBackend>::new(config.steps, n_industries);
+    let valid_batcher =
+        StockBatcher::<B::InnerBackend>::new(config.steps, n_industries, &valid_store, device);
     let valid_builder = || {
         DataLoaderBuilder::new(valid_batcher.clone())
             .batch_size(config.batch_size)
@@ -189,11 +191,11 @@ pub fn train<B: AutodiffBackend>(
 
     let dataloader_valid = match valid_batches {
         Some(batches) => {
-            let dataset = WindowDataset::subsample(valid_store, config.steps, config.seed);
+            let dataset = WindowDataset::subsample(&valid_store, config.steps, config.seed);
             let cap = (batches * config.batch_size).min(dataset.len());
             valid_builder().build(PartialDataset::new(dataset, 0, cap))
         }
-        None => valid_builder().build(WindowDataset::new(valid_store, config.steps)),
+        None => valid_builder().build(WindowDataset::new(&valid_store, config.steps)),
     };
 
     let model = config.model.init::<B>(device);

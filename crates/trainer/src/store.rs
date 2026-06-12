@@ -448,37 +448,70 @@ impl TickerStore {
         windows
     }
 
-    /// Materialize one window into `(stationary features [steps * 5], industry
-    /// index, label, reward)`. The window is a contiguous span of the flat feature
-    /// buffer copied out as is, the label and reward are the action and forward
-    /// return on the window's last day, and the industry is the resolved bucket
-    /// (0 when no industries are attached). The features were already made
-    /// stationary at load, so no per-window rescaling happens here.
-    pub(crate) fn window(
-        &self,
-        ticker_index: u32,
-        start: u32,
-        steps: usize,
-    ) -> (Vec<f32>, usize, i32, f32) {
-        let ticker = &self.tickers[ticker_index as usize];
-        let start = start as usize;
-        let stride = FEATURE_NAMES.len();
-
-        let begin = start * stride;
-        let end = begin + steps * stride;
-        let technical = ticker.features[begin..end].to_vec();
-
-        let last_day = start + steps - 1;
-        let label = i32::from(ticker.labels[last_day]);
-        let reward = ticker.rewards[last_day];
-        let industry = self
-            .industry_of
-            .get(ticker_index as usize)
-            .copied()
-            .unwrap_or(0);
-
-        (technical, industry, label, reward)
+    /// The first row each ticker occupies once every ticker's history is laid out
+    /// end to end in ticker order, as the prefix sum of the per-ticker row counts.
+    /// A `(ticker_index, start)` window from [`Self::enumerate_windows`] maps to the
+    /// single absolute row `row_offsets()[ticker_index] + start`, which the batcher
+    /// gathers against the resident tensors built by [`Self::resident_buffers`].
+    pub(crate) fn row_offsets(&self) -> Vec<u32> {
+        let mut offsets = Vec::with_capacity(self.tickers.len());
+        let mut offset = 0u32;
+        for ticker in &self.tickers {
+            offsets.push(offset);
+            offset += u32::try_from(ticker.rows()).unwrap();
+        }
+        offsets
     }
+
+    /// Flatten every ticker's history into single contiguous buffers, in the same
+    /// ticker order as [`Self::row_offsets`], so the batcher can upload them to the
+    /// device once and then gather each batch on-device by absolute row. The four
+    /// buffers share the row order: `features[row*5 .. row*5+5]`, `labels[row]`,
+    /// `rewards[row]`, and `industry_row[row]` are the same trading day.
+    ///
+    /// `industry_row` repeats each ticker's resolved industry across its rows and is
+    /// left empty when no industries are attached, mirroring the width-zero ticker
+    /// branch in the batcher.
+    pub(crate) fn resident_buffers(&self) -> ResidentBuffers {
+        let stride = FEATURE_NAMES.len();
+        let total: usize = self.tickers.iter().map(Ticker::rows).sum();
+        let has_industries = !self.industry_of.is_empty();
+
+        let mut features = Vec::with_capacity(total * stride);
+        let mut labels = Vec::with_capacity(total);
+        let mut rewards = Vec::with_capacity(total);
+        let mut industry_row = Vec::with_capacity(if has_industries { total } else { 0 });
+
+        for (index, ticker) in self.tickers.iter().enumerate() {
+            features.extend_from_slice(&ticker.features);
+            labels.extend(ticker.labels.iter().map(|&label| i32::from(label)));
+            rewards.extend_from_slice(&ticker.rewards);
+            if has_industries {
+                let industry = i32::try_from(self.industry_of[index]).unwrap();
+                industry_row.extend(std::iter::repeat_n(industry, ticker.rows()));
+            }
+        }
+
+        ResidentBuffers {
+            rows: total,
+            features,
+            labels,
+            rewards,
+            industry_row,
+        }
+    }
+}
+
+/// Every ticker's history flattened into one set of row-aligned buffers, ready to
+/// upload to the device as the batcher's resident gather tensors. Produced by
+/// [`TickerStore::resident_buffers`]; `rows` is the shared length (`features` is
+/// five wide per row).
+pub(crate) struct ResidentBuffers {
+    pub(crate) rows: usize,
+    pub(crate) features: Vec<f32>,
+    pub(crate) labels: Vec<i32>,
+    pub(crate) rewards: Vec<f32>,
+    pub(crate) industry_row: Vec<i32>,
 }
 
 /// Synthetic builders shared across the crate's module tests, so `dataset` and
