@@ -16,51 +16,80 @@ const LOW: PlSmallStr = PlSmallStr::from_static("low");
 const CLOSE: PlSmallStr = PlSmallStr::from_static("close");
 const VOLUME: PlSmallStr = PlSmallStr::from_static("volume");
 
-pub(crate) const FEATURE_NAMES: [PlSmallStr; 5] = [OPEN, HIGH, LOW, CLOSE, VOLUME];
+const LOG_RETURN: PlSmallStr = PlSmallStr::from_static("log_return");
+const VOLUME_RATIO: PlSmallStr = PlSmallStr::from_static("volume_ratio");
+const HL_RANGE: PlSmallStr = PlSmallStr::from_static("hl_range");
+const GAP: PlSmallStr = PlSmallStr::from_static("gap");
+const BODY: PlSmallStr = PlSmallStr::from_static("body");
 
-/// Offsets into a flattened OHLCV row. OHLC occupy the first four slots, so the
-/// close sits at index 3 and volume, the lone non-price feature, sits last.
-const CLOSE_OFFSET: usize = 3;
-const VOLUME_OFFSET: usize = 4;
+/// The five stationary features flattened per row, in column order. Width stays
+/// at five so the model, batcher, and tensor shapes are unchanged from the raw
+/// OHLCV layout this replaced.
+pub(crate) const FEATURE_NAMES: [PlSmallStr; 5] = [LOG_RETURN, VOLUME_RATIO, HL_RANGE, GAP, BODY];
+
+/// Rolling window, in trading days, for the volume average that `volume_ratio`
+/// divides by. The `min_periods` equals this window, so the leading rows of every
+/// ticker are null and dropped as warmup at load.
+const VOLUME_WINDOW: usize = 20;
 
 const fn col(name: PlSmallStr) -> Expr {
     Expr::Column(name)
 }
 
-/// Normalize one flattened `[steps * 5]` OHLCV window in place.
+/// Build the five stationary feature expressions from the raw OHLCV columns.
 ///
-/// A GRU should learn the shape of a window, not the price level it happens to
-/// sit at, so OHLC are divided by the window's last close and land near 1.0.
-/// Volume lives on a wildly different scale, so it is `log1p` compressed and
-/// then z-scored within the window to match the price ratios.
-#[allow(clippy::cast_precision_loss)] // `steps` is a small window length
-pub(crate) fn normalize_window(window: &mut [f32], steps: usize) {
-    let stride = FEATURE_NAMES.len();
+/// Each is an honest stationarity transform of OHLCV, no invented indicators:
+/// price levels become log returns, raw volume becomes a log ratio to its own
+/// rolling average, and the intraday bar is described by scale-free range and
+/// body shape. The per-ticker `shift` and `rolling_mean` run `over` the ticker so
+/// they never reach across stock boundaries, which means the caller must have
+/// sorted by `[ticker, date]` first.
+fn stationary_features() -> [Expr; 5] {
+    let prev_close = col(CLOSE).shift(lit(1)).over([col(TICKER)]);
 
-    let last_close = window[(steps - 1) * stride + CLOSE_OFFSET];
+    let volume_mean = col(VOLUME)
+        .rolling_mean(RollingOptionsFixedWindow {
+            window_size: VOLUME_WINDOW,
+            min_periods: VOLUME_WINDOW,
+            ..Default::default()
+        })
+        .over([col(TICKER)]);
 
-    for row in window.chunks_mut(stride) {
-        if last_close != 0.0 {
-            for price in &mut row[..VOLUME_OFFSET] {
-                *price /= last_close;
-            }
-        }
-        row[VOLUME_OFFSET] = row[VOLUME_OFFSET].max(0.0).ln_1p();
-    }
+    let natural_log = || lit(std::f64::consts::E);
+    let high_low = col(HIGH) - col(LOW);
 
-    let volumes = || window.iter().skip(VOLUME_OFFSET).step_by(stride);
+    // Volume is a count, so a no-trade day has volume 0 and the bare ratio's log
+    // is `-inf`. Add one share to both sides (log1p style) to keep it finite
+    // while leaving real, large volumes essentially unchanged.
+    let volume_ratio = ((col(VOLUME) + lit(1.0)) / (volume_mean + lit(1.0))).log(natural_log());
 
-    let mean = volumes().sum::<f32>() / steps as f32;
-    let variance = volumes().map(|v| (v - mean).powi(2)).sum::<f32>() / steps as f32;
-    let std = variance.sqrt();
+    [
+        (col(CLOSE) / prev_close.clone())
+            .log(natural_log())
+            .alias(LOG_RETURN),
+        volume_ratio.alias(VOLUME_RATIO),
+        (high_low.clone() / col(CLOSE)).alias(HL_RANGE),
+        ((col(OPEN) - prev_close.clone()) / prev_close).alias(GAP),
+        ((col(CLOSE) - col(OPEN)) / (high_low + lit(1e-8))).alias(BODY),
+    ]
+}
 
-    for row in window.chunks_mut(stride) {
-        row[VOLUME_OFFSET] = if std > f32::EPSILON {
-            (row[VOLUME_OFFSET] - mean) / std
-        } else {
-            0.0
-        };
-    }
+/// Replace each stationary feature with its cross-sectional z-score: subtract the
+/// mean and divide by the standard deviation taken `over` all stocks on the same
+/// date.
+///
+/// Market-wide moves (a crash, a rally, an earnings season) push every stock the
+/// same way on a given day. Standardizing per date removes that common factor and
+/// leaves only how a stock did relative to its peers, which is the signal that
+/// survives in a weak-signal universe. Run after [`stationary_features`] and
+/// before the warmup `drop_nulls`, so null warmup values are excluded from the
+/// per-date statistics by polars and then dropped.
+fn cross_sectional_zscore() -> [Expr; 5] {
+    FEATURE_NAMES.map(|name| {
+        let centered = col(name.clone()) - col(name.clone()).mean().over([col(DATE)]);
+        let spread = col(name.clone()).std(1).over([col(DATE)]) + lit(1e-8);
+        (centered / spread).alias(name)
+    })
 }
 
 /// Build the `ticker name -> industry index` map from a frame with `ticker`
@@ -104,7 +133,7 @@ struct Ticker {
     name: PlSmallStr,
     /// Trading dates, ascending.
     dates: Vec<NaiveDate>,
-    /// Row-major OHLCV, length `dates.len() * 5`.
+    /// Row-major stationary features, length `dates.len() * 5`.
     features: Vec<f32>,
     /// One action label per row.
     labels: Vec<u8>,
@@ -161,17 +190,22 @@ pub struct TickerStore {
 }
 
 impl TickerStore {
-    /// Load the parquet file into one flat [`Ticker`] per stock.
+    /// Load the parquet file into one flat [`Ticker`] per stock, deriving the
+    /// stationary feature window from the raw OHLCV columns in polars once and
+    /// then standardizing each feature cross-sectionally across the whole loaded
+    /// universe per date.
     ///
-    /// The final label-less row of each ticker is dropped so every kept row has
-    /// a forward window for its label. Tickers too short to yield a single
-    /// window are kept but simply produce no windows later. `threshold` sets the
-    /// swing-reversal magnitude passed to [`compute_labels_rewards`].
+    /// The leading rows of each ticker carry null features while the volume
+    /// rolling average warms up, so they are dropped. The final label-less row of
+    /// each ticker is then dropped so every kept row has a forward window for its
+    /// label. Tickers too short to yield a single window are kept but simply
+    /// produce no windows later. `threshold` sets the swing-reversal magnitude
+    /// passed to [`compute_labels_rewards`].
     ///
     /// Rows with a non-positive close are dropped as corrupt. yfinance back
     /// adjustment can drive a delisted ticker's whole history negative, which
-    /// would otherwise poison the per-window normalization that divides by the
-    /// last close and the swing labels that compare prices.
+    /// would otherwise poison the log-return and ratio features and the swing
+    /// labels that compare prices.
     pub fn load(path: &str, threshold: f32) -> PolarsResult<Self> {
         let feature_expr = concat_arr(
             FEATURE_NAMES
@@ -181,14 +215,34 @@ impl TickerStore {
         .unwrap();
 
         let long = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())?
-            .filter(col(CLOSE).gt(lit(0.0)))
             .select([
                 col(CODE).cast(DataType::String).alias(TICKER),
                 col(DATE).cast(DataType::Date),
-                feature_expr.alias(FEATURE),
+                col(OPEN).cast(DataType::Float32),
+                col(HIGH).cast(DataType::Float32),
+                col(LOW).cast(DataType::Float32),
                 col(CLOSE).cast(DataType::Float32),
+                col(VOLUME).cast(DataType::Float32),
             ])
+            .filter(col(CLOSE).gt(lit(0.0)))
+            // Sort before deriving features so the per-ticker `shift` and
+            // `rolling_mean` inside `stationary_features` see rows in date order.
             .sort([TICKER, DATE], SortMultipleOptions::new())
+            .with_columns(stationary_features())
+            // Standardize each feature across every stock on the same date. This
+            // runs over the full loaded universe, before any ticker subsetting,
+            // so the cross-section is the whole market.
+            .with_columns(cross_sectional_zscore())
+            // The only nulls are the warmup rows whose volume average and
+            // previous close had too few prior days, so drop them across all
+            // columns before packing the feature array.
+            .drop_nulls(None)
+            .select([
+                col(TICKER),
+                col(DATE),
+                feature_expr.alias(FEATURE),
+                col(CLOSE),
+            ])
             .collect()?;
 
         let groups = long.partition_by_stable([TICKER], true)?;
@@ -213,8 +267,8 @@ impl TickerStore {
 
             let head = group.head(Some(height - 1));
 
-            // Flatten the Array<f32, 5> feature column into row-major OHLCV once,
-            // so window extraction later is a contiguous slice.
+            // Flatten the Array<f32, 5> feature column into row-major features
+            // once, so window extraction later is a contiguous slice.
             let features: Vec<f32> = head
                 .column(&FEATURE)?
                 .array()?
@@ -390,11 +444,12 @@ impl TickerStore {
         windows
     }
 
-    /// Materialize one window into `(normalized OHLCV [steps * 5], industry
-    /// index, label, reward)`. The window is a contiguous span of the flat OHLCV
-    /// buffer copied out and normalized in place, the label and reward are the
-    /// action and forward return on the window's last day, and the industry is
-    /// the resolved bucket (0 when no industries are attached).
+    /// Materialize one window into `(stationary features [steps * 5], industry
+    /// index, label, reward)`. The window is a contiguous span of the flat feature
+    /// buffer copied out as is, the label and reward are the action and forward
+    /// return on the window's last day, and the industry is the resolved bucket
+    /// (0 when no industries are attached). The features were already made
+    /// stationary at load, so no per-window rescaling happens here.
     pub(crate) fn window(
         &self,
         ticker_index: u32,
@@ -407,9 +462,7 @@ impl TickerStore {
 
         let begin = start * stride;
         let end = begin + steps * stride;
-        let mut technical = ticker.features[begin..end].to_vec();
-
-        normalize_window(&mut technical, steps);
+        let technical = ticker.features[begin..end].to_vec();
 
         let last_day = start + steps - 1;
         let label = i32::from(ticker.labels[last_day]);
@@ -428,7 +481,7 @@ impl TickerStore {
 /// `batcher` can exercise a [`TickerStore`] without a parquet file on disk.
 #[cfg(test)]
 impl TickerStore {
-    /// `n_tickers` tickers of `rows` rows each. Every OHLCV slot in row `i`
+    /// `n_tickers` tickers of `rows` rows each. Every feature slot in row `i`
     /// shares the value `base + i`, so `base` separates tickers and the per-row
     /// value rises monotonically. Labels cycle 0/1/2; dates ascend from the
     /// epoch.
@@ -491,25 +544,40 @@ mod tests {
     }
 
     #[test]
-    fn normalize_window_scales_price_and_volume() {
-        // Three rows of (open, high, low, close, volume), last close is 16.
-        let mut window = vec![
-            10.0, 11.0, 9.0, 10.0, 100.0, //
-            12.0, 13.0, 11.0, 12.0, 200.0, //
-            14.0, 15.0, 13.0, 16.0, 300.0, //
-        ];
+    fn cross_sectional_zscore_centers_each_date() {
+        // Two dates, three stocks each, with deliberately different scales so a
+        // raw mean would be far from zero. Only `log_return` is exercised; the
+        // other four columns just need to exist for the shared helper.
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        let next = epoch + chrono::Duration::days(1);
+        let zeros = [0.0f32; 6];
 
-        normalize_window(&mut window, 3);
+        let frame = df!(
+            "date" => [epoch, epoch, epoch, next, next, next],
+            "log_return" => [1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0],
+            "volume_ratio" => zeros,
+            "hl_range" => zeros,
+            "gap" => zeros,
+            "body" => zeros,
+        )
+        .unwrap();
 
-        // OHLC are divided by the window's last close, so it lands exactly on 1.
-        assert!((window[2 * 5 + CLOSE_OFFSET] - 1.0).abs() < 1e-6);
-        assert!((window[3] - 10.0 / 16.0).abs() < 1e-6);
+        let out = frame
+            .lazy()
+            .with_columns(cross_sectional_zscore())
+            .collect()
+            .unwrap();
 
-        // Volume is z-scored, so it has near-zero mean and stays monotonic.
-        let volumes = [window[4], window[9], window[14]];
-        let mean = volumes.iter().sum::<f32>() / 3.0;
-        assert!(mean.abs() < 1e-6);
-        assert!(volumes[0] < volumes[1] && volumes[1] < volumes[2]);
+        let standardized = out.column(&LOG_RETURN).unwrap().f32().unwrap();
+
+        // Each date's three values must average to ~0 after standardizing.
+        let first: f32 = (0..3).map(|i| standardized.get(i).unwrap()).sum();
+        let second: f32 = (3..6).map(|i| standardized.get(i).unwrap()).sum();
+        assert!(first.abs() < 1e-5, "first date mean {first} not ~0");
+        assert!(second.abs() < 1e-5, "second date mean {second} not ~0");
+
+        // The ordering within a date is preserved, so the smallest stays lowest.
+        assert!(standardized.get(0).unwrap() < standardized.get(2).unwrap());
     }
 
     #[test]

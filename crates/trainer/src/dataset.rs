@@ -3,12 +3,12 @@ use burn::data::dataset::Dataset;
 use fastrand::Rng;
 use std::sync::Arc;
 
-/// One materialized training sample: a normalized OHLCV window plus its
+/// One materialized training sample: a stationary feature window plus its
 /// resolved industry index and action label. Backend-free, so the same item
 /// feeds the autodiff train batcher and the inner-backend valid batcher.
 #[derive(Clone, Debug)]
 pub struct StockItem {
-    /// Row-major normalized OHLCV, length `steps * 5`.
+    /// Row-major stationary features, length `steps * 5`.
     pub technical: Vec<f32>,
     /// Resolved industry bucket; 0 when no industries are attached.
     pub industry: usize,
@@ -21,9 +21,9 @@ pub struct StockItem {
 /// A [`Dataset`] over every `steps`-length window of a [`TickerStore`].
 ///
 /// The store is shared behind an `Arc` so the train and valid datasets are
-/// cheap to build and the dataset stays backend-free. `get` materializes and
-/// normalizes one window on demand, which lets burn's data loader parallelize
-/// it across workers.
+/// cheap to build and the dataset stays backend-free. `get` materializes one
+/// window on demand, which lets burn's data loader parallelize it across
+/// workers.
 pub struct WindowDataset {
     store: Arc<TickerStore>,
     /// Every `(ticker_index, window_start)` pair this dataset indexes.
@@ -89,21 +89,21 @@ mod tests {
     }
 
     #[test]
-    fn get_materializes_a_normalized_item() {
+    fn get_materializes_a_window_item() {
         let store = Arc::new(TickerStore::synthetic(2, 10).set_industries(vec![1, 0], 2));
         let dataset = WindowDataset::new(store, 4);
 
         let item = dataset.get(0).unwrap();
 
-        // A window of 4 steps over 5 OHLCV features is 20 floats.
+        // A window of 4 steps over 5 features is 20 floats.
         assert_eq!(item.technical.len(), 4 * 5);
         // First window is the first ticker, whose industry was set to 1.
         assert_eq!(item.industry, 1);
         // Labels cycle 0/1/2; the window's last day is row index 3 -> label 0.
         assert_eq!(item.label, 0);
-        // Each OHLC slot is divided by the window's last close, so the last
-        // row's close lands on 1.
-        assert!((item.technical[3 * 5 + 3] - 1.0).abs() < 1e-6);
+        // Synthetic row `i` fills every slot with `base + i`; the first ticker's
+        // base is 0, so the last row's slots pass through unscaled as 3.0.
+        assert!((item.technical[3 * 5 + 3] - 3.0).abs() < 1e-6);
     }
 
     #[test]

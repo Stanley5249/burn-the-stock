@@ -21,9 +21,11 @@ polars = {
     "dtype-array",
     "dtype-date",
     "lazy",
+    "log",
     "parquet",
     "partition_by",
     "performant",
+    "rolling_window",
     "strings"
   ]
 }

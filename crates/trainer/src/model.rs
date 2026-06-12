@@ -15,14 +15,15 @@ pub const NUM_CLASSES: usize = 3;
 /// Sell, Hold, Buy
 pub const CLASS_WEIGHTS: [f32; NUM_CLASSES] = [2.0, 1.0, 2.0];
 
-/// OHLCV width of the technical input, matching the dataloader's feature column.
+/// Stationary feature width of the technical input, matching the dataloader's
+/// feature column.
 const NUM_FEATURES: usize = 5;
 
 /// Multi-branch late-fusion classifier.
 ///
-/// A GRU summarizes the OHLCV window into its last hidden state, a linear layer
-/// embeds the industry one-hot, and the two branches are concatenated and run
-/// through a small MLP head that emits the action logits.
+/// A GRU summarizes the stationary feature window into its last hidden state, a
+/// linear layer embeds the industry one-hot, and the two branches are
+/// concatenated and run through a small MLP head that emits the action logits.
 ///
 /// Input:  technical `[batch, steps, 5]`, ticker `[batch, n_industries]`
 /// Output: `[batch, NUM_CLASSES]` (logits)

@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 #[derive(Clone, Debug)]
 pub struct StockBatch<B: Backend> {
-    /// Shape `[batch_size, steps, ohlcv_features]`.
+    /// Shape `[batch_size, steps, stationary_features]`.
     pub technical: Tensor<B, 3>,
     /// Shape `[batch_size, ticker_features]`.
     pub ticker: Tensor<B, 2>,
