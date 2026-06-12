@@ -82,8 +82,10 @@ impl<B: Backend> StockModel<B> {
         let summary = temporal
             .slice([0..batch, sequence - 1..sequence, 0..d_hidden])
             .reshape([batch, d_hidden]);
+        let summary = self.gru_norm.forward(summary);
 
         let categorical = self.industry.forward(ticker);
+        let categorical = self.industry_norm.forward(categorical);
 
         let fused = Tensor::cat(vec![summary, categorical], 1);
         let hidden = self.activation.forward(self.fusion.forward(fused));
