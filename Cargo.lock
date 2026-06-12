@@ -7609,6 +7609,8 @@ dependencies = [
  "polars",
  "stock-client",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

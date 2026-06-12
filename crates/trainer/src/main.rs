@@ -3,6 +3,7 @@
 mod batcher;
 mod dataset;
 mod label;
+mod logging;
 mod metric;
 mod model;
 mod store;
@@ -104,10 +105,10 @@ struct Args {
 type Backend = Autodiff<Wgpu>;
 
 fn main() -> Result<()> {
-    // Do not install a global tracing subscriber here. `SupervisedTraining`
-    // installs its own file logger (into the artifact dir); a subscriber set
-    // first makes that install fail and dumps burn's internal logs onto the
-    // console alongside the metrics renderer.
+    // The tracing subscriber is installed inside `train`, once the artifact dir is
+    // known, by `logging::install_experiment_logger`. Burn's own file logger is
+    // disabled there so this one owns `experiment.log` and also captures the
+    // pre-training data-loading spans.
     let args = Args::parse();
 
     let device = WgpuDevice::default();

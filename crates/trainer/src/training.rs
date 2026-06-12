@@ -103,6 +103,8 @@ pub fn train<B: AutodiffBackend>(
 
     std::fs::create_dir_all(artifact_dir).into_diagnostic()?;
 
+    crate::logging::install_experiment_logger(artifact_dir)?;
+
     B::seed(device, config.seed);
 
     // Load the backend-free store once. The store carries the train/valid split
@@ -156,6 +158,11 @@ pub fn train<B: AutodiffBackend>(
     let epoch_items = (config.epoch_size * config.batch_size).min(total_windows);
     let num_epochs = (config.passes * total_windows).div_ceil(epoch_items).max(1);
 
+    // One structured record of everything that shaped this run, so a later read of
+    // `experiment.log` can tie the metrics back to the flags and derived counts
+    // that produced them.
+    crate::logging::log_run_config(&config, &options, n_industries, total_windows, num_epochs);
+
     let train_sampler = SamplerDataset::new(
         train_windows,
         SamplerDatasetOptions::from(epoch_items)
@@ -205,6 +212,9 @@ pub fn train<B: AutodiffBackend>(
             LossMetric::new(),
         ))
         .with_file_checkpointer(CompactRecorder::new())
+        // The logger installed at startup owns `experiment.log`, so stop burn from
+        // installing its own subscriber over it.
+        .with_application_logger(None)
         .num_epochs(num_epochs)
         .summary();
 

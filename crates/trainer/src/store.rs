@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 use fastrand::Rng;
 use polars::prelude::*;
 use std::collections::HashMap;
+use tracing::instrument;
 
 const CODE: PlSmallStr = PlSmallStr::from_static("code");
 const TICKER: PlSmallStr = PlSmallStr::from_static("ticker");
@@ -206,6 +207,7 @@ impl TickerStore {
     /// adjustment can drive a delisted ticker's whole history negative, which
     /// would otherwise poison the log-return and ratio features and the swing
     /// labels that compare prices.
+    #[instrument(level = "info", skip_all, fields(path = %path))]
     pub fn load(path: &str, threshold: f32) -> PolarsResult<Self> {
         let feature_expr = concat_arr(
             FEATURE_NAMES
@@ -307,6 +309,7 @@ impl TickerStore {
     /// bucket absorbs every ticker whose industry is null or absent from the
     /// file. Run before [`Self::train_valid_split`] so the per-ticker encoding
     /// propagates to both sides.
+    #[instrument(level = "info", skip_all, fields(path = %path))]
     pub fn attach_industries(mut self, path: &str) -> PolarsResult<Self> {
         let frame = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())?
             .select([
@@ -360,6 +363,7 @@ impl TickerStore {
     /// valid store. Tickers whose train or valid side has fewer than `steps`
     /// rows are dropped from that side. Both stores keep the industry encoding;
     /// errors if either side ends up empty.
+    #[instrument(level = "info", skip_all, fields(steps))]
     pub fn train_valid_split(&self, cutoff: NaiveDate, steps: usize) -> PolarsResult<(Self, Self)> {
         let has_industries = !self.industry_of.is_empty();
 
