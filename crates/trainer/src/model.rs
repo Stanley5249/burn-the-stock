@@ -29,8 +29,10 @@ const NUM_FEATURES: usize = 5;
 /// Output: `[batch, NUM_CLASSES]` (logits)
 #[derive(Module, Debug)]
 pub struct StockModel<B: Backend> {
-    gru: Gru<B>,
-    gru_norm: RmsNorm<B>,
+    gru_1: Gru<B>,
+    gru_1_norm: RmsNorm<B>,
+    gru_2: Gru<B>,
+    gru_2_norm: RmsNorm<B>,
     industry: Linear<B>,
     industry_norm: RmsNorm<B>,
     fusion: Linear<B>,
@@ -42,9 +44,13 @@ pub struct StockModel<B: Backend> {
 
 impl<B: Backend> StockModel<B> {
     pub fn new(config: &StockModelConfig, device: &B::Device) -> Self {
-        let gru = GruConfig::new(NUM_FEATURES, config.d_hidden, true).init(device);
+        let gru_1 = GruConfig::new(NUM_FEATURES, config.d_hidden, true).init(device);
 
-        let gru_norm = RmsNormConfig::new(config.d_hidden).init(device);
+        let gru_1_norm = RmsNormConfig::new(config.d_hidden).init(device);
+
+        let gru_2 = GruConfig::new(config.d_hidden, config.d_hidden, true).init(device);
+
+        let gru_2_norm = RmsNormConfig::new(config.d_hidden).init(device);
 
         let industry = LinearConfig::new(config.n_industries, config.d_industry).init(device);
 
@@ -60,8 +66,10 @@ impl<B: Backend> StockModel<B> {
             .init(device);
 
         Self {
-            gru,
-            gru_norm,
+            gru_1,
+            gru_1_norm,
+            gru_2,
+            gru_2_norm,
             industry,
             industry_norm,
             fusion,
@@ -74,15 +82,19 @@ impl<B: Backend> StockModel<B> {
 
     /// Returns logits with shape `[batch, NUM_CLASSES]`.
     pub fn forward(&self, technical: Tensor<B, 3>, ticker: Tensor<B, 2>) -> Tensor<B, 2> {
-        let temporal = self.gru.forward(technical, None);
+        let temporal_1 = self.gru_1.forward(technical, None);
+
+        let temporal_1 = self.gru_1_norm.forward(temporal_1);
+
+        let temporal_2 = self.gru_2.forward(temporal_1, None);
 
         // Summarize the window by its last hidden state: [batch, d_hidden].
-        let [batch, sequence, d_hidden] = temporal.dims();
+        let [batch, sequence, d_hidden] = temporal_2.dims();
 
-        let summary = temporal
+        let summary = temporal_2
             .slice([0..batch, sequence - 1..sequence, 0..d_hidden])
             .reshape([batch, d_hidden]);
-        let summary = self.gru_norm.forward(summary);
+        let summary = self.gru_2_norm.forward(summary);
 
         let categorical = self.industry.forward(ticker);
         let categorical = self.industry_norm.forward(categorical);
