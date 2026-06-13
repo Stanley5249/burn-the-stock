@@ -7601,10 +7601,12 @@ name = "trader"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "chrono",
+ "clap",
  "miette",
+ "polars",
  "stock-client",
- "tokio",
- "tracing-subscriber",
+ "stock-model",
 ]
 
 [[package]]

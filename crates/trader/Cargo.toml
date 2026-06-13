@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-burn = { workspace = true }
-miette = { workspace = true, features = ["fancy"] }
 stock-client = { path = "../stock-client" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+stock-model = { path = "../stock-model" }
+
+burn = { workspace = true, features = ["std"] }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+miette = { workspace = true, features = ["fancy"] }
+polars = { workspace = true, features = ["dtype-date", "lazy"] }
 
 [features]
 default = ["wgpu"]
