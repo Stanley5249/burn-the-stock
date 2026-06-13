@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::path::Path;
 use std::sync::Mutex;
 
 use miette::{IntoDiagnostic, Result};
@@ -17,8 +18,8 @@ use tracing_subscriber::prelude::*;
 /// every `#[instrument]` span emit its busy/idle time when it closes, so phase
 /// timings need no manual clocks. The `wgpu` stack is silenced to keep the log
 /// about the experiment rather than the GPU backend.
-pub fn install_experiment_logger(artifact_dir: &str) -> Result<()> {
-    let file = File::create(format!("{artifact_dir}/experiment.log")).into_diagnostic()?;
+pub fn install_experiment_logger(artifact_dir: &Path) -> Result<()> {
+    let file = File::create(artifact_dir.join("experiment.log")).into_diagnostic()?;
 
     // Keep our spans, the run-config record, and burn's early-stopping loss
     // trajectory at INFO, but drop the noise: burn's per-iteration `Iteration N`

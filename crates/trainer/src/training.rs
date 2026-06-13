@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use burn::data::dataloader::DataLoaderBuilder;
 use burn::data::dataset::Dataset;
 use burn::data::dataset::transform::{PartialDataset, SamplerDataset, SamplerDatasetOptions};
@@ -93,8 +95,8 @@ pub struct RunOptions {
 )]
 pub fn train<B: AutodiffBackend>(
     device: &B::Device,
-    data_path: &str,
-    artifact_dir: &str,
+    data_path: &Path,
+    artifact_dir: &Path,
     config: &TrainingConfig,
     options: RunOptions,
 ) -> Result<()> {
@@ -158,7 +160,7 @@ pub fn train<B: AutodiffBackend>(
     );
 
     config
-        .save(format!("{artifact_dir}/config.json"))
+        .save(artifact_dir.join("config.json"))
         .expect("config should be saved successfully");
 
     // Build the train pipeline. `SamplerDataset` caps each epoch to a fixed
@@ -275,7 +277,7 @@ pub fn train<B: AutodiffBackend>(
 
     result
         .model
-        .save_file(format!("{artifact_dir}/model"), &CompactRecorder::new())
+        .save_file(artifact_dir.join("model"), &CompactRecorder::new())
         .into_diagnostic()?;
 
     Ok(())

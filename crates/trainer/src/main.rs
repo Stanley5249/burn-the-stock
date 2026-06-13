@@ -7,6 +7,8 @@ mod model;
 mod store;
 mod training;
 
+use std::path::PathBuf;
+
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{Autodiff, Wgpu};
 use burn::optim::AdamWConfig;
@@ -29,11 +31,11 @@ struct Args {
         default_value = "data/yfinance/stocks.parquet",
         help_heading = "Data"
     )]
-    data: String,
+    data: PathBuf,
 
     /// Directory for checkpoints, config, and the final model.
     #[arg(long, default_value = "artifacts", help_heading = "Data")]
-    artifact_dir: String,
+    artifact_dir: PathBuf,
 
     /// GRU hidden size, the temporal summary width. A smaller value trains faster.
     #[arg(long, help_heading = "Model")]

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::label::compute_labels_rewards;
 use chrono::NaiveDate;
 use fastrand::Rng;
@@ -165,9 +167,9 @@ impl TickerStore {
     /// adjustment can drive a delisted ticker's whole history negative, which
     /// would otherwise poison the log-return and ratio features and the barrier
     /// labels that compare prices.
-    #[instrument(level = "info", skip_all, fields(path = %path))]
+    #[instrument(level = "info", skip_all, fields(path = %path.display()))]
     pub fn load(
-        path: &str,
+        path: &Path,
         take_profit: f32,
         stop_loss: f32,
         horizon: usize,
@@ -179,41 +181,42 @@ impl TickerStore {
         )
         .unwrap();
 
-        let long = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())?
-            .select([
-                col(CODE).cast(DataType::String).alias(TICKER),
-                col(DATE).cast(DataType::Date),
-                col(OPEN).cast(DataType::Float32),
-                col(HIGH).cast(DataType::Float32),
-                col(LOW).cast(DataType::Float32),
-                col(CLOSE).cast(DataType::Float32),
-                col(VOLUME).cast(DataType::Float32),
-            ])
-            .filter(col(CLOSE).gt(lit(0.0)))
-            // Sort before deriving features so the per-ticker `shift` inside
-            // `stationary_features` sees rows in date order.
-            .sort([TICKER, DATE], SortMultipleOptions::new())
-            .with_columns(stationary_features())
-            // Standardize each feature across every stock on the same date. This
-            // runs over the full loaded universe, before any ticker subsetting,
-            // so the cross-section is the whole market.
-            .with_columns(cross_sectional_zscore())
-            // The only nulls are each ticker's first row, whose previous bar did
-            // not exist, so drop them across all columns before packing the
-            // feature array.
-            .drop_nulls(None)
-            .select([
-                col(TICKER),
-                col(DATE),
-                feature_expr.alias(FEATURE),
-                // Raw high/low/close survive the feature pipeline untouched, since
-                // the z-score only rewrites the feature columns, and the barrier
-                // labels need the intraday range to detect a touch.
-                col(HIGH),
-                col(LOW),
-                col(CLOSE),
-            ])
-            .collect()?;
+        let long =
+            LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?
+                .select([
+                    col(CODE).cast(DataType::String).alias(TICKER),
+                    col(DATE).cast(DataType::Date),
+                    col(OPEN).cast(DataType::Float32),
+                    col(HIGH).cast(DataType::Float32),
+                    col(LOW).cast(DataType::Float32),
+                    col(CLOSE).cast(DataType::Float32),
+                    col(VOLUME).cast(DataType::Float32),
+                ])
+                .filter(col(CLOSE).gt(lit(0.0)))
+                // Sort before deriving features so the per-ticker `shift` inside
+                // `stationary_features` sees rows in date order.
+                .sort([TICKER, DATE], SortMultipleOptions::new())
+                .with_columns(stationary_features())
+                // Standardize each feature across every stock on the same date. This
+                // runs over the full loaded universe, before any ticker subsetting,
+                // so the cross-section is the whole market.
+                .with_columns(cross_sectional_zscore())
+                // The only nulls are each ticker's first row, whose previous bar did
+                // not exist, so drop them across all columns before packing the
+                // feature array.
+                .drop_nulls(None)
+                .select([
+                    col(TICKER),
+                    col(DATE),
+                    feature_expr.alias(FEATURE),
+                    // Raw high/low/close survive the feature pipeline untouched, since
+                    // the z-score only rewrites the feature columns, and the barrier
+                    // labels need the intraday range to detect a touch.
+                    col(HIGH),
+                    col(LOW),
+                    col(CLOSE),
+                ])
+                .collect()?;
 
         let groups = long.partition_by_stable([TICKER], true)?;
 
