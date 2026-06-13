@@ -15,21 +15,22 @@ const LOW: PlSmallStr = PlSmallStr::from_static("low");
 const CLOSE: PlSmallStr = PlSmallStr::from_static("close");
 const VOLUME: PlSmallStr = PlSmallStr::from_static("volume");
 
-const LOG_RETURN: PlSmallStr = PlSmallStr::from_static("log_return");
-const VOLUME_RATIO: PlSmallStr = PlSmallStr::from_static("volume_ratio");
-const HL_RANGE: PlSmallStr = PlSmallStr::from_static("hl_range");
-const GAP: PlSmallStr = PlSmallStr::from_static("gap");
-const BODY: PlSmallStr = PlSmallStr::from_static("body");
+const OPEN_RETURN: PlSmallStr = PlSmallStr::from_static("open_return");
+const HIGH_RETURN: PlSmallStr = PlSmallStr::from_static("high_return");
+const LOW_RETURN: PlSmallStr = PlSmallStr::from_static("low_return");
+const CLOSE_RETURN: PlSmallStr = PlSmallStr::from_static("close_return");
+const VOLUME_RETURN: PlSmallStr = PlSmallStr::from_static("volume_return");
 
 /// The five stationary features flattened per row, in column order. Width stays
 /// at five so the model, batcher, and tensor shapes are unchanged from the raw
 /// OHLCV layout this replaced.
-pub(crate) const FEATURE_NAMES: [PlSmallStr; 5] = [LOG_RETURN, VOLUME_RATIO, HL_RANGE, GAP, BODY];
-
-/// Rolling window, in trading days, for the volume average that `volume_ratio`
-/// divides by. The `min_periods` equals this window, so the leading rows of every
-/// ticker are null and dropped as warmup at load.
-const VOLUME_WINDOW: usize = 20;
+pub(crate) const FEATURE_NAMES: [PlSmallStr; 5] = [
+    OPEN_RETURN,
+    HIGH_RETURN,
+    LOW_RETURN,
+    CLOSE_RETURN,
+    VOLUME_RETURN,
+];
 
 const fn col(name: PlSmallStr) -> Expr {
     Expr::Column(name)
@@ -37,39 +38,38 @@ const fn col(name: PlSmallStr) -> Expr {
 
 /// Build the five stationary feature expressions from the raw OHLCV columns.
 ///
-/// Each is an honest stationarity transform of OHLCV, no invented indicators:
-/// price levels become log returns, raw volume becomes a log ratio to its own
-/// rolling average, and the intraday bar is described by scale-free range and
-/// body shape. The per-ticker `shift` and `rolling_mean` run `over` the ticker so
-/// they never reach across stock boundaries, which means the caller must have
-/// sorted by `[ticker, date]` first.
+/// One uniform transform per channel: the natural log of its ratio to the prior
+/// bar. The four prices share a single anchor, the previous close, so the
+/// overnight gap (open), the intraday extremes (high, low), and the close-to-close
+/// return all land in one comparable frame, and the old hand-built range, gap, and
+/// body indicators are linear combinations the model can recover on its own. The
+/// per-ticker `shift` runs `over` the ticker so it never reaches across stock
+/// boundaries, which means the caller must have sorted by `[ticker, date]` first.
 fn stationary_features() -> [Expr; 5] {
     let prev_close = col(CLOSE).shift(lit(1)).over([col(TICKER)]);
-
-    let volume_mean = col(VOLUME)
-        .rolling_mean(RollingOptionsFixedWindow {
-            window_size: VOLUME_WINDOW,
-            min_periods: VOLUME_WINDOW,
-            ..Default::default()
-        })
-        .over([col(TICKER)]);
+    let prev_volume = col(VOLUME).shift(lit(1)).over([col(TICKER)]);
 
     let natural_log = || lit(std::f64::consts::E);
-    let high_low = col(HIGH) - col(LOW);
 
     // Volume is a count, so a no-trade day has volume 0 and the bare ratio's log
     // is `-inf`. Add one share to both sides (log1p style) to keep it finite
     // while leaving real, large volumes essentially unchanged.
-    let volume_ratio = ((col(VOLUME) + lit(1.0)) / (volume_mean + lit(1.0))).log(natural_log());
+    let volume_return = ((col(VOLUME) + lit(1.0)) / (prev_volume + lit(1.0))).log(natural_log());
 
     [
-        (col(CLOSE) / prev_close.clone())
+        (col(OPEN) / prev_close.clone())
             .log(natural_log())
-            .alias(LOG_RETURN),
-        volume_ratio.alias(VOLUME_RATIO),
-        (high_low.clone() / col(CLOSE)).alias(HL_RANGE),
-        ((col(OPEN) - prev_close.clone()) / prev_close).alias(GAP),
-        ((col(CLOSE) - col(OPEN)) / (high_low + lit(1e-8))).alias(BODY),
+            .alias(OPEN_RETURN),
+        (col(HIGH) / prev_close.clone())
+            .log(natural_log())
+            .alias(HIGH_RETURN),
+        (col(LOW) / prev_close.clone())
+            .log(natural_log())
+            .alias(LOW_RETURN),
+        (col(CLOSE) / prev_close)
+            .log(natural_log())
+            .alias(CLOSE_RETURN),
+        volume_return.alias(VOLUME_RETURN),
     ]
 }
 
@@ -81,7 +81,7 @@ fn stationary_features() -> [Expr; 5] {
 /// same way on a given day. Standardizing per date removes that common factor and
 /// leaves only how a stock did relative to its peers, which is the signal that
 /// survives in a weak-signal universe. Run after [`stationary_features`] and
-/// before the warmup `drop_nulls`, so null warmup values are excluded from the
+/// before the `drop_nulls`, so each ticker's null first row is excluded from the
 /// per-date statistics by polars and then dropped.
 fn cross_sectional_zscore() -> [Expr; 5] {
     FEATURE_NAMES.map(|name| {
@@ -156,8 +156,8 @@ impl TickerStore {
     /// then standardizing each feature cross-sectionally across the whole loaded
     /// universe per date.
     ///
-    /// The leading rows of each ticker carry null features while the volume
-    /// rolling average warms up, so they are dropped. The final `horizon` rows of
+    /// Each ticker's first row carries null features because its previous-bar
+    /// reference does not exist, so it is dropped. The final `horizon` rows of
     /// each ticker are then dropped so every kept row has a full forward window for
     /// its triple-barrier label. Tickers too short to yield a single window are
     /// kept but simply produce no windows later. `take_profit`, `stop_loss`, and
@@ -192,17 +192,17 @@ impl TickerStore {
                 col(VOLUME).cast(DataType::Float32),
             ])
             .filter(col(CLOSE).gt(lit(0.0)))
-            // Sort before deriving features so the per-ticker `shift` and
-            // `rolling_mean` inside `stationary_features` see rows in date order.
+            // Sort before deriving features so the per-ticker `shift` inside
+            // `stationary_features` sees rows in date order.
             .sort([TICKER, DATE], SortMultipleOptions::new())
             .with_columns(stationary_features())
             // Standardize each feature across every stock on the same date. This
             // runs over the full loaded universe, before any ticker subsetting,
             // so the cross-section is the whole market.
             .with_columns(cross_sectional_zscore())
-            // The only nulls are the warmup rows whose volume average and
-            // previous close had too few prior days, so drop them across all
-            // columns before packing the feature array.
+            // The only nulls are each ticker's first row, whose previous bar did
+            // not exist, so drop them across all columns before packing the
+            // feature array.
             .drop_nulls(None)
             .select([
                 col(TICKER),
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn cross_sectional_zscore_centers_each_date() {
         // Two dates, three stocks each, with deliberately different scales so a
-        // raw mean would be far from zero. Only `log_return` is exercised; the
+        // raw mean would be far from zero. Only `open_return` is exercised; the
         // other four columns just need to exist for the shared helper.
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         let next = epoch + chrono::Duration::days(1);
@@ -494,11 +494,11 @@ mod tests {
 
         let frame = df!(
             "date" => [epoch, epoch, epoch, next, next, next],
-            "log_return" => [1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0],
-            "volume_ratio" => zeros,
-            "hl_range" => zeros,
-            "gap" => zeros,
-            "body" => zeros,
+            "open_return" => [1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0],
+            "high_return" => zeros,
+            "low_return" => zeros,
+            "close_return" => zeros,
+            "volume_return" => zeros,
         )
         .unwrap();
 
@@ -508,7 +508,7 @@ mod tests {
             .collect()
             .unwrap();
 
-        let standardized = out.column(&LOG_RETURN).unwrap().f32().unwrap();
+        let standardized = out.column(&OPEN_RETURN).unwrap().f32().unwrap();
 
         // Each date's three values must average to ~0 after standardizing.
         let first: f32 = (0..3).map(|i| standardized.get(i).unwrap()).sum();
