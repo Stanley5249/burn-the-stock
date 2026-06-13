@@ -62,13 +62,20 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
 
         let start_values: Vec<i32> = items
             .iter()
-            .map(|item| i32::try_from(item.start).unwrap())
+            .map(|item| {
+                i32::try_from(item.start)
+                    .expect("row index exceeds i32; dataset far larger than supported")
+            })
             .collect();
         let starts = Tensor::<B, 1, Int>::from_data(TensorData::new(start_values, [count]), device);
 
         // Build the `[count, steps]` absolute row indices by broadcasting each
         // window start across the step offsets `0..steps`.
-        let offsets = Tensor::<B, 1, Int>::arange(0..i64::try_from(steps).unwrap(), device);
+        let offsets = Tensor::<B, 1, Int>::arange(
+            0..i64::try_from(steps)
+                .expect("steps exceeds i64; window length far larger than supported"),
+            device,
+        );
         let index = starts.clone().reshape([count, 1]).expand([count, steps])
             + offsets.reshape([1, steps]).expand([count, steps]);
 
@@ -81,7 +88,11 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
             .reshape([count, steps, FEATURE_NAMES.len()]);
 
         // The label and reward are read on the window's last day.
-        let last = starts.add_scalar(i32::try_from(steps).unwrap() - 1);
+        let last = starts.add_scalar(
+            i32::try_from(steps)
+                .expect("steps exceeds i32; window length far larger than supported")
+                - 1,
+        );
         let label = self.labels.clone().select(0, last.clone());
         let reward = self.rewards.clone().select(0, last);
 

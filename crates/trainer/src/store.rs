@@ -363,9 +363,12 @@ impl TickerStore {
             if ticker.rows() < steps {
                 continue;
             }
-            let ticker_index = u32::try_from(ticker_index).unwrap();
+            let ticker_index = u32::try_from(ticker_index)
+                .expect("ticker count exceeds u32; far larger than supported");
             let last_start = ticker.rows() - steps;
-            for start in 0..=u32::try_from(last_start).unwrap() {
+            for start in 0..=u32::try_from(last_start)
+                .expect("row index exceeds u32; ticker far larger than supported")
+            {
                 windows.push((ticker_index, start));
             }
         }
@@ -383,7 +386,8 @@ impl TickerStore {
         let mut offset = 0u32;
         for ticker in &self.tickers {
             offsets.push(offset);
-            offset += u32::try_from(ticker.rows()).unwrap();
+            offset += u32::try_from(ticker.rows())
+                .expect("row index exceeds u32; ticker far larger than supported");
         }
         offsets
     }
