@@ -24,19 +24,22 @@ pub struct TrainingConfig {
     pub optimizer: AdamWConfig,
     #[config(default = 1.0e-3)]
     pub learning_rate: f64,
-    /// Swing-reversal magnitude for the oracle labels, as a fraction of price.
-    /// Mirrors [`crate::label::LABEL_THRESHOLD`].
-    #[config(default = 0.03)]
-    pub label_threshold: f32,
+    /// Take-profit barrier for the triple-barrier labels, as a positive fraction
+    /// of the entry close.
+    #[config(default = 0.05)]
+    pub take_profit: f32,
+    /// Stop-loss barrier for the triple-barrier labels, as a positive fraction of
+    /// the entry close.
+    #[config(default = 0.05)]
+    pub stop_loss: f32,
+    /// Vertical-barrier horizon in trading days for the triple-barrier labels.
+    #[config(default = 10)]
+    pub label_horizon: usize,
     /// Round-trip transaction cost charged to a Buy in the EV metric, as a
     /// fraction. The `sim_stock` default is 0.1425% brokerage twice plus 0.3%
     /// sell tax.
     #[config(default = 0.005_85)]
     pub fee: f32,
-    /// Symmetric clip on the per-row reward fed to the EV metric, taming
-    /// penny-stock and inverse-ETF moves that would otherwise dominate.
-    #[config(default = 1.0)]
-    pub reward_clip: f32,
     /// Number of full passes over the training data. With a fixed `epoch_size`
     /// this sets how many epochs run: `passes * windows / epoch_size`.
     #[config(default = 1)]
@@ -78,7 +81,6 @@ pub struct RunOptions {
 /// Run the full training loop.
 ///
 /// `data_path`    - aggregated `stocks.parquet` with the OHLCV history.
-/// `tickers_path` - `tickers.parquet` with the per-ticker industry metadata.
 /// `artifact_dir` - directory where checkpoints, config, and the final model land.
 /// `options`      - runtime knobs, see [`RunOptions`].
 ///
@@ -88,9 +90,8 @@ pub struct RunOptions {
 pub fn train<B: AutodiffBackend>(
     device: &B::Device,
     data_path: &str,
-    tickers_path: &str,
     artifact_dir: &str,
-    mut config: TrainingConfig,
+    config: &TrainingConfig,
     options: RunOptions,
 ) -> Result<()> {
     let RunOptions {
@@ -109,13 +110,16 @@ pub fn train<B: AutodiffBackend>(
     // Load the backend-free store once. The store carries the train/valid split
     // and tensors are produced later by two batchers, so there is no per-backend
     // copy of the data.
-    let store = TickerStore::load(data_path, config.label_threshold)
-        .into_diagnostic()?
-        .attach_industries(tickers_path)
-        .into_diagnostic()?;
+    let store = TickerStore::load(
+        data_path,
+        config.take_profit,
+        config.stop_loss,
+        config.label_horizon,
+    )
+    .into_diagnostic()?;
 
     // Trim to a random ticker subset before the split so both sides shrink
-    // together. Done after attach_industries, whose per-ticker encoding follows.
+    // together.
     let store = match max_tickers {
         Some(count) => store.sample_tickers(count, config.seed),
         None => store,
@@ -133,11 +137,10 @@ pub fn train<B: AutodiffBackend>(
         .train_valid_split(cutoff, config.steps)
         .into_diagnostic()?;
 
-    let n_industries = train_store.n_industries();
+    // Surface the triple-barrier class balance per split so the take-profit and
+    // stop-loss knobs can be tuned toward an even Sell/Hold/Buy mix.
+    crate::logging::log_label_balance(train_store.label_counts(), valid_store.label_counts());
 
-    // The industry encoding is only known once the data is loaded, so size the
-    // categorical branch from it before building the model and saving the config.
-    config.model.n_industries = n_industries;
     config
         .save(format!("{artifact_dir}/config.json"))
         .expect("config should be saved successfully");
@@ -158,7 +161,7 @@ pub fn train<B: AutodiffBackend>(
     // One structured record of everything that shaped this run, so a later read of
     // `experiment.log` can tie the metrics back to the flags and derived counts
     // that produced them.
-    crate::logging::log_run_config(&config, &options, n_industries, total_windows, num_epochs);
+    crate::logging::log_run_config(config, &options, total_windows, num_epochs);
 
     let train_sampler = SamplerDataset::new(
         train_windows,
@@ -167,22 +170,17 @@ pub fn train<B: AutodiffBackend>(
             .with_seed(config.seed),
     );
 
-    let dataloader_train = DataLoaderBuilder::new(StockBatcher::<B>::new(
-        config.steps,
-        n_industries,
-        &train_store,
-        device,
-    ))
-    .batch_size(config.batch_size)
-    .set_device(device.clone())
-    .build(train_sampler);
+    let dataloader_train =
+        DataLoaderBuilder::new(StockBatcher::<B>::new(config.steps, &train_store, device))
+            .batch_size(config.batch_size)
+            .set_device(device.clone())
+            .build(train_sampler);
 
     // Build the valid pipeline on the inner backend, as burn expects. A full
     // sweep over every window dwarfs a training run, so when asked, cap a
     // once-shuffled pool: representative across tickers and dates, and stable
     // from one epoch to the next.
-    let valid_batcher =
-        StockBatcher::<B::InnerBackend>::new(config.steps, n_industries, &valid_store, device);
+    let valid_batcher = StockBatcher::<B::InnerBackend>::new(config.steps, &valid_store, device);
     let valid_builder = || {
         DataLoaderBuilder::new(valid_batcher.clone())
             .batch_size(config.batch_size)
@@ -208,7 +206,7 @@ pub fn train<B: AutodiffBackend>(
         .metrics((
             AccuracyMetric::new(),
             FBetaScoreMetric::multiclass(1.0, 1, ClassReduction::Macro),
-            ExpectedValueMetric::new(config.fee, config.reward_clip),
+            ExpectedValueMetric::new(config.fee),
             PrecisionClassMetric::new(2, "Buy"),
             PrecisionClassMetric::new(0, "Sell"),
             LossMetric::new(),

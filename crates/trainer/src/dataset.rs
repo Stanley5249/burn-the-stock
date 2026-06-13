@@ -4,12 +4,12 @@ use fastrand::Rng;
 
 /// One training sample, reduced to the absolute row where its window starts in the
 /// store's concatenated row numbering. The batcher gathers the feature window,
-/// label, reward, and industry from its resident device tensors using this index,
-/// so the item carries no feature data and stays backend-free.
+/// label, and reward from its resident device tensors using this index, so the item
+/// carries no feature data and stays backend-free.
 #[derive(Clone, Copy, Debug)]
 pub struct StockItem {
     /// Absolute row of the window's first day. The window spans `steps` consecutive
-    /// rows from here, and the label/reward/industry are read at its last day.
+    /// rows from here, and the label and reward are read at its last day.
     pub start: u32,
 }
 

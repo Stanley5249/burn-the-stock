@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod batcher;
 mod dataset;
 mod label;
@@ -24,10 +22,6 @@ struct Args {
     /// Aggregated OHLCV history.
     #[arg(long, default_value = "data/yfinance/stocks.parquet")]
     data: String,
-
-    /// Per-ticker industry metadata from the `tickers` prefetch bin.
-    #[arg(long, default_value = "data/yfinance/tickers.parquet")]
-    tickers: String,
 
     /// Directory for checkpoints, config, and the final model.
     #[arg(long, default_value = "artifacts")]
@@ -71,24 +65,28 @@ struct Args {
     #[arg(long)]
     learning_rate: Option<f64>,
 
-    /// Swing-reversal magnitude for the oracle labels, as a fraction of price.
+    /// Take-profit barrier for the triple-barrier labels, as a fraction of price.
     #[arg(long)]
-    label_threshold: Option<f32>,
+    take_profit: Option<f32>,
+
+    /// Stop-loss barrier for the triple-barrier labels, as a fraction of price.
+    #[arg(long)]
+    stop_loss: Option<f32>,
+
+    /// Vertical-barrier horizon in trading days for the triple-barrier labels.
+    #[arg(long)]
+    label_horizon: Option<usize>,
 
     /// Round-trip transaction cost charged to a Buy in the EV metric, as a
     /// fraction of price.
     #[arg(long)]
     fee: Option<f32>,
 
-    /// Symmetric clip on the per-row reward fed to the EV metric.
-    #[arg(long)]
-    reward_clip: Option<f32>,
-
     /// L2 weight decay for the optimizer.
     #[arg(long)]
     weight_decay: Option<f32>,
 
-    /// Dropout probability in the fusion head.
+    /// Dropout probability in the head.
     #[arg(long)]
     dropout: Option<f64>,
 
@@ -113,8 +111,7 @@ fn main() -> Result<()> {
 
     let device = WgpuDevice::default();
 
-    // `n_industries` is a placeholder; `train` fills it from the loaded data.
-    let mut model = StockModelConfig::new(0);
+    let mut model = StockModelConfig::new();
     if let Some(d_hidden) = args.d_hidden {
         model = model.with_d_hidden(d_hidden);
     }
@@ -144,14 +141,17 @@ fn main() -> Result<()> {
     if let Some(learning_rate) = args.learning_rate {
         training_config = training_config.with_learning_rate(learning_rate);
     }
-    if let Some(label_threshold) = args.label_threshold {
-        training_config = training_config.with_label_threshold(label_threshold);
+    if let Some(take_profit) = args.take_profit {
+        training_config = training_config.with_take_profit(take_profit);
+    }
+    if let Some(stop_loss) = args.stop_loss {
+        training_config = training_config.with_stop_loss(stop_loss);
+    }
+    if let Some(label_horizon) = args.label_horizon {
+        training_config = training_config.with_label_horizon(label_horizon);
     }
     if let Some(fee) = args.fee {
         training_config = training_config.with_fee(fee);
-    }
-    if let Some(reward_clip) = args.reward_clip {
-        training_config = training_config.with_reward_clip(reward_clip);
     }
 
     let options = RunOptions {
@@ -164,9 +164,8 @@ fn main() -> Result<()> {
     train::<Backend>(
         &device,
         &args.data,
-        &args.tickers,
         &args.artifact_dir,
-        training_config,
+        &training_config,
         options,
     )
 }

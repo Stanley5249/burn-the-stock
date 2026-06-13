@@ -19,13 +19,12 @@ pub const CLASS_WEIGHTS: [f32; NUM_CLASSES] = [2.0, 1.0, 2.0];
 /// feature column.
 const NUM_FEATURES: usize = 5;
 
-/// Multi-branch late-fusion classifier.
+/// GRU classifier over the stationary feature window.
 ///
-/// A GRU summarizes the stationary feature window into its last hidden state, a
-/// linear layer embeds the industry one-hot, and the two branches are
-/// concatenated and run through a small MLP head that emits the action logits.
+/// A two-layer GRU summarizes the window into its last hidden state, which a small
+/// MLP head turns into the action logits.
 ///
-/// Input:  technical `[batch, steps, 5]`, ticker `[batch, n_industries]`
+/// Input:  technical `[batch, steps, 5]`
 /// Output: `[batch, NUM_CLASSES]` (logits)
 #[derive(Module, Debug)]
 pub struct StockModel<B: Backend> {
@@ -33,9 +32,7 @@ pub struct StockModel<B: Backend> {
     gru_1_norm: RmsNorm<B>,
     gru_2: Gru<B>,
     gru_2_norm: RmsNorm<B>,
-    industry: Linear<B>,
-    industry_norm: RmsNorm<B>,
-    fusion: Linear<B>,
+    hidden: Linear<B>,
     head: Linear<B>,
     activation: Gelu,
     dropout: Dropout,
@@ -52,14 +49,9 @@ impl<B: Backend> StockModel<B> {
 
         let gru_2_norm = RmsNormConfig::new(config.d_hidden).init(device);
 
-        let industry = LinearConfig::new(config.n_industries, config.d_industry).init(device);
+        let hidden = LinearConfig::new(config.d_hidden, config.d_head).init(device);
 
-        let industry_norm = RmsNormConfig::new(config.d_industry).init(device);
-
-        let fusion =
-            LinearConfig::new(config.d_hidden + config.d_industry, config.d_fusion).init(device);
-
-        let head = LinearConfig::new(config.d_fusion, NUM_CLASSES).init(device);
+        let head = LinearConfig::new(config.d_head, NUM_CLASSES).init(device);
 
         let loss = CrossEntropyLossConfig::new()
             .with_weights(Some(CLASS_WEIGHTS.to_vec()))
@@ -70,9 +62,7 @@ impl<B: Backend> StockModel<B> {
             gru_1_norm,
             gru_2,
             gru_2_norm,
-            industry,
-            industry_norm,
-            fusion,
+            hidden,
             head,
             activation: Gelu::new(),
             dropout: DropoutConfig::new(config.dropout).init(),
@@ -81,7 +71,7 @@ impl<B: Backend> StockModel<B> {
     }
 
     /// Returns logits with shape `[batch, NUM_CLASSES]`.
-    pub fn forward(&self, technical: Tensor<B, 3>, ticker: Tensor<B, 2>) -> Tensor<B, 2> {
+    pub fn forward(&self, technical: Tensor<B, 3>) -> Tensor<B, 2> {
         let temporal_1 = self.gru_1.forward(technical, None);
 
         let temporal_1 = self.gru_1_norm.forward(temporal_1);
@@ -96,18 +86,14 @@ impl<B: Backend> StockModel<B> {
             .reshape([batch, d_hidden]);
         let summary = self.gru_2_norm.forward(summary);
 
-        let categorical = self.industry.forward(ticker);
-        let categorical = self.industry_norm.forward(categorical);
-
-        let fused = Tensor::cat(vec![summary, categorical], 1);
-        let hidden = self.activation.forward(self.fusion.forward(fused));
+        let hidden = self.activation.forward(self.hidden.forward(summary));
         let hidden = self.dropout.forward(hidden);
 
         self.head.forward(hidden)
     }
 
     fn forward_classification(&self, batch: &StockBatch<B>) -> StockOutput<B> {
-        let logits = self.forward(batch.technical.clone(), batch.ticker.clone());
+        let logits = self.forward(batch.technical.clone());
 
         let loss = self.loss.forward(logits.clone(), batch.label.clone());
 
@@ -212,18 +198,13 @@ impl<B: Backend> InferenceStep for StockModel<B> {
 /// Hyperparameters for `StockModel`.
 #[derive(Config, Debug)]
 pub struct StockModelConfig {
-    /// One-hot width of the industry feature, set from the dataloader.
-    pub n_industries: usize,
-    /// GRU hidden size, the temporal branch summary width.
+    /// GRU hidden size, the temporal summary width.
     #[config(default = 64)]
     pub d_hidden: usize,
-    /// Output width of the industry branch.
-    #[config(default = 16)]
-    pub d_industry: usize,
-    /// Hidden width of the fusion head.
+    /// Hidden width of the MLP head.
     #[config(default = 32)]
-    pub d_fusion: usize,
-    /// Dropout probability applied in the fusion head.
+    pub d_head: usize,
+    /// Dropout probability applied in the head.
     #[config(default = 0.2)]
     pub dropout: f64,
 }
@@ -242,13 +223,12 @@ mod tests {
     #[test]
     fn forward_outputs_logits() {
         let device = FlexDevice;
-        let config = StockModelConfig::new(7);
+        let config = StockModelConfig::new();
         let model = config.init::<Flex>(&device);
 
         let technical = Tensor::<Flex, 3>::zeros([2, 8, NUM_FEATURES], &device);
-        let ticker = Tensor::<Flex, 2>::zeros([2, 7], &device);
 
-        let logits = model.forward(technical, ticker);
+        let logits = model.forward(technical);
 
         assert_eq!(logits.dims(), [2, NUM_CLASSES]);
     }

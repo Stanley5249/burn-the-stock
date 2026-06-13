@@ -2,14 +2,12 @@ use crate::label::compute_labels_rewards;
 use chrono::NaiveDate;
 use fastrand::Rng;
 use polars::prelude::*;
-use std::collections::HashMap;
 use tracing::instrument;
 
 const CODE: PlSmallStr = PlSmallStr::from_static("code");
 const TICKER: PlSmallStr = PlSmallStr::from_static("ticker");
 const DATE: PlSmallStr = PlSmallStr::from_static("date");
 const FEATURE: PlSmallStr = PlSmallStr::from_static("feature");
-const INDUSTRY: PlSmallStr = PlSmallStr::from_static("industry");
 
 const OPEN: PlSmallStr = PlSmallStr::from_static("open");
 const HIGH: PlSmallStr = PlSmallStr::from_static("high");
@@ -93,37 +91,6 @@ fn cross_sectional_zscore() -> [Expr; 5] {
     })
 }
 
-/// Build the `ticker name -> industry index` map from a frame with `ticker`
-/// and `industry` string columns. Distinct industries are indexed in sorted
-/// order for a stable encoding, and the returned width includes one extra
-/// bucket for tickers with an unknown industry.
-pub(crate) fn index_industries(
-    frame: &DataFrame,
-) -> PolarsResult<(HashMap<PlSmallStr, usize>, usize)> {
-    let names = frame.column(&TICKER)?.str()?;
-    let industries = frame.column(&INDUSTRY)?.str()?;
-
-    let mut distinct: Vec<&str> = industries.into_iter().flatten().collect();
-    distinct.sort_unstable();
-    distinct.dedup();
-
-    let index_of: HashMap<&str, usize> = distinct
-        .iter()
-        .enumerate()
-        .map(|(index, industry)| (*industry, index))
-        .collect();
-
-    let mut codes = HashMap::new();
-    for (name, industry) in names.into_iter().zip(industries) {
-        if let (Some(name), Some(industry)) = (name, industry) {
-            codes.insert(name.into(), index_of[industry]);
-        }
-    }
-
-    // The trailing bucket catches tickers whose industry is null or missing.
-    Ok((codes, distinct.len() + 1))
-}
-
 /// One ticker's history flattened out of polars into plain buffers, so window
 /// extraction in the hot path is pointer-offset indexing rather than Arrow array
 /// traversal. Rows are sorted ascending by date, and the three vectors share that
@@ -138,7 +105,7 @@ struct Ticker {
     features: Vec<f32>,
     /// One action label per row.
     labels: Vec<u8>,
-    /// Signed forward return to the next swing extreme, one per row.
+    /// Signed realized return of each row's barrier outcome, one per row.
     rewards: Vec<f32>,
 }
 
@@ -174,20 +141,13 @@ impl Ticker {
     }
 }
 
-/// Backend-free store of every ticker's flattened history plus the industry
-/// encoding. This is the data layer: it owns the loaded parquet data and the
-/// train/valid split and ticker-subset transforms, but knows nothing about
-/// windows, tensors, or devices. A [`crate::dataset::WindowDataset`] borrows it
-/// behind an `Arc` to enumerate and materialize training samples.
+/// Backend-free store of every ticker's flattened history. This is the data
+/// layer: it owns the loaded parquet data and the train/valid split and
+/// ticker-subset transforms, but knows nothing about windows, tensors, or
+/// devices. A [`crate::dataset::WindowDataset`] borrows it behind an `Arc` to
+/// enumerate and materialize training samples.
 pub struct TickerStore {
     tickers: Vec<Ticker>,
-    /// Per-ticker industry index, aligned with `tickers`. Empty until
-    /// [`Self::attach_industries`] runs; an attached ticker with no known
-    /// industry resolves to the trailing unknown bucket (`n_industries - 1`).
-    industry_of: Vec<usize>,
-    /// One-hot width for the industry feature: distinct industries plus a final
-    /// unknown bucket. Zero means no categorical feature is attached.
-    n_industries: usize,
 }
 
 impl TickerStore {
@@ -197,18 +157,23 @@ impl TickerStore {
     /// universe per date.
     ///
     /// The leading rows of each ticker carry null features while the volume
-    /// rolling average warms up, so they are dropped. The final label-less row of
-    /// each ticker is then dropped so every kept row has a forward window for its
-    /// label. Tickers too short to yield a single window are kept but simply
-    /// produce no windows later. `threshold` sets the swing-reversal magnitude
-    /// passed to [`compute_labels_rewards`].
+    /// rolling average warms up, so they are dropped. The final `horizon` rows of
+    /// each ticker are then dropped so every kept row has a full forward window for
+    /// its triple-barrier label. Tickers too short to yield a single window are
+    /// kept but simply produce no windows later. `take_profit`, `stop_loss`, and
+    /// `horizon` set the barriers passed to [`compute_labels_rewards`].
     ///
     /// Rows with a non-positive close are dropped as corrupt. yfinance back
     /// adjustment can drive a delisted ticker's whole history negative, which
-    /// would otherwise poison the log-return and ratio features and the swing
+    /// would otherwise poison the log-return and ratio features and the barrier
     /// labels that compare prices.
     #[instrument(level = "info", skip_all, fields(path = %path))]
-    pub fn load(path: &str, threshold: f32) -> PolarsResult<Self> {
+    pub fn load(
+        path: &str,
+        take_profit: f32,
+        stop_loss: f32,
+        horizon: usize,
+    ) -> PolarsResult<Self> {
         let feature_expr = concat_arr(
             FEATURE_NAMES
                 .map(|name| col(name).cast(DataType::Float32))
@@ -243,6 +208,11 @@ impl TickerStore {
                 col(TICKER),
                 col(DATE),
                 feature_expr.alias(FEATURE),
+                // Raw high/low/close survive the feature pipeline untouched, since
+                // the z-score only rewrites the feature columns, and the barrier
+                // labels need the intraday range to detect a touch.
+                col(HIGH),
+                col(LOW),
                 col(CLOSE),
             ])
             .collect()?;
@@ -254,20 +224,26 @@ impl TickerStore {
         for group in groups {
             let height = group.height();
 
-            // A ticker needs at least two rows: one to keep and one to drop as
-            // the label-less last row.
-            if height <= 1 {
+            // A labeled row needs a full `horizon`-bar forward window, so a ticker
+            // with no more rows than the horizon yields nothing.
+            if height <= horizon {
                 continue;
             }
 
             let name: PlSmallStr = group.column(&TICKER)?.str()?.get(0).unwrap().into();
 
-            // Labels and rewards come from the full close series but are one short,
-            // already aligned to the rows we keep after dropping the label-less last
-            // row.
-            let (labels, rewards) = compute_labels_rewards(group.column(&CLOSE)?, threshold)?;
+            // Labels and rewards are `horizon` short, already aligned to the rows we
+            // keep after dropping the trailing horizon-less rows.
+            let (labels, rewards) = compute_labels_rewards(
+                group.column(&HIGH)?,
+                group.column(&LOW)?,
+                group.column(&CLOSE)?,
+                take_profit,
+                stop_loss,
+                horizon,
+            )?;
 
-            let head = group.head(Some(height - 1));
+            let head = group.head(Some(height - horizon));
 
             // Flatten the Array<f32, 5> feature column into row-major features
             // once, so window extraction later is a contiguous slice.
@@ -295,40 +271,7 @@ impl TickerStore {
             });
         }
 
-        Ok(Self {
-            tickers,
-            industry_of: Vec::new(),
-            n_industries: 0,
-        })
-    }
-
-    /// Attach the industry categorical feature from a `tickers.parquet` written
-    /// by the `tickers` prefetch bin (columns `market`, `code`, `industry`).
-    ///
-    /// Distinct industries get stable indices in sorted order, and a final
-    /// bucket absorbs every ticker whose industry is null or absent from the
-    /// file. Run before [`Self::train_valid_split`] so the per-ticker encoding
-    /// propagates to both sides.
-    #[instrument(level = "info", skip_all, fields(path = %path))]
-    pub fn attach_industries(mut self, path: &str) -> PolarsResult<Self> {
-        let frame = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())?
-            .select([
-                col(CODE).cast(DataType::String).alias(TICKER),
-                col(INDUSTRY).cast(DataType::String),
-            ])
-            .collect()?;
-
-        let (industry_codes, n_industries) = index_industries(&frame)?;
-        let unknown = n_industries - 1;
-
-        self.industry_of = self
-            .tickers
-            .iter()
-            .map(|ticker| industry_codes.get(&ticker.name).copied().unwrap_or(unknown))
-            .collect();
-        self.n_industries = n_industries;
-
-        Ok(self)
+        Ok(Self { tickers })
     }
 
     /// Randomly keep `count` tickers, chosen with `seed` so the subset is
@@ -340,39 +283,27 @@ impl TickerStore {
             return self;
         }
 
-        let has_industries = !self.industry_of.is_empty();
-
         let mut rng = Rng::with_seed(seed);
         let indices = rng.choose_multiple(0..self.tickers.len(), count);
 
-        let mut tickers = Vec::with_capacity(count);
-        let mut industry_of = Vec::with_capacity(if has_industries { count } else { 0 });
-        for index in indices {
-            tickers.push(self.tickers[index].clone());
-            if has_industries {
-                industry_of.push(self.industry_of[index]);
-            }
-        }
+        let tickers = indices
+            .into_iter()
+            .map(|index| self.tickers[index].clone())
+            .collect();
 
         self.tickers = tickers;
-        self.industry_of = industry_of;
         self
     }
 
     /// Split every ticker at `cutoff` into an earlier train store and a later
     /// valid store. Tickers whose train or valid side has fewer than `steps`
-    /// rows are dropped from that side. Both stores keep the industry encoding;
-    /// errors if either side ends up empty.
+    /// rows are dropped from that side. Errors if either side ends up empty.
     #[instrument(level = "info", skip_all, fields(steps))]
     pub fn train_valid_split(&self, cutoff: NaiveDate, steps: usize) -> PolarsResult<(Self, Self)> {
-        let has_industries = !self.industry_of.is_empty();
-
         let mut train_tickers = Vec::with_capacity(self.tickers.len());
-        let mut train_industry = Vec::new();
         let mut valid_tickers = Vec::with_capacity(self.tickers.len());
-        let mut valid_industry = Vec::new();
 
-        for (index, ticker) in self.tickers.iter().enumerate() {
+        for ticker in &self.tickers {
             // Dates are ascending, so `partition_point` is the count of rows
             // strictly before the cutoff.
             let split = ticker.dates.partition_point(|&day| day < cutoff);
@@ -380,15 +311,9 @@ impl TickerStore {
 
             if train.rows() >= steps {
                 train_tickers.push(train);
-                if has_industries {
-                    train_industry.push(self.industry_of[index]);
-                }
             }
             if valid.rows() >= steps {
                 valid_tickers.push(valid);
-                if has_industries {
-                    valid_industry.push(self.industry_of[index]);
-                }
             }
         }
 
@@ -397,24 +322,26 @@ impl TickerStore {
             NoData: "train/valid split left one side empty; check cutoff and steps"
         );
 
-        let train = Self {
-            tickers: train_tickers,
-            industry_of: train_industry,
-            n_industries: self.n_industries,
-        };
-        let valid = Self {
-            tickers: valid_tickers,
-            industry_of: valid_industry,
-            n_industries: self.n_industries,
-        };
-
-        Ok((train, valid))
+        Ok((
+            Self {
+                tickers: train_tickers,
+            },
+            Self {
+                tickers: valid_tickers,
+            },
+        ))
     }
 
-    /// One-hot width of the industry feature, needed to size the model's
-    /// categorical branch.
-    pub fn n_industries(&self) -> usize {
-        self.n_industries
+    /// Per-class label counts across every ticker, indexed Sell 0, Hold 1, Buy 2,
+    /// for logging the triple-barrier balance after a split.
+    pub fn label_counts(&self) -> [usize; 3] {
+        let mut counts = [0usize; 3];
+        for ticker in &self.tickers {
+            for &label in &ticker.labels {
+                counts[usize::from(label)] += 1;
+            }
+        }
+        counts
     }
 
     /// The latest date across every ticker, used to anchor a recent-window
@@ -465,31 +392,21 @@ impl TickerStore {
 
     /// Flatten every ticker's history into single contiguous buffers, in the same
     /// ticker order as [`Self::row_offsets`], so the batcher can upload them to the
-    /// device once and then gather each batch on-device by absolute row. The four
+    /// device once and then gather each batch on-device by absolute row. The three
     /// buffers share the row order: `features[row*5 .. row*5+5]`, `labels[row]`,
-    /// `rewards[row]`, and `industry_row[row]` are the same trading day.
-    ///
-    /// `industry_row` repeats each ticker's resolved industry across its rows and is
-    /// left empty when no industries are attached, mirroring the width-zero ticker
-    /// branch in the batcher.
+    /// and `rewards[row]` are the same trading day.
     pub(crate) fn resident_buffers(&self) -> ResidentBuffers {
         let stride = FEATURE_NAMES.len();
         let total: usize = self.tickers.iter().map(Ticker::rows).sum();
-        let has_industries = !self.industry_of.is_empty();
 
         let mut features = Vec::with_capacity(total * stride);
         let mut labels = Vec::with_capacity(total);
         let mut rewards = Vec::with_capacity(total);
-        let mut industry_row = Vec::with_capacity(if has_industries { total } else { 0 });
 
-        for (index, ticker) in self.tickers.iter().enumerate() {
+        for ticker in &self.tickers {
             features.extend_from_slice(&ticker.features);
             labels.extend(ticker.labels.iter().map(|&label| i32::from(label)));
             rewards.extend_from_slice(&ticker.rewards);
-            if has_industries {
-                let industry = i32::try_from(self.industry_of[index]).unwrap();
-                industry_row.extend(std::iter::repeat_n(industry, ticker.rows()));
-            }
         }
 
         ResidentBuffers {
@@ -497,7 +414,6 @@ impl TickerStore {
             features,
             labels,
             rewards,
-            industry_row,
         }
     }
 }
@@ -511,7 +427,6 @@ pub(crate) struct ResidentBuffers {
     pub(crate) features: Vec<f32>,
     pub(crate) labels: Vec<i32>,
     pub(crate) rewards: Vec<f32>,
-    pub(crate) industry_row: Vec<i32>,
 }
 
 /// Synthetic builders shared across the crate's module tests, so `dataset` and
@@ -527,19 +442,7 @@ impl TickerStore {
             .map(|t| make_ticker(&format!("t{t}"), f32::from(t) * 1000.0, rows))
             .collect();
 
-        Self {
-            tickers,
-            industry_of: Vec::new(),
-            n_industries: 0,
-        }
-    }
-
-    /// Attach an explicit per-ticker industry encoding, bypassing the parquet
-    /// `attach_industries` path.
-    pub(crate) fn set_industries(mut self, industry_of: Vec<usize>, n_industries: usize) -> Self {
-        self.industry_of = industry_of;
-        self.n_industries = n_industries;
-        self
+        Self { tickers }
     }
 }
 
@@ -615,26 +518,6 @@ mod tests {
 
         // The ordering within a date is preserved, so the smallest stays lowest.
         assert!(standardized.get(0).unwrap() < standardized.get(2).unwrap());
-    }
-
-    #[test]
-    fn index_industries_encodes_and_buckets_unknown() {
-        let frame = df!(
-            "ticker" => ["tse_2330", "otc_1240", "tse_2317", "tse_9999"],
-            "industry" => [Some("24"), Some("16"), Some("24"), None],
-        )
-        .unwrap();
-
-        let (codes, n_industries) = index_industries(&frame).unwrap();
-
-        // Two distinct industries ("16", "24") plus the unknown bucket.
-        assert_eq!(n_industries, 3);
-        // Sorted order: "16" -> 0, "24" -> 1.
-        assert_eq!(codes[&PlSmallStr::from_static("otc_1240")], 0);
-        assert_eq!(codes[&PlSmallStr::from_static("tse_2330")], 1);
-        assert_eq!(codes[&PlSmallStr::from_static("tse_2317")], 1);
-        // The null-industry ticker is left out of the map entirely.
-        assert!(!codes.contains_key(&PlSmallStr::from_static("tse_9999")));
     }
 
     #[test]

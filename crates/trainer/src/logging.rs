@@ -50,7 +50,6 @@ pub fn install_experiment_logger(artifact_dir: &str) -> Result<()> {
 pub fn log_run_config(
     config: &TrainingConfig,
     options: &RunOptions,
-    n_industries: usize,
     total_windows: usize,
     num_epochs: usize,
 ) {
@@ -62,18 +61,34 @@ pub fn log_run_config(
         passes = config.passes,
         num_epochs,
         total_windows,
-        n_industries,
         d_hidden = config.model.d_hidden,
         dropout = config.model.dropout,
         learning_rate = config.learning_rate,
-        label_threshold = config.label_threshold,
+        take_profit = config.take_profit,
+        stop_loss = config.stop_loss,
+        label_horizon = config.label_horizon,
         fee = config.fee,
-        reward_clip = config.reward_clip,
         seed = config.seed,
         valid_days = options.valid_days,
         valid_batches = ?options.valid_batches,
         max_tickers = ?options.max_tickers,
         patience = ?options.patience,
         "run config"
+    );
+}
+
+/// Emit the triple-barrier class balance of each split, indexed Sell 0, Hold 1,
+/// Buy 2, so reading `experiment.log` shows whether the take-profit and stop-loss
+/// knobs produced an even Sell/Hold/Buy mix.
+pub fn log_label_balance(train: [usize; 3], valid: [usize; 3]) {
+    tracing::info!(
+        target: "experiment",
+        train_sell = train[0],
+        train_hold = train[1],
+        train_buy = train[2],
+        valid_sell = valid[0],
+        valid_hold = valid[1],
+        valid_buy = valid[2],
+        "label balance"
     );
 }

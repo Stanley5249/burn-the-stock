@@ -32,26 +32,25 @@ impl<B: Backend> StockEvalInput<B> {
 
 /// Expected value per Buy trade, in percent.
 ///
-/// Long only and per sample: a predicted Buy earns the row's clipped reward minus
-/// the round-trip fee, while Hold and Sell stay flat at zero. Weighting each batch
-/// by its Buy count makes the running value the mean payoff over every Buy the
-/// model made across the epoch, which says directly whether its Buy calls pay.
+/// Long only and per sample: a predicted Buy earns the row's reward minus the
+/// round-trip fee, while Hold and Sell stay flat at zero. Weighting each batch by
+/// its Buy count makes the running value the mean payoff over every Buy the model
+/// made across the epoch, which says directly whether its Buy calls pay. The TBL
+/// reward is already bounded by the barrier, so no outlier clip is needed.
 #[derive(Clone)]
 pub struct ExpectedValueMetric<B: Backend> {
     name: MetricName,
     state: NumericMetricState,
     fee: f32,
-    clip: f32,
     _b: PhantomData<B>,
 }
 
 impl<B: Backend> ExpectedValueMetric<B> {
-    pub fn new(fee: f32, clip: f32) -> Self {
+    pub fn new(fee: f32) -> Self {
         Self {
             name: Arc::new("EV".to_string()),
             state: NumericMetricState::default(),
             fee,
-            clip,
             _b: PhantomData,
         }
     }
@@ -69,11 +68,7 @@ impl<B: Backend> Metric for ExpectedValueMetric<B> {
             usize::try_from(is_buy.clone().int().sum().into_scalar().elem::<i64>()).unwrap_or(0);
 
         // Long only: only Buy takes a position, so only its rows earn or lose.
-        let payoff = input
-            .reward
-            .clone()
-            .clamp(-self.clip, self.clip)
-            .sub_scalar(self.fee);
+        let payoff = input.reward.clone().sub_scalar(self.fee);
 
         let is_buy = is_buy.float();
         let trades = is_buy.clone().sum().into_scalar().elem::<f64>();
@@ -233,26 +228,12 @@ mod tests {
         let targets = Tensor::<Flex, 1, Int>::from_data([2, 1, 2], &device);
         let reward = Tensor::<Flex, 1>::from_data([0.10f32, 0.50, -0.04], &device);
 
-        let mut metric = ExpectedValueMetric::<Flex>::new(0.01, 1.0);
+        let mut metric = ExpectedValueMetric::<Flex>::new(0.01);
         metric.update(&StockEvalInput::new(logits, targets, reward), &meta());
 
         // Buy rows 0 and 2 only: (0.10 - 0.01) + (-0.04 - 0.01) = 0.04 over two
         // trades, so 2%. Hold contributes nothing.
         assert!((metric.value().current() - 2.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn ev_clips_outlier_reward() {
-        let device = FlexDevice;
-        let logits = Tensor::<Flex, 2>::from_data([[0.0, 0.0, 1.0]], &device);
-        let targets = Tensor::<Flex, 1, Int>::from_data([2], &device);
-        // A 50x move clips to the 1.0 bound before the fee.
-        let reward = Tensor::<Flex, 1>::from_data([50.0f32], &device);
-
-        let mut metric = ExpectedValueMetric::<Flex>::new(0.01, 1.0);
-        metric.update(&StockEvalInput::new(logits, targets, reward), &meta());
-
-        assert!((metric.value().current() - 99.0).abs() < 1e-4);
     }
 
     #[test]
