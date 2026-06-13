@@ -1,5 +1,6 @@
 mod batcher;
 mod dataset;
+mod inference;
 mod label;
 mod logging;
 mod metric;
@@ -12,18 +13,38 @@ use std::path::PathBuf;
 use burn::backend::wgpu::WgpuDevice;
 use burn::backend::{Autodiff, Wgpu};
 use burn::optim::AdamWConfig;
-use clap::Parser;
-use miette::Result;
+use clap::{Parser, Subcommand};
+use miette::{IntoDiagnostic, Result};
 
+use crate::inference::{Action, Prediction, Predictor};
 use crate::model::StockModelConfig;
+use crate::store::TickerStore;
 use crate::training::{RunOptions, TrainingConfig, train};
+
+#[derive(Parser, Debug)]
+#[command(about = "Stock action classifier: train a model or predict today's actions")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "clap subcommand variants must hold their Args type by value"
+)]
+enum Command {
+    /// Train the model and write the run's artifacts.
+    Train(TrainArgs),
+    /// Predict an action per ticker from a trained model and a recent price snapshot.
+    Predict(PredictArgs),
+}
 
 /// Every hyperparameter is an `Option` so an omitted flag falls through to the
 /// default baked into the `Config` struct it feeds, keeping one source of truth for
 /// defaults.
 #[derive(Parser, Debug)]
-#[command(about = "Train the stock action classifier")]
-struct Args {
+struct TrainArgs {
     /// Aggregated OHLCV history.
     #[arg(
         long,
@@ -134,15 +155,41 @@ struct Args {
     patience: Option<usize>,
 }
 
-type Backend = Autodiff<Wgpu>;
+/// Recent OHLCV snapshot, model artifacts, and the position gate for one
+/// prediction run. The data fetch and the order placement are mocked, so this run
+/// only reads a parquet and prints the actions a trader would take.
+#[derive(Parser, Debug)]
+struct PredictArgs {
+    /// Directory holding a training run's `config.json` and `model.mpk`.
+    #[arg(long, default_value = "artifacts/tbl")]
+    artifact_dir: PathBuf,
+
+    /// Recent OHLCV snapshot standing in for today's live feed. It must hold the
+    /// full ticker universe so the per-date cross-sectional features match training.
+    #[arg(long, default_value = "data/yfinance/stocks.parquet")]
+    data: PathBuf,
+
+    /// Only act on predictions whose long position exceeds this threshold, so weak
+    /// signals stay flat. The position is `clamp(P(Buy) - P(Sell), 0)`.
+    #[arg(long, default_value_t = 0.0)]
+    min_position: f32,
+}
+
+type TrainBackend = Autodiff<Wgpu>;
+type InferenceBackend = Wgpu;
 
 fn main() -> Result<()> {
+    match Cli::parse().command {
+        Command::Train(args) => run_train(&args),
+        Command::Predict(args) => run_predict(&args),
+    }
+}
+
+fn run_train(args: &TrainArgs) -> Result<()> {
     // The tracing subscriber is installed inside `train`, once the artifact dir is
     // known, by `logging::install_experiment_logger`. Burn's own file logger is
     // disabled there so this one owns `experiment.log` and also captures the
     // pre-training data-loading spans.
-    let args = Args::parse();
-
     let device = WgpuDevice::default();
 
     let mut model = StockModelConfig::new();
@@ -209,11 +256,81 @@ fn main() -> Result<()> {
         patience: args.patience,
     };
 
-    train::<Backend>(
+    train::<TrainBackend>(
         &device,
         &args.data,
         &args.artifact_dir,
         &training_config,
         options,
     )
+}
+
+fn run_predict(args: &PredictArgs) -> Result<()> {
+    let device = WgpuDevice::default();
+
+    let predictor = Predictor::<InferenceBackend>::load(&args.artifact_dir, device)?;
+
+    // Mock the data feed: a real trader would pull today's OHLCV from the broker.
+    // Here we read the most recent `steps` bars per ticker from a parquet snapshot
+    // and run them through the exact training feature pipeline.
+    let windows =
+        TickerStore::load_inference_windows(&args.data, predictor.steps()).into_diagnostic()?;
+
+    let predictions = predictor.predict(&windows);
+
+    report(&predictions, args.min_position);
+
+    Ok(())
+}
+
+/// Print the predictions and the orders a trader would place, sorted by how strong
+/// the long signal is. The order placement itself is mocked, so this only reports.
+fn report(predictions: &[Prediction], min_position: f32) {
+    if predictions.is_empty() {
+        println!("No tickers had enough history to fill the model's window.");
+        return;
+    }
+
+    let as_of = predictions.iter().map(|p| p.date).max().expect("non-empty");
+    let mut counts = [0usize; 3];
+    for prediction in predictions {
+        counts[prediction.action as usize] += 1;
+    }
+    println!(
+        "Predictions as of {as_of} ({} tickers): Sell {}  Hold {}  Buy {}",
+        predictions.len(),
+        counts[Action::Sell as usize],
+        counts[Action::Hold as usize],
+        counts[Action::Buy as usize],
+    );
+
+    let mut orders: Vec<&Prediction> = predictions
+        .iter()
+        .filter(|p| p.position > min_position)
+        .collect();
+    orders.sort_by(|left, right| right.position.total_cmp(&left.position));
+
+    println!("\nOrders (position > {min_position:.2}):");
+    if orders.is_empty() {
+        println!("  none above threshold; staying flat.");
+        return;
+    }
+
+    println!(
+        "  {:<8} {:<6} {:>7} {:>7} {:>7} {:>9}",
+        "TICKER", "ACTION", "P(Sell)", "P(Hold)", "P(Buy)", "POSITION"
+    );
+    for order in &orders {
+        let [sell, hold, buy] = order.probabilities;
+        println!(
+            "  {:<8} {:<6} {sell:>7.3} {hold:>7.3} {buy:>7.3} {:>9.3}",
+            order.ticker,
+            order.action.as_str(),
+            order.position,
+        );
+    }
+
+    // Mock the actioning: a real trader would size shares and call the sim_stock
+    // buy/sell endpoints here.
+    println!("\n[mock] would place {} buy order(s).", orders.len());
 }

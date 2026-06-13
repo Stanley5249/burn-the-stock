@@ -91,6 +91,49 @@ fn cross_sectional_zscore() -> [Expr; 5] {
     })
 }
 
+/// Scan the OHLCV parquet and run the shared feature pipeline: typed select, drop
+/// non-positive closes, sort by `[ticker, date]`, derive the per-bar log-returns,
+/// then standardize each one cross-sectionally per date. It stops just after
+/// `drop_nulls`, so each caller appends its own tail: training adds labels and
+/// drops the trailing horizon, while inference keeps the latest rows. Sharing this
+/// is what guarantees training and inference standardize features the same way.
+fn standardized_long(path: &Path) -> PolarsResult<LazyFrame> {
+    Ok(
+        LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?
+            .select([
+                col(CODE).cast(DataType::String).alias(TICKER),
+                col(DATE).cast(DataType::Date),
+                col(OPEN).cast(DataType::Float32),
+                col(HIGH).cast(DataType::Float32),
+                col(LOW).cast(DataType::Float32),
+                col(CLOSE).cast(DataType::Float32),
+                col(VOLUME).cast(DataType::Float32),
+            ])
+            .filter(col(CLOSE).gt(lit(0.0)))
+            // Sort before deriving features so the per-ticker `shift` inside
+            // `stationary_features` sees rows in date order.
+            .sort([TICKER, DATE], SortMultipleOptions::new())
+            .with_columns(stationary_features())
+            // Standardize each feature across every stock on the same date, over the
+            // full loaded universe before any ticker subsetting.
+            .with_columns(cross_sectional_zscore())
+            // The only nulls are each ticker's first row, whose previous bar did not
+            // exist, so drop them before packing the feature array.
+            .drop_nulls(None),
+    )
+}
+
+/// Pack the five standardized feature columns into one `Array<f32, 5>`, the
+/// row-major layout the batcher and the inference path both flatten.
+fn feature_array() -> Expr {
+    concat_arr(
+        FEATURE_NAMES
+            .map(|name| col(name).cast(DataType::Float32))
+            .to_vec(),
+    )
+    .expect("feature columns are non-empty and uniformly f32")
+}
+
 /// One ticker's history flattened out of polars into plain buffers, so window
 /// extraction in the hot path is pointer-offset indexing rather than Arrow array
 /// traversal. Rows are sorted ascending by date, and the three vectors share that
@@ -174,49 +217,19 @@ impl TickerStore {
         stop_loss: f32,
         horizon: usize,
     ) -> PolarsResult<Self> {
-        let feature_expr = concat_arr(
-            FEATURE_NAMES
-                .map(|name| col(name).cast(DataType::Float32))
-                .to_vec(),
-        )
-        .unwrap();
-
-        let long =
-            LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?
-                .select([
-                    col(CODE).cast(DataType::String).alias(TICKER),
-                    col(DATE).cast(DataType::Date),
-                    col(OPEN).cast(DataType::Float32),
-                    col(HIGH).cast(DataType::Float32),
-                    col(LOW).cast(DataType::Float32),
-                    col(CLOSE).cast(DataType::Float32),
-                    col(VOLUME).cast(DataType::Float32),
-                ])
-                .filter(col(CLOSE).gt(lit(0.0)))
-                // Sort before deriving features so the per-ticker `shift` inside
-                // `stationary_features` sees rows in date order.
-                .sort([TICKER, DATE], SortMultipleOptions::new())
-                .with_columns(stationary_features())
-                // Standardize each feature across every stock on the same date. This
-                // runs over the full loaded universe, before any ticker subsetting,
-                // so the cross-section is the whole market.
-                .with_columns(cross_sectional_zscore())
-                // The only nulls are each ticker's first row, whose previous bar did
-                // not exist, so drop them across all columns before packing the
-                // feature array.
-                .drop_nulls(None)
-                .select([
-                    col(TICKER),
-                    col(DATE),
-                    feature_expr.alias(FEATURE),
-                    // Raw high/low/close survive the feature pipeline untouched, since
-                    // the z-score only rewrites the feature columns, and the barrier
-                    // labels need the intraday range to detect a touch.
-                    col(HIGH),
-                    col(LOW),
-                    col(CLOSE),
-                ])
-                .collect()?;
+        let long = standardized_long(path)?
+            .select([
+                col(TICKER),
+                col(DATE),
+                feature_array().alias(FEATURE),
+                // Raw high/low/close survive the feature pipeline untouched, since the
+                // z-score only rewrites the feature columns, and the barrier labels
+                // need the intraday range to detect a touch.
+                col(HIGH),
+                col(LOW),
+                col(CLOSE),
+            ])
+            .collect()?;
 
         let groups = long.partition_by_stable([TICKER], true)?;
 
@@ -273,6 +286,64 @@ impl TickerStore {
         }
 
         Ok(Self { tickers })
+    }
+
+    /// Build the most recent `steps`-day standardized feature window for every
+    /// ticker with at least `steps` rows. Mirrors [`Self::load`]'s feature pipeline
+    /// exactly, the same per-bar log-return channels and the same per-date
+    /// cross-sectional z-score over the whole loaded universe, but keeps the latest
+    /// rows instead of dropping a label horizon, since inference predicts from the
+    /// most recent bar rather than a labeled past row.
+    ///
+    /// `path` must hold the full ticker universe, not a single stock, or the
+    /// per-date cross-section would not match the one the model trained on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parquet cannot be scanned or its columns are malformed.
+    #[instrument(level = "info", skip_all, fields(path = %path.display(), steps))]
+    pub fn load_inference_windows(path: &Path, steps: usize) -> PolarsResult<Vec<InferenceWindow>> {
+        let long = standardized_long(path)?
+            .select([col(TICKER), col(DATE), feature_array().alias(FEATURE)])
+            .collect()?;
+
+        let groups = long.partition_by_stable([TICKER], true)?;
+        let mut windows = Vec::with_capacity(groups.len());
+
+        for group in groups {
+            // A shorter history cannot fill the model's window, so skip it.
+            if group.height() < steps {
+                continue;
+            }
+            let tail = group.tail(Some(steps));
+
+            let ticker = tail.column(&TICKER)?.str()?.get(0).unwrap().to_owned();
+
+            let features: Vec<f32> = tail
+                .column(&FEATURE)?
+                .array()?
+                .get_inner()
+                .f32()?
+                .into_no_null_iter()
+                .collect();
+
+            // The last row is the most recent trading day, the bar to predict from.
+            let date = tail
+                .column(&DATE)?
+                .date()?
+                .as_date_iter()
+                .flatten()
+                .last()
+                .expect("tail holds steps rows");
+
+            windows.push(InferenceWindow {
+                ticker,
+                date,
+                features,
+            });
+        }
+
+        Ok(windows)
     }
 
     /// Randomly keep `count` tickers, chosen with `seed` so the subset is
@@ -432,6 +503,18 @@ pub(crate) struct ResidentBuffers {
     pub(crate) features: Vec<f32>,
     pub(crate) labels: Vec<i32>,
     pub(crate) rewards: Vec<f32>,
+}
+
+/// One ticker's most recent `steps`-day standardized feature window, the model
+/// input for predicting that ticker's action as of [`InferenceWindow::date`].
+/// Produced by [`TickerStore::load_inference_windows`].
+pub struct InferenceWindow {
+    /// Ticker code.
+    pub ticker: String,
+    /// Most recent trading day in the window, the bar the prediction is made from.
+    pub date: NaiveDate,
+    /// Row-major standardized features, length `steps * 5`.
+    pub features: Vec<f32>,
 }
 
 /// Synthetic builders shared across the crate's module tests, so `dataset` and
