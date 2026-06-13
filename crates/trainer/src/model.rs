@@ -7,7 +7,7 @@ use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig, RmsNorm, RmsN
 use burn::prelude::*;
 use burn::tensor::Transaction;
 use burn::tensor::backend::AutodiffBackend;
-use burn::train::metric::{AccuracyInput, Adaptor, ConfusionStatsInput, ItemLazy, LossInput};
+use burn::train::metric::{Adaptor, ConfusionStatsInput, ItemLazy, LossInput};
 use burn::train::{InferenceStep, TrainOutput, TrainStep};
 
 pub const NUM_CLASSES: usize = 3;
@@ -108,9 +108,10 @@ impl<B: Backend> StockModel<B> {
 
 /// Model output carrying the reward alongside the usual classification fields.
 ///
-/// A local stand-in for burn's `ClassificationOutput` so it can adapt to the EV
-/// metric's input as well as the built-in Accuracy, Loss, and confusion-based
-/// metrics. The orphan rule blocks adding that adaptor to the foreign type.
+/// A local stand-in for burn's `ClassificationOutput` so it can adapt to the
+/// trade-aware Sharpe and precision metrics as well as the built-in Loss and
+/// confusion-based (F-beta) metrics. The orphan rule blocks adding that adaptor to
+/// the foreign type.
 ///
 /// Input shapes: `output` `[batch, NUM_CLASSES]`, `targets` and `reward` `[batch]`.
 pub struct StockOutput<B: Backend> {
@@ -142,12 +143,6 @@ impl<B: Backend> ItemLazy for StockOutput<B> {
             targets: Tensor::from_data(targets, device),
             reward: Tensor::from_data(reward, device),
         }
-    }
-}
-
-impl<B: Backend> Adaptor<AccuracyInput<B>> for StockOutput<B> {
-    fn adapt(&self) -> AccuracyInput<B> {
-        AccuracyInput::new(self.output.clone(), self.targets.clone())
     }
 }
 

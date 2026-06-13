@@ -77,8 +77,9 @@ struct Args {
     #[arg(long)]
     label_horizon: Option<usize>,
 
-    /// Round-trip transaction cost charged to a Buy in the EV metric, as a
-    /// fraction of price.
+    /// Round-trip transaction cost the Sharpe metric charges each position, as a
+    /// fraction. Taiwan is 0.1425% brokerage on each of the buy and sell legs plus
+    /// 0.3% sell tax, so 0.585% round trip.
     #[arg(long)]
     fee: Option<f32>,
 

@@ -7,13 +7,13 @@ use burn::prelude::*;
 use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::store::{Aggregate, Direction, Split};
-use burn::train::metric::{AccuracyMetric, ClassReduction, FBetaScoreMetric, LossMetric};
+use burn::train::metric::{ClassReduction, FBetaScoreMetric, LossMetric};
 use burn::train::{Learner, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining};
 use miette::{IntoDiagnostic, Result, bail};
 
 use crate::batcher::StockBatcher;
 use crate::dataset::WindowDataset;
-use crate::metric::{ExpectedValueMetric, PrecisionClassMetric};
+use crate::metric::{PrecisionClassMetric, SharpeMetric};
 use crate::model::{StockModel, StockModelConfig};
 use crate::store::TickerStore;
 
@@ -35,9 +35,9 @@ pub struct TrainingConfig {
     /// Vertical-barrier horizon in trading days for the triple-barrier labels.
     #[config(default = 10)]
     pub label_horizon: usize,
-    /// Round-trip transaction cost charged to a Buy in the EV metric, as a
-    /// fraction. The `sim_stock` default is 0.1425% brokerage twice plus 0.3%
-    /// sell tax.
+    /// Round-trip transaction cost the Sharpe metric charges each position, as a
+    /// fraction. Taiwan brokerage is 0.1425% on each of the buy and sell legs, plus
+    /// a 0.3% tax on the sell, so the default is 0.1425% * 2 + 0.3% = 0.585%.
     #[config(default = 0.005_85)]
     pub fee: f32,
     /// Number of full passes over the training data. With a fixed `epoch_size`
@@ -204,11 +204,9 @@ pub fn train<B: AutodiffBackend>(
 
     let mut training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
         .metrics((
-            AccuracyMetric::new(),
             FBetaScoreMetric::multiclass(1.0, 1, ClassReduction::Macro),
-            ExpectedValueMetric::new(config.fee),
+            SharpeMetric::new(config.fee),
             PrecisionClassMetric::new(2, "Buy"),
-            PrecisionClassMetric::new(0, "Sell"),
             LossMetric::new(),
         ))
         .with_file_checkpointer(CompactRecorder::new())
