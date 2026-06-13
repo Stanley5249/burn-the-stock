@@ -16,8 +16,9 @@ use miette::{IntoDiagnostic, Result, bail};
 use crate::batcher::StockBatcher;
 use crate::dataset::WindowDataset;
 use crate::metric::{PrecisionClassMetric, SharpeMetric};
-use crate::model::{StockModel, StockModelConfig};
+use crate::model::StockClassifier;
 use crate::store::TickerStore;
+use stock_model::model::StockModelConfig;
 
 /// Top-level training configuration.
 #[derive(Config, Debug)]
@@ -238,9 +239,9 @@ pub fn train<B: AutodiffBackend>(
         None => valid_builder().build(WindowDataset::new(&valid_store, config.steps)),
     };
 
-    let model = config.model.init::<B>(device);
+    let model = StockClassifier::new(&config.model, device);
 
-    let optimizer = config.optimizer.init::<B, StockModel<B>>();
+    let optimizer = config.optimizer.init::<B, StockClassifier<B>>();
 
     let learner = Learner::new(model, optimizer, config.learning_rate);
 
@@ -273,8 +274,11 @@ pub fn train<B: AutodiffBackend>(
 
     let result = training.launch(learner);
 
+    // Save only the inner model, dropping the loss, so the artifact loads straight
+    // into a `StockModel` for inference.
     result
         .model
+        .into_model()
         .save_file(artifact_dir.join("model"), &CompactRecorder::new())
         .into_diagnostic()?;
 

@@ -1,0 +1,27 @@
+[package]
+name = "stock-model"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+burn = { workspace = true, features = ["std"] }
+chrono = { workspace = true }
+miette = { workspace = true }
+polars = {
+  workspace = true,
+  features = [
+    "dtype-array",
+    "dtype-date",
+    "lazy",
+    "log",
+    "partition_by",
+    "performant",
+    "strings"
+  ]
+}
+
+[dev-dependencies]
+burn = { workspace = true, features = ["flex", "std"] }
+
+[lints]
+workspace = true

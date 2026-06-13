@@ -6,132 +6,17 @@ use fastrand::Rng;
 use polars::prelude::*;
 use tracing::instrument;
 
-const CODE: PlSmallStr = PlSmallStr::from_static("code");
-const TICKER: PlSmallStr = PlSmallStr::from_static("ticker");
-const DATE: PlSmallStr = PlSmallStr::from_static("date");
-const FEATURE: PlSmallStr = PlSmallStr::from_static("feature");
+use stock_model::features::{
+    CLOSE, DATE, FEATURE, FEATURE_NAMES, HIGH, InferenceWindow, LOW, TICKER, feature_array,
+    latest_windows, standardized_features,
+};
 
-const OPEN: PlSmallStr = PlSmallStr::from_static("open");
-const HIGH: PlSmallStr = PlSmallStr::from_static("high");
-const LOW: PlSmallStr = PlSmallStr::from_static("low");
-const CLOSE: PlSmallStr = PlSmallStr::from_static("close");
-const VOLUME: PlSmallStr = PlSmallStr::from_static("volume");
-
-const OPEN_RETURN: PlSmallStr = PlSmallStr::from_static("open_return");
-const HIGH_RETURN: PlSmallStr = PlSmallStr::from_static("high_return");
-const LOW_RETURN: PlSmallStr = PlSmallStr::from_static("low_return");
-const CLOSE_RETURN: PlSmallStr = PlSmallStr::from_static("close_return");
-const VOLUME_RETURN: PlSmallStr = PlSmallStr::from_static("volume_return");
-
-/// The five stationary features flattened per row, in column order. Width stays
-/// at five so the model, batcher, and tensor shapes are unchanged from the raw
-/// OHLCV layout this replaced.
-pub(crate) const FEATURE_NAMES: [PlSmallStr; 5] = [
-    OPEN_RETURN,
-    HIGH_RETURN,
-    LOW_RETURN,
-    CLOSE_RETURN,
-    VOLUME_RETURN,
-];
-
-const fn col(name: PlSmallStr) -> Expr {
-    Expr::Column(name)
-}
-
-/// Build the five stationary feature expressions from the raw OHLCV columns.
-///
-/// One uniform transform per channel: the natural log of its ratio to the prior
-/// bar. The four prices share a single anchor, the previous close, so the
-/// overnight gap (open), the intraday extremes (high, low), and the close-to-close
-/// return all land in one comparable frame, and the old hand-built range, gap, and
-/// body indicators are linear combinations the model can recover on its own. The
-/// per-ticker `shift` runs `over` the ticker so it never reaches across stock
-/// boundaries, which means the caller must have sorted by `[ticker, date]` first.
-fn stationary_features() -> [Expr; 5] {
-    let prev_close = col(CLOSE).shift(lit(1)).over([col(TICKER)]);
-    let prev_volume = col(VOLUME).shift(lit(1)).over([col(TICKER)]);
-
-    let natural_log = || lit(std::f64::consts::E);
-
-    // Volume is a count, so a no-trade day has volume 0 and the bare ratio's log
-    // is `-inf`. Add one share to both sides (log1p style) to keep it finite
-    // while leaving real, large volumes essentially unchanged.
-    let volume_return = ((col(VOLUME) + lit(1.0)) / (prev_volume + lit(1.0))).log(natural_log());
-
-    let price_return = |price: PlSmallStr, alias: PlSmallStr| {
-        (col(price) / prev_close.clone())
-            .log(natural_log())
-            .alias(alias)
-    };
-
-    [
-        price_return(OPEN, OPEN_RETURN),
-        price_return(HIGH, HIGH_RETURN),
-        price_return(LOW, LOW_RETURN),
-        price_return(CLOSE, CLOSE_RETURN),
-        volume_return.alias(VOLUME_RETURN),
-    ]
-}
-
-/// Replace each stationary feature with its cross-sectional z-score: subtract the
-/// mean and divide by the standard deviation taken `over` all stocks on the same
-/// date.
-///
-/// Market-wide moves (a crash, a rally, an earnings season) push every stock the
-/// same way on a given day. Standardizing per date removes that common factor and
-/// leaves only how a stock did relative to its peers, which is the signal that
-/// survives in a weak-signal universe. Run after [`stationary_features`] and
-/// before the `drop_nulls`, so each ticker's null first row is excluded from the
-/// per-date statistics by polars and then dropped.
-fn cross_sectional_zscore() -> [Expr; 5] {
-    FEATURE_NAMES.map(|name| {
-        let centered = col(name.clone()) - col(name.clone()).mean().over([col(DATE)]);
-        let spread = col(name.clone()).std(1).over([col(DATE)]) + lit(1e-8);
-        (centered / spread).alias(name)
-    })
-}
-
-/// Scan the OHLCV parquet and run the shared feature pipeline: typed select, drop
-/// non-positive closes, sort by `[ticker, date]`, derive the per-bar log-returns,
-/// then standardize each one cross-sectionally per date. It stops just after
-/// `drop_nulls`, so each caller appends its own tail: training adds labels and
-/// drops the trailing horizon, while inference keeps the latest rows. Sharing this
-/// is what guarantees training and inference standardize features the same way.
-fn standardized_long(path: &Path) -> PolarsResult<LazyFrame> {
-    Ok(
-        LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?
-            .select([
-                col(CODE).cast(DataType::String).alias(TICKER),
-                col(DATE).cast(DataType::Date),
-                col(OPEN).cast(DataType::Float32),
-                col(HIGH).cast(DataType::Float32),
-                col(LOW).cast(DataType::Float32),
-                col(CLOSE).cast(DataType::Float32),
-                col(VOLUME).cast(DataType::Float32),
-            ])
-            .filter(col(CLOSE).gt(lit(0.0)))
-            // Sort before deriving features so the per-ticker `shift` inside
-            // `stationary_features` sees rows in date order.
-            .sort([TICKER, DATE], SortMultipleOptions::new())
-            .with_columns(stationary_features())
-            // Standardize each feature across every stock on the same date, over the
-            // full loaded universe before any ticker subsetting.
-            .with_columns(cross_sectional_zscore())
-            // The only nulls are each ticker's first row, whose previous bar did not
-            // exist, so drop them before packing the feature array.
-            .drop_nulls(None),
-    )
-}
-
-/// Pack the five standardized feature columns into one `Array<f32, 5>`, the
-/// row-major layout the batcher and the inference path both flatten.
-fn feature_array() -> Expr {
-    concat_arr(
-        FEATURE_NAMES
-            .map(|name| col(name).cast(DataType::Float32))
-            .to_vec(),
-    )
-    .expect("feature columns are non-empty and uniformly f32")
+/// Scan the OHLCV parquet and run the shared feature transform, the entry point for
+/// both the training load and the inference windows.
+fn scan_standardized(path: &Path) -> PolarsResult<LazyFrame> {
+    let frame =
+        LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?;
+    Ok(standardized_features(frame))
 }
 
 /// One ticker's history flattened out of polars into plain buffers, so window
@@ -217,7 +102,7 @@ impl TickerStore {
         stop_loss: f32,
         horizon: usize,
     ) -> PolarsResult<Self> {
-        let long = standardized_long(path)?
+        let long = scan_standardized(path)?
             .select([
                 col(TICKER),
                 col(DATE),
@@ -289,11 +174,9 @@ impl TickerStore {
     }
 
     /// Build the most recent `steps`-day standardized feature window for every
-    /// ticker with at least `steps` rows. Mirrors [`Self::load`]'s feature pipeline
-    /// exactly, the same per-bar log-return channels and the same per-date
-    /// cross-sectional z-score over the whole loaded universe, but keeps the latest
-    /// rows instead of dropping a label horizon, since inference predicts from the
-    /// most recent bar rather than a labeled past row.
+    /// ticker, the offline inference counterpart to [`Self::load`]. It runs the same
+    /// shared feature transform but keeps the latest rows rather than dropping a
+    /// label horizon, since inference predicts from the most recent bar.
     ///
     /// `path` must hold the full ticker universe, not a single stock, or the
     /// per-date cross-section would not match the one the model trained on.
@@ -303,47 +186,7 @@ impl TickerStore {
     /// Returns an error if the parquet cannot be scanned or its columns are malformed.
     #[instrument(level = "info", skip_all, fields(path = %path.display(), steps))]
     pub fn load_inference_windows(path: &Path, steps: usize) -> PolarsResult<Vec<InferenceWindow>> {
-        let long = standardized_long(path)?
-            .select([col(TICKER), col(DATE), feature_array().alias(FEATURE)])
-            .collect()?;
-
-        let groups = long.partition_by_stable([TICKER], true)?;
-        let mut windows = Vec::with_capacity(groups.len());
-
-        for group in groups {
-            // A shorter history cannot fill the model's window, so skip it.
-            if group.height() < steps {
-                continue;
-            }
-            let tail = group.tail(Some(steps));
-
-            let ticker = tail.column(&TICKER)?.str()?.get(0).unwrap().to_owned();
-
-            let features: Vec<f32> = tail
-                .column(&FEATURE)?
-                .array()?
-                .get_inner()
-                .f32()?
-                .into_no_null_iter()
-                .collect();
-
-            // The last row is the most recent trading day, the bar to predict from.
-            let date = tail
-                .column(&DATE)?
-                .date()?
-                .as_date_iter()
-                .flatten()
-                .last()
-                .expect("tail holds steps rows");
-
-            windows.push(InferenceWindow {
-                ticker,
-                date,
-                features,
-            });
-        }
-
-        Ok(windows)
+        latest_windows(scan_standardized(path)?, steps)
     }
 
     /// Randomly keep `count` tickers, chosen with `seed` so the subset is
@@ -505,18 +348,6 @@ pub(crate) struct ResidentBuffers {
     pub(crate) rewards: Vec<f32>,
 }
 
-/// One ticker's most recent `steps`-day standardized feature window, the model
-/// input for predicting that ticker's action as of [`InferenceWindow::date`].
-/// Produced by [`TickerStore::load_inference_windows`].
-pub struct InferenceWindow {
-    /// Ticker code.
-    pub ticker: String,
-    /// Most recent trading day in the window, the bar the prediction is made from.
-    pub date: NaiveDate,
-    /// Row-major standardized features, length `steps * 5`.
-    pub features: Vec<f32>,
-}
-
 /// Synthetic builders shared across the crate's module tests, so `dataset` and
 /// `batcher` can exercise a [`TickerStore`] without a parquet file on disk.
 #[cfg(test)]
@@ -569,43 +400,6 @@ mod tests {
 
     fn make_store(n_tickers: i16, rows: i16) -> TickerStore {
         TickerStore::synthetic(n_tickers, rows)
-    }
-
-    #[test]
-    fn cross_sectional_zscore_centers_each_date() {
-        // Two dates, three stocks each, with deliberately different scales so a
-        // raw mean would be far from zero. Only `open_return` is exercised; the
-        // other four columns just need to exist for the shared helper.
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        let next = epoch + chrono::Duration::days(1);
-        let zeros = [0.0f32; 6];
-
-        let frame = df!(
-            "date" => [epoch, epoch, epoch, next, next, next],
-            "open_return" => [1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0],
-            "high_return" => zeros,
-            "low_return" => zeros,
-            "close_return" => zeros,
-            "volume_return" => zeros,
-        )
-        .unwrap();
-
-        let out = frame
-            .lazy()
-            .with_columns(cross_sectional_zscore())
-            .collect()
-            .unwrap();
-
-        let standardized = out.column(&OPEN_RETURN).unwrap().f32().unwrap();
-
-        // Each date's three values must average to ~0 after standardizing.
-        let first: f32 = (0..3).map(|i| standardized.get(i).unwrap()).sum();
-        let second: f32 = (3..6).map(|i| standardized.get(i).unwrap()).sum();
-        assert!(first.abs() < 1e-5, "first date mean {first} not ~0");
-        assert!(second.abs() < 1e-5, "second date mean {second} not ~0");
-
-        // The ordering within a date is preserved, so the smallest stays lowest.
-        assert!(standardized.get(0).unwrap() < standardized.get(2).unwrap());
     }
 
     #[test]

@@ -6774,6 +6774,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "stock-model"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "chrono",
+ "miette",
+ "polars",
+]
+
+[[package]]
 name = "streaming-decompression"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7608,6 +7618,7 @@ dependencies = [
  "miette",
  "polars",
  "stock-client",
+ "stock-model",
  "tokio",
  "tracing",
  "tracing-subscriber",

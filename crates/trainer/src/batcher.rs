@@ -1,7 +1,8 @@
 use crate::dataset::StockItem;
-use crate::store::{FEATURE_NAMES, TickerStore};
+use crate::store::TickerStore;
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
+use stock_model::features::FEATURE_NAMES;
 
 #[derive(Clone, Debug)]
 pub struct StockBatch<B: Backend> {

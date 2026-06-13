@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use burn::config::Config;
 use burn::module::Module;
 use burn::prelude::*;
 use burn::record::CompactRecorder;
@@ -7,13 +8,21 @@ use burn::tensor::activation::softmax;
 use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 
-use crate::model::{NUM_CLASSES, StockModel};
-use crate::store::{FEATURE_NAMES, InferenceWindow};
-use crate::training::TrainingConfig;
+use crate::features::{FEATURE_NAMES, InferenceWindow};
+use crate::model::{NUM_CLASSES, StockModel, StockModelConfig};
 
-/// Class indices in the model's output order, matching `crate::label::Label::class`.
+/// Class indices in the model's output order, matching the labeler's Sell/Hold/Buy.
 const SELL: usize = 0;
 const BUY: usize = 2;
+
+/// The slice of a training run's config that inference needs: the model shape and
+/// the window length. A run writes a fuller config, but `Config` deserialization
+/// ignores the extra training-only fields, so this loads from the same file.
+#[derive(Config, Debug)]
+pub struct InferenceConfig {
+    pub model: StockModelConfig,
+    pub steps: usize,
+}
 
 /// Predicted action for one ticker, the argmax of the model's class probabilities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +83,7 @@ impl<B: Backend> Predictor<B> {
     ///
     /// Returns an error if the config or model file is missing or cannot be read.
     pub fn load(artifact_dir: &Path, device: B::Device) -> Result<Self> {
-        let config = TrainingConfig::load(artifact_dir.join("config.json")).into_diagnostic()?;
+        let config = InferenceConfig::load(artifact_dir.join("config.json")).into_diagnostic()?;
 
         let model = config
             .model
@@ -97,8 +106,8 @@ impl<B: Backend> Predictor<B> {
     }
 
     /// Score every window in one batched forward pass. Each window must hold exactly
-    /// `steps * 5` features, as produced by
-    /// [`crate::store::TickerStore::load_inference_windows`] with [`Self::steps`].
+    /// `steps * 5` features, as produced by [`crate::features::latest_windows`] with
+    /// [`Self::steps`].
     ///
     /// # Panics
     ///

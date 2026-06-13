@@ -1,99 +1,45 @@
-use crate::batcher::StockBatch;
-use crate::metric::StockEvalInput;
 use burn::backend::flex::{Flex, FlexDevice};
-use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
-use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig, RmsNorm, RmsNormConfig};
 use burn::prelude::*;
 use burn::tensor::Transaction;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::{Adaptor, ConfusionStatsInput, ItemLazy, LossInput};
 use burn::train::{InferenceStep, TrainOutput, TrainStep};
+use stock_model::model::{NUM_CLASSES, StockModel, StockModelConfig};
 
-pub const NUM_CLASSES: usize = 3;
+use crate::batcher::StockBatch;
+use crate::metric::StockEvalInput;
 
-/// Sell, Hold, Buy
+/// Sell, Hold, Buy loss weights, upweighting the rare actionable classes against
+/// the Hold majority.
 pub const CLASS_WEIGHTS: [f32; NUM_CLASSES] = [2.0, 1.0, 2.0];
 
-/// Stationary feature width of the technical input, matching the dataloader's
-/// feature column.
-const NUM_FEATURES: usize = 5;
-
-/// GRU classifier over the stationary feature window.
-///
-/// A two-layer GRU summarizes the window into its last hidden state, which a small
-/// MLP head turns into the action logits.
-///
-/// Input:  technical `[batch, steps, 5]`
-/// Output: `[batch, NUM_CLASSES]` (logits)
+/// Training wrapper around the shared [`StockModel`]: it adds the loss and the
+/// train/eval steps. Keeping these here leaves the model crate free of any training
+/// machinery, so a model loaded for inference carries only the architecture.
 #[derive(Module, Debug)]
-pub struct StockModel<B: Backend> {
-    gru_1: Gru<B>,
-    gru_1_norm: RmsNorm<B>,
-    gru_2: Gru<B>,
-    gru_2_norm: RmsNorm<B>,
-    hidden: Linear<B>,
-    head: Linear<B>,
-    activation: Gelu,
-    dropout: Dropout,
+pub struct StockClassifier<B: Backend> {
+    model: StockModel<B>,
     loss: CrossEntropyLoss<B>,
 }
 
-impl<B: Backend> StockModel<B> {
+impl<B: Backend> StockClassifier<B> {
     pub fn new(config: &StockModelConfig, device: &B::Device) -> Self {
-        let gru_1 = GruConfig::new(NUM_FEATURES, config.d_hidden, true).init(device);
-
-        let gru_1_norm = RmsNormConfig::new(config.d_hidden).init(device);
-
-        let gru_2 = GruConfig::new(config.d_hidden, config.d_hidden, true).init(device);
-
-        let gru_2_norm = RmsNormConfig::new(config.d_hidden).init(device);
-
-        let hidden = LinearConfig::new(config.d_hidden, config.d_head).init(device);
-
-        let head = LinearConfig::new(config.d_head, NUM_CLASSES).init(device);
-
+        let model = config.init::<B>(device);
         let loss = CrossEntropyLossConfig::new()
             .with_weights(Some(CLASS_WEIGHTS.to_vec()))
             .init(device);
 
-        Self {
-            gru_1,
-            gru_1_norm,
-            gru_2,
-            gru_2_norm,
-            hidden,
-            head,
-            activation: Gelu::new(),
-            dropout: DropoutConfig::new(config.dropout).init(),
-            loss,
-        }
+        Self { model, loss }
     }
 
-    /// Returns logits with shape `[batch, NUM_CLASSES]`.
-    pub fn forward(&self, technical: Tensor<B, 3>) -> Tensor<B, 2> {
-        let temporal_1 = self.gru_1.forward(technical, None);
-
-        let temporal_1 = self.gru_1_norm.forward(temporal_1);
-
-        let temporal_2 = self.gru_2.forward(temporal_1, None);
-
-        // Summarize the window by its last hidden state: [batch, d_hidden].
-        let [batch, sequence, d_hidden] = temporal_2.dims();
-
-        let summary = temporal_2
-            .slice([0..batch, sequence - 1..sequence, 0..d_hidden])
-            .reshape([batch, d_hidden]);
-        let summary = self.gru_2_norm.forward(summary);
-
-        let hidden = self.activation.forward(self.hidden.forward(summary));
-        let hidden = self.dropout.forward(hidden);
-
-        self.head.forward(hidden)
+    /// The trained architecture without the loss, the model to save for inference.
+    pub fn into_model(self) -> StockModel<B> {
+        self.model
     }
 
     fn forward_classification(&self, batch: &StockBatch<B>) -> StockOutput<B> {
-        let logits = self.forward(batch.technical.clone());
+        let logits = self.model.forward(batch.technical.clone());
 
         let loss = self.loss.forward(logits.clone(), batch.label.clone());
 
@@ -171,7 +117,7 @@ impl<B: Backend> Adaptor<StockEvalInput<B>> for StockOutput<B> {
     }
 }
 
-impl<B: AutodiffBackend> TrainStep for StockModel<B> {
+impl<B: AutodiffBackend> TrainStep for StockClassifier<B> {
     type Input = StockBatch<B>;
     type Output = StockOutput<B>;
 
@@ -181,50 +127,11 @@ impl<B: AutodiffBackend> TrainStep for StockModel<B> {
     }
 }
 
-impl<B: Backend> InferenceStep for StockModel<B> {
+impl<B: Backend> InferenceStep for StockClassifier<B> {
     type Input = StockBatch<B>;
     type Output = StockOutput<B>;
 
     fn step(&self, batch: StockBatch<B>) -> StockOutput<B> {
         self.forward_classification(&batch)
-    }
-}
-
-/// Hyperparameters for `StockModel`.
-#[derive(Config, Debug)]
-pub struct StockModelConfig {
-    /// GRU hidden size, the temporal summary width.
-    #[config(default = 64)]
-    pub d_hidden: usize,
-    /// Hidden width of the MLP head.
-    #[config(default = 32)]
-    pub d_head: usize,
-    /// Dropout probability applied in the head.
-    #[config(default = 0.2)]
-    pub dropout: f64,
-}
-
-impl StockModelConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> StockModel<B> {
-        StockModel::new(self, device)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn::backend::flex::{Flex, FlexDevice};
-
-    #[test]
-    fn forward_outputs_logits() {
-        let device = FlexDevice;
-        let config = StockModelConfig::new();
-        let model = config.init::<Flex>(&device);
-
-        let technical = Tensor::<Flex, 3>::zeros([2, 8, NUM_FEATURES], &device);
-
-        let logits = model.forward(technical);
-
-        assert_eq!(logits.dims(), [2, NUM_CLASSES]);
     }
 }

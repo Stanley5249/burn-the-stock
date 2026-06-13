@@ -1,6 +1,5 @@
 mod batcher;
 mod dataset;
-mod inference;
 mod label;
 mod logging;
 mod metric;
@@ -15,9 +14,9 @@ use burn::backend::{Autodiff, Wgpu};
 use burn::optim::AdamWConfig;
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
+use stock_model::inference::{Action, Prediction, Predictor};
+use stock_model::model::StockModelConfig;
 
-use crate::inference::{Action, Prediction, Predictor};
-use crate::model::StockModelConfig;
 use crate::store::TickerStore;
 use crate::training::{RunOptions, TrainingConfig, train};
 

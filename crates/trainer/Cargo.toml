@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 stock-client = { path = "../stock-client" }
+stock-model = { path = "../stock-model" }
 
 burn = {
   workspace = true,
@@ -31,7 +32,10 @@ polars = {
 }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["fmt", "std", "env-filter"] }
+tracing-subscriber = {
+  workspace = true,
+  features = ["env-filter", "fmt", "std"]
+}
 
 [features]
 default = ["wgpu"]
