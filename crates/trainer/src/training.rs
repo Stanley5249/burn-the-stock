@@ -87,6 +87,10 @@ pub struct RunOptions {
 /// # Errors
 ///
 /// Returns an error if the data cannot be loaded or the artifacts cannot be saved.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear pipeline reads better unsplit"
+)]
 pub fn train<B: AutodiffBackend>(
     device: &B::Device,
     data_path: &str,
@@ -137,9 +141,21 @@ pub fn train<B: AutodiffBackend>(
         .train_valid_split(cutoff, config.steps)
         .into_diagnostic()?;
 
-    // Surface the triple-barrier class balance per split so the take-profit and
-    // stop-loss knobs can be tuned toward an even Sell/Hold/Buy mix.
-    crate::logging::log_label_balance(train_store.label_counts(), valid_store.label_counts());
+    // Surface the triple-barrier class balance per split, indexed Sell 0, Hold 1,
+    // Buy 2, so the take-profit and stop-loss knobs can be tuned toward an even
+    // Sell/Hold/Buy mix.
+    let train_counts = train_store.label_counts();
+    let valid_counts = valid_store.label_counts();
+    tracing::info!(
+        target: "experiment",
+        train_sell = train_counts[0],
+        train_hold = train_counts[1],
+        train_buy = train_counts[2],
+        valid_sell = valid_counts[0],
+        valid_hold = valid_counts[1],
+        valid_buy = valid_counts[2],
+        "label balance"
+    );
 
     config
         .save(format!("{artifact_dir}/config.json"))
@@ -158,10 +174,36 @@ pub fn train<B: AutodiffBackend>(
     let epoch_items = (config.epoch_size * config.batch_size).min(total_windows);
     let num_epochs = (config.passes * total_windows).div_ceil(epoch_items).max(1);
 
-    // One structured record of everything that shaped this run, so a later read of
-    // `experiment.log` can tie the metrics back to the flags and derived counts
-    // that produced them.
-    crate::logging::log_run_config(config, &options, total_windows, num_epochs);
+    // One structured record of every flag and derived count that shaped this run, so
+    // a later read of `experiment.log` ties the metrics back to the configuration
+    // that produced them. `num_epochs` and `total_windows` are derived above, after
+    // the load and split, so they are logged here rather than read off `config`.
+    tracing::info!(
+        target: "experiment",
+        steps = config.steps,
+        batch_size = config.batch_size,
+        epoch_size = config.epoch_size,
+        passes = config.passes,
+        num_epochs,
+        total_windows,
+        d_hidden = config.model.d_hidden,
+        d_head = config.model.d_head,
+        dropout = config.model.dropout,
+        learning_rate = config.learning_rate,
+        // AdamW's fields are private, so log the whole optimizer config by Debug to
+        // capture weight_decay and the betas without field access.
+        optimizer = ?config.optimizer,
+        take_profit = config.take_profit,
+        stop_loss = config.stop_loss,
+        label_horizon = config.label_horizon,
+        fee = config.fee,
+        seed = config.seed,
+        valid_days = options.valid_days,
+        valid_batches = ?options.valid_batches,
+        max_tickers = ?options.max_tickers,
+        patience = ?options.patience,
+        "run config"
+    );
 
     let train_sampler = SamplerDataset::new(
         train_windows,
