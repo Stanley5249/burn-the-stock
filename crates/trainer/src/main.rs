@@ -20,8 +20,7 @@ use crate::training::{RunOptions, TrainingConfig, train};
 
 /// Every hyperparameter is an `Option` so an omitted flag falls through to the
 /// default baked into the `Config` struct it feeds, keeping one source of truth for
-/// defaults. The `data` and `artifact_dir` paths are the exceptions, with their own
-/// `default_value`, since they are run inputs rather than model hyperparameters.
+/// defaults.
 #[derive(Parser, Debug)]
 #[command(about = "Train the stock action classifier")]
 struct Args {

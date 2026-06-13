@@ -97,8 +97,7 @@ impl<B: Backend> Metric for SharpeMetric<B> {
         let deviation = net.var(0).sqrt().add_scalar(EPS);
         let sharpe = (mean / deviation).into_scalar().elem::<f64>();
 
-        // Weight by the full batch so the epoch value is the mean of per-batch
-        // Sharpes, which is all burn's linear aggregation can pool (see the doc).
+        // Weight by batch size; the epoch value is then the mean of per-batch Sharpes.
         self.state.update(
             sharpe,
             batch_size,

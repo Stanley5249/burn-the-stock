@@ -178,8 +178,7 @@ pub fn train<B: AutodiffBackend>(
 
     // One structured record of every flag and derived count that shaped this run, so
     // a later read of `experiment.log` ties the metrics back to the configuration
-    // that produced them. `num_epochs` and `total_windows` are derived above, after
-    // the load and split, so they are logged here rather than read off `config`.
+    // that produced them.
     tracing::info!(
         target: "experiment",
         steps = config.steps,
@@ -192,8 +191,7 @@ pub fn train<B: AutodiffBackend>(
         d_head = config.model.d_head,
         dropout = config.model.dropout,
         learning_rate = config.learning_rate,
-        // AdamW's fields are private, so log the whole optimizer config by Debug to
-        // capture weight_decay and the betas without field access.
+        // AdamW's fields are private, so log it by Debug to capture weight_decay and betas.
         optimizer = ?config.optimizer,
         take_profit = config.take_profit,
         stop_loss = config.stop_loss,
@@ -261,7 +259,7 @@ pub fn train<B: AutodiffBackend>(
         .summary();
 
     // Halt once validation loss stops improving, so a run does not sail past its
-    // optimum and overfit. Monitors the same valid Loss metric registered above.
+    // optimum and overfit.
     if let Some(patience) = patience {
         let strategy = MetricEarlyStoppingStrategy::new::<LossMetric<B::InnerBackend>>(
             &LossMetric::new(),
