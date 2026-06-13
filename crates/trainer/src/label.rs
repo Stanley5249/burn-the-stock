@@ -4,7 +4,7 @@ use polars::prelude::*;
 /// outcome. A Buy carries `+take_profit` and a Sell `-stop_loss`, the payoff of
 /// exiting a long at the touched barrier, while a Hold carries the realized
 /// close-to-close move at the vertical barrier. The reward is the per-sample
-/// payoff the expected-value metric scores a Buy against.
+/// payoff the Sharpe metric weights each soft position by.
 ///
 /// The data-carrying variants rule out an explicit discriminant, so [`class`]
 /// defines the 0/1/2 order the model's output index relies on.

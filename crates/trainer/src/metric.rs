@@ -91,7 +91,7 @@ impl<B: Backend> Metric for SharpeMetric<B> {
         // market that ignores a Sell with no holding, so clamp it away.
         let position = (probability_buy - probability_sell).clamp_min(0.0);
 
-        let net = position.clone() * input.reward.clone() - position * self.fee;
+        let net = position * input.reward.clone().sub_scalar(self.fee);
 
         let mean = net.clone().mean();
         let deviation = net.var(0).sqrt().add_scalar(EPS);

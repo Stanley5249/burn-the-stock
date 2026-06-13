@@ -56,19 +56,17 @@ fn stationary_features() -> [Expr; 5] {
     // while leaving real, large volumes essentially unchanged.
     let volume_return = ((col(VOLUME) + lit(1.0)) / (prev_volume + lit(1.0))).log(natural_log());
 
+    let price_return = |price: PlSmallStr, alias: PlSmallStr| {
+        (col(price) / prev_close.clone())
+            .log(natural_log())
+            .alias(alias)
+    };
+
     [
-        (col(OPEN) / prev_close.clone())
-            .log(natural_log())
-            .alias(OPEN_RETURN),
-        (col(HIGH) / prev_close.clone())
-            .log(natural_log())
-            .alias(HIGH_RETURN),
-        (col(LOW) / prev_close.clone())
-            .log(natural_log())
-            .alias(LOW_RETURN),
-        (col(CLOSE) / prev_close)
-            .log(natural_log())
-            .alias(CLOSE_RETURN),
+        price_return(OPEN, OPEN_RETURN),
+        price_return(HIGH, HIGH_RETURN),
+        price_return(LOW, LOW_RETURN),
+        price_return(CLOSE, CLOSE_RETURN),
         volume_return.alias(VOLUME_RETURN),
     ]
 }
