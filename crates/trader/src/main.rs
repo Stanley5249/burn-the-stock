@@ -22,7 +22,7 @@ type Backend = Wgpu;
 #[command(about = "Predict today's actions and place the implied orders")]
 struct Args {
     /// Directory holding a training run's `config.json` and `model.mpk`.
-    #[arg(long, default_value = "artifacts/tbl-9-9-25")]
+    #[arg(long, default_value = "artifacts/latest")]
     artifact_dir: PathBuf,
 
     /// Skip orders whose long signal is weaker than this, so the trader stays flat
