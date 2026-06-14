@@ -1,11 +1,8 @@
 //! Prefetch per-ticker static metadata (`industry`, `securityType`) from Fugle
-//! into a parquet file the trainer can join against price data.
-//!
-//! The universe of codes comes from the existing price parquet rather than the
-//! Fugle list endpoint. The list endpoint is only populated during a trading
-//! session, and the price file is exactly the set of tickers we have data for.
-//! Each code then needs its own `intraday/ticker` call (industry is not exposed
-//! in bulk), so the run is bounded by Fugle's rate limit and meant to run once.
+//! into a parquet the trainer joins against price data. The universe comes from
+//! the price parquet, not the list endpoint, which is only live during a session.
+//! Each code needs its own `intraday/ticker` call, so the run is rate-limited and
+//! meant to run once.
 
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result};
@@ -35,9 +32,8 @@ struct Args {
     delay_ms: u64,
 }
 
-/// Read the distinct `(market, code)` pairs from the price parquet, sorted for a
-/// deterministic fetch order. `market` is stored as a Categorical, so it is cast
-/// to a plain string.
+/// Distinct `(market, code)` pairs from the price parquet, sorted for a
+/// deterministic fetch order.
 fn load_universe(input: &Path) -> miette::Result<Vec<(String, String)>> {
     let path = input
         .to_str()
@@ -104,9 +100,8 @@ struct TickerColumns {
     security_types: Vec<Option<String>>,
 }
 
-/// Fetch metadata for every `(market, code)` in `universe`, sleeping `delay`
-/// between requests. A failed lookup is logged and skipped rather than aborting
-/// the run, so one bad symbol does not waste the minutes already spent fetching.
+/// Fetch metadata for every `(market, code)`, sleeping `delay` between requests.
+/// A failed lookup is logged and skipped so one bad symbol does not abort the run.
 async fn fetch_all(
     http: &reqwest::Client,
     universe: &[(String, String)],
