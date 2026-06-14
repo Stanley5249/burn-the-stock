@@ -1,10 +1,9 @@
 mod cli;
 mod command;
-mod label;
+mod data;
 mod link;
 mod logging;
 mod portfolio;
-mod store;
 mod training;
 
 use clap::Parser;

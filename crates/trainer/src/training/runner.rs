@@ -15,7 +15,7 @@ use burn::train::{
 };
 use miette::{IntoDiagnostic, Result, bail};
 
-use crate::store::TickerStore;
+use crate::data::store::TickerStore;
 use crate::training::batcher::StockBatcher;
 use crate::training::dataset::WindowDataset;
 use crate::training::metric::{PrecisionClassMetric, SharpeMetric};

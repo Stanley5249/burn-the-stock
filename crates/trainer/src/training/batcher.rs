@@ -1,4 +1,4 @@
-use crate::store::TickerStore;
+use crate::data::store::TickerStore;
 use crate::training::dataset::StockItem;
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;

@@ -1,4 +1,4 @@
-use crate::store::TickerStore;
+use crate::data::store::TickerStore;
 use burn::data::dataset::Dataset;
 use fastrand::Rng;
 

@@ -10,7 +10,7 @@ use burn::train::metric::{
     SerializedEntry,
 };
 
-/// Sell and Buy class indices, matching `crate::label::Label::class`.
+/// Sell and Buy class indices, matching `crate::data::label::Label::class`.
 const SELL: usize = 0;
 const BUY: usize = 2;
 

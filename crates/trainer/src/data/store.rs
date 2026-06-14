@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::label::compute_labels_rewards;
+use crate::data::label::compute_labels_rewards;
 use chrono::NaiveDate;
 use fastrand::Rng;
 use polars::prelude::*;

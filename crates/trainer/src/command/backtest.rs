@@ -9,8 +9,8 @@ use miette::{IntoDiagnostic, Result};
 use stock_model::inference::{Action, Predictor};
 
 use crate::cli::{BacktestArgs, FillArg};
+use crate::data::store::TickerStore;
 use crate::portfolio::{self, BacktestConfig, DayBar, Fill, STARTING_CASH, TradingDay};
-use crate::store::TickerStore;
 use crate::training::TrainingConfig;
 
 type InferenceBackend = Wgpu;
