@@ -24,6 +24,9 @@ pub enum Command {
     /// Backtest a trained model over the held-out window and report realized
     /// return, Sharpe, and hit rate.
     Eval(EvalArgs),
+    /// Simulate a stateful long-only portfolio over the held-out window under the
+    /// `sim_stock` platform rules, reporting cumulative return, win rate, and more.
+    Backtest(BacktestArgs),
 }
 
 /// Every hyperparameter is an `Option` so an omitted flag falls through to the
@@ -246,4 +249,49 @@ pub struct EvalArgs {
     /// weak signals stay flat. The position is `clamp(P(Buy) - P(Sell), 0)`.
     #[arg(long, default_value_t = 0.0)]
     pub min_position: f32,
+}
+
+/// Which intraday prices the simulated orders fill at.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum FillArg {
+    /// Optimistic best case: buy at the day's low, sell at the day's high.
+    LowHigh,
+    /// Pessimistic comparison: buy and sell at the day's open.
+    Open,
+}
+
+/// Stateful long-only portfolio backtest over the held-out window, under the
+/// `sim_stock` platform rules (100M capital, ten equal-weight slots, whole lots, buy
+/// low / sell high, sell-side tax). Barriers and the split come from the saved
+/// `config.json`; the buy gate, fill model, and window are flags here.
+#[derive(Parser, Debug)]
+pub struct BacktestArgs {
+    /// Directory holding a training run's `config.json` and `model.mpk`. Defaults to
+    /// the `latest` link the train command refreshes after each run.
+    #[arg(long, default_value = "artifacts/latest")]
+    pub artifact_dir: PathBuf,
+
+    /// OHLCV history to backtest over. It must hold the full ticker universe so the
+    /// per-date cross-sectional features match training.
+    #[arg(long, default_value = "data/yfinance/stocks.parquet")]
+    pub data: PathBuf,
+
+    /// Length in days of the recent window to backtest. Match train's `--valid-days`
+    /// so the held-out split lines up with the one the model never fit.
+    #[arg(long, default_value_t = 180)]
+    pub valid_days: i64,
+
+    /// Minimum net-bullish score `clamp(P(Buy) - P(Sell), 0)` to buy a stock, so weak
+    /// signals stay in cash.
+    #[arg(long, default_value_t = 0.2)]
+    pub threshold: f32,
+
+    /// Which prices fills happen at: `low-high` is the optimistic best case, `open`
+    /// the pessimistic comparison.
+    #[arg(long, value_enum, default_value_t = FillArg::LowHigh)]
+    pub fill: FillArg,
+
+    /// Equity-curve CSV path. Defaults to `<artifact_dir>/backtest-equity.csv`.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }

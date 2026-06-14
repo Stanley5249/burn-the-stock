@@ -258,10 +258,6 @@ impl TickerStore {
     /// Hand out each ticker's raw daily prices, the execution and valuation data the
     /// backtest needs alongside the model's per-window signals. One [`TickerQuotes`]
     /// per ticker, with the price vectors aligned to `dates`.
-    #[allow(
-        dead_code,
-        reason = "consumed by the backtest command in the next commit"
-    )]
     pub fn quotes(&self) -> Vec<TickerQuotes> {
         self.tickers
             .iter()
@@ -438,10 +434,6 @@ pub(crate) struct ResidentBuffers {
 /// One ticker's raw daily prices for the backtest, produced by
 /// [`TickerStore::quotes`]. The four price vectors share `dates`' row order, so
 /// `low[i]`, `high[i]`, `close[i]`, and `open[i]` are all the trading day `dates[i]`.
-#[allow(
-    dead_code,
-    reason = "consumed by the backtest command in the next commit"
-)]
 pub struct TickerQuotes {
     pub ticker: String,
     pub dates: Vec<NaiveDate>,
