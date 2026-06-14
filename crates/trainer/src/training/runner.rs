@@ -152,7 +152,6 @@ pub fn train<B: AutodiffBackend>(
     let train_counts = train_store.label_counts();
     let valid_counts = valid_store.label_counts();
     tracing::info!(
-        target: "experiment",
         train_sell = train_counts[0],
         train_hold = train_counts[1],
         train_buy = train_counts[2],
@@ -179,34 +178,10 @@ pub fn train<B: AutodiffBackend>(
     let epoch_items = (config.epoch_size * config.batch_size).min(total_windows);
     let num_epochs = (config.passes * total_windows).div_ceil(epoch_items).max(1);
 
-    // One structured record of every flag and derived count that shaped this run, so
-    // a later read of `experiment.log` ties the metrics back to the configuration
-    // that produced them.
-    tracing::info!(
-        target: "experiment",
-        steps = config.steps,
-        batch_size = config.batch_size,
-        epoch_size = config.epoch_size,
-        passes = config.passes,
-        num_epochs,
-        total_windows,
-        d_hidden = config.model.d_hidden,
-        d_head = config.model.d_head,
-        dropout = config.model.dropout,
-        learning_rate = config.learning_rate,
-        // AdamW's fields are private, so log it by Debug to capture weight_decay and betas.
-        optimizer = ?config.optimizer,
-        take_profit = config.take_profit,
-        stop_loss = config.stop_loss,
-        label_horizon = config.label_horizon,
-        fee = config.fee,
-        seed = config.seed,
-        valid_days = options.valid_days,
-        valid_batches = ?options.valid_batches,
-        max_tickers = ?options.max_tickers,
-        patience = ?options.patience,
-        "run config"
-    );
+    // The flags and config live in `config.json`; only the counts derived from them
+    // are worth a log line, so a later read ties the schedule back to the data size
+    // without restating what the saved config already holds.
+    tracing::info!(total_windows, epoch_items, num_epochs, "training schedule");
 
     let train_sampler = SamplerDataset::new(
         train_windows,
@@ -282,7 +257,7 @@ pub fn train<B: AutodiffBackend>(
     // is unavailable. Save only the inner model, dropping the loss, so the artifact
     // loads straight into a `StockModel` for inference.
     let best_model = if let Some(epoch) = best_valid_loss_epoch(artifact_dir) {
-        tracing::info!(target: "experiment", best_epoch = epoch, "exporting best-checkpoint model");
+        tracing::info!(best_epoch = epoch, "exporting best-checkpoint model");
         StockClassifier::<B::InnerBackend>::new(&config.model, device)
             .load_file(
                 artifact_dir
@@ -294,7 +269,7 @@ pub fn train<B: AutodiffBackend>(
             .into_diagnostic()?
             .into_model()
     } else {
-        tracing::warn!(target: "experiment", "no valid Loss summary; exporting final-epoch model");
+        tracing::warn!("no valid Loss summary; exporting final-epoch model");
         result.model.into_model()
     };
 

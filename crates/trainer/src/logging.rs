@@ -21,7 +21,7 @@ use tracing_subscriber::prelude::*;
 pub fn install_experiment_logger(artifact_dir: &Path) -> Result<()> {
     let file = File::create(artifact_dir.join("experiment.log")).into_diagnostic()?;
 
-    // Keep our spans, the run-config record, and burn's early-stopping loss
+    // Keep our spans, the schedule record, and burn's early-stopping loss
     // trajectory at INFO, but drop the noise: burn's per-iteration `Iteration N`
     // chatter (884 of 911 lines in a short run), the checkpointer's "File exists"
     // warnings, the autotune-cache notes, and the wgpu backend's device dump.

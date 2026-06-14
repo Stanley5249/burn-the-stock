@@ -30,7 +30,6 @@ pub fn refresh_latest(artifact_dir: &Path) {
     // A relative target keeps the link valid if the whole artifacts tree is moved.
     if let Err(error) = symlink_dir(name, &link) {
         tracing::warn!(
-            target: "experiment",
             link = %link.display(),
             target_dir = %Path::new(name).display(),
             %error,
@@ -52,7 +51,6 @@ fn replace_latest_link(link: &Path) -> bool {
 
     if !metadata.file_type().is_symlink() {
         tracing::warn!(
-            target: "experiment",
             link = %link.display(),
             "latest slot exists and is not a symlink; leaving it untouched"
         );
@@ -70,7 +68,6 @@ fn replace_latest_link(link: &Path) -> bool {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(
-                target: "experiment",
                 link = %link.display(),
                 %error,
                 "could not remove existing latest link"
