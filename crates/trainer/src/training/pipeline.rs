@@ -112,7 +112,7 @@ pub fn train<B: AutodiffBackend>(
 
     std::fs::create_dir_all(artifact_dir).into_diagnostic()?;
 
-    crate::logging::install_experiment_logger(artifact_dir)?;
+    crate::logging::redirect_to_file(artifact_dir)?;
 
     B::seed(device, config.seed);
 
