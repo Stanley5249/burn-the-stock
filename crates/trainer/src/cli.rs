@@ -21,8 +21,9 @@ pub struct Cli {
 pub enum Command {
     /// Train the model and write the run's artifacts.
     Train(TrainArgs),
-    /// Predict an action per ticker from a trained model and a recent price snapshot.
-    Predict(PredictArgs),
+    /// Backtest a trained model over the held-out window and report realized
+    /// return, Sharpe, and hit rate.
+    Eval(EvalArgs),
 }
 
 /// Every hyperparameter is an `Option` so an omitted flag falls through to the
@@ -220,24 +221,29 @@ impl TrainArgs {
     }
 }
 
-/// Recent OHLCV snapshot, model artifacts, and the position gate for one offline
-/// prediction run. This reads a parquet snapshot rather than a live feed and only
-/// reports the actions a trader would take, so live order placement stays in the
-/// `trader` bin.
+/// Held-out backtest of a trained model: replay it over the validation window and
+/// report realized return, Sharpe, and hit rate. Reads a parquet snapshot and places
+/// no orders, so live trading stays in the `trader` bin. The barrier and fee knobs
+/// come from the run's saved `config.json`.
 #[derive(Parser, Debug)]
-pub struct PredictArgs {
+pub struct EvalArgs {
     /// Directory holding a training run's `config.json` and `model.mpk`. Defaults to
     /// the `latest` link the train command refreshes after each run.
     #[arg(long, default_value = "artifacts/latest")]
     pub artifact_dir: PathBuf,
 
-    /// Recent OHLCV snapshot standing in for today's live feed. It must hold the
-    /// full ticker universe so the per-date cross-sectional features match training.
+    /// OHLCV history to backtest over. It must hold the full ticker universe so the
+    /// per-date cross-sectional features match training.
     #[arg(long, default_value = "data/yfinance/stocks.parquet")]
     pub data: PathBuf,
 
-    /// Only act on predictions whose long position exceeds this threshold, so weak
-    /// signals stay flat. The position is `clamp(P(Buy) - P(Sell), 0)`.
+    /// Length in days of the recent window to evaluate. Match train's `--valid-days`
+    /// so the held-out split lines up with the one the model never fit.
+    #[arg(long, default_value_t = 180)]
+    pub valid_days: i64,
+
+    /// Count a window as a taken trade only when its long position exceeds this, so
+    /// weak signals stay flat. The position is `clamp(P(Buy) - P(Sell), 0)`.
     #[arg(long, default_value_t = 0.0)]
     pub min_position: f32,
 }

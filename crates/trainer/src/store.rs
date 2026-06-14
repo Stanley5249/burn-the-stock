@@ -8,7 +8,7 @@ use tracing::instrument;
 
 use stock_model::features::{
     CLOSE, DATE, FEATURE, FEATURE_NAMES, HIGH, InferenceWindow, LOW, TICKER, feature_array,
-    latest_windows, standardized_features,
+    standardized_features,
 };
 
 /// Scan the OHLCV parquet and run the shared feature transform, the entry point for
@@ -173,20 +173,42 @@ impl TickerStore {
         Ok(Self { tickers })
     }
 
-    /// Build the most recent `steps`-day standardized feature window for every
-    /// ticker, the offline inference counterpart to [`Self::load`]. It runs the same
-    /// shared feature transform but keeps the latest rows rather than dropping a
-    /// label horizon, since inference predicts from the most recent bar.
+    /// Materialize every `steps`-length window of every ticker as an
+    /// [`InferenceWindow`] paired with the realized barrier reward at its prediction
+    /// bar, the window's last day. This is the offline backtest counterpart to
+    /// [`Self::enumerate_windows`]: where that hands the batcher row indices, this
+    /// hands a predictor the windows directly and the realized return each one heads
+    /// toward.
     ///
-    /// `path` must hold the full ticker universe, not a single stock, or the
-    /// per-date cross-section would not match the one the model trained on.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the parquet cannot be scanned or its columns are malformed.
-    #[instrument(level = "info", skip_all, fields(path = %path.display(), steps))]
-    pub fn load_inference_windows(path: &Path, steps: usize) -> PolarsResult<Vec<InferenceWindow>> {
-        latest_windows(scan_standardized(path)?, steps)
+    /// The features are the same cross-sectionally standardized values [`Self::load`]
+    /// already produced, so feeding them straight to a predictor matches training
+    /// without standardizing again. The two vectors share an index, so `windows[i]`
+    /// pairs with `rewards[i]` and a predictor's per-window output zips back onto the
+    /// realized returns.
+    pub fn backtest_windows(&self, steps: usize) -> (Vec<InferenceWindow>, Vec<f32>) {
+        let stride = FEATURE_NAMES.len();
+        let mut windows = Vec::new();
+        let mut rewards = Vec::new();
+
+        for ticker in &self.tickers {
+            if ticker.rows() < steps {
+                continue;
+            }
+            let last_start = ticker.rows() - steps;
+            for start in 0..=last_start {
+                // The prediction is made from the window's last bar, so its reward and
+                // date come from that row.
+                let last = start + steps - 1;
+                windows.push(InferenceWindow {
+                    ticker: ticker.name.to_string(),
+                    date: ticker.dates[last],
+                    features: ticker.features[start * stride..(last + 1) * stride].to_vec(),
+                });
+                rewards.push(ticker.rewards[last]);
+            }
+        }
+
+        (windows, rewards)
     }
 
     /// Randomly keep `count` tickers, chosen with `seed` so the subset is
