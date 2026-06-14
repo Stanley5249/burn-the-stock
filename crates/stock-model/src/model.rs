@@ -76,7 +76,7 @@ impl<B: Backend> StockModel<B> {
 #[derive(Config, Debug)]
 pub struct StockModelConfig {
     /// GRU hidden size, the temporal summary width.
-    #[config(default = 64)]
+    #[config(default = 8)]
     pub d_hidden: usize,
     /// Hidden width of the MLP head.
     #[config(default = 32)]

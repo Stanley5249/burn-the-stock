@@ -27,18 +27,18 @@ use stock_model::model::StockModelConfig;
 pub struct TrainingConfig {
     pub model: StockModelConfig,
     pub optimizer: AdamWConfig,
-    #[config(default = 1.0e-3)]
+    #[config(default = 1.0e-4)]
     pub learning_rate: f64,
     /// Take-profit barrier for the triple-barrier labels, as a positive fraction
     /// of the entry close.
-    #[config(default = 0.05)]
+    #[config(default = 0.09)]
     pub take_profit: f32,
     /// Stop-loss barrier for the triple-barrier labels, as a positive fraction of
     /// the entry close.
-    #[config(default = 0.05)]
+    #[config(default = 0.09)]
     pub stop_loss: f32,
     /// Vertical-barrier horizon in trading days for the triple-barrier labels.
-    #[config(default = 10)]
+    #[config(default = 25)]
     pub label_horizon: usize,
     /// Round-trip transaction cost the Sharpe metric charges each position, as a
     /// fraction. Taiwan brokerage is 0.1425% on each of the buy and sell legs, plus
@@ -47,10 +47,10 @@ pub struct TrainingConfig {
     pub fee: f32,
     /// Number of full passes over the training data. With a fixed `epoch_size`
     /// this sets how many epochs run: `passes * windows / epoch_size`.
-    #[config(default = 1)]
+    #[config(default = 3)]
     pub passes: usize,
     /// Window length fed to the GRU.
-    #[config(default = 20)]
+    #[config(default = 30)]
     pub steps: usize,
     /// Tickers per batch, which is the batch size.
     #[config(default = 64)]
@@ -58,7 +58,7 @@ pub struct TrainingConfig {
     /// Batches per epoch, which sets the validation cadence. Each epoch samples
     /// `epoch_size * batch_size` windows without replacement, so on a large
     /// dataset validation runs long before a full pass completes.
-    #[config(default = 1000)]
+    #[config(default = 200)]
     pub epoch_size: usize,
     #[config(default = 42)]
     pub seed: u64,

@@ -122,11 +122,11 @@ pub struct TrainArgs {
     pub fee: Option<f32>,
 
     /// Validation batches per epoch: a fixed-seed subsample of this many batches,
-    /// drawn across all tickers and dates and stable across epochs. Omit to sweep
+    /// drawn across all tickers and dates and stable across epochs. Set 0 to sweep
     /// every window, which dwarfs a short training run. The training-side
     /// counterpart is `--batches-per-epoch`.
-    #[arg(long, help_heading = "Validation")]
-    pub valid_batches: Option<usize>,
+    #[arg(long, default_value_t = 200, help_heading = "Validation")]
+    pub valid_batches: usize,
 
     /// Length in days of the recent window used for validation. Everything
     /// before it trains, so a smaller value leaves more data for training.
@@ -139,9 +139,9 @@ pub struct TrainArgs {
     pub max_tickers: Option<usize>,
 
     /// Stop early if validation loss does not improve for this many epochs.
-    /// Omit to disable early stopping.
-    #[arg(long, help_heading = "Validation")]
-    pub patience: Option<usize>,
+    /// Set 0 to disable early stopping.
+    #[arg(long, default_value_t = 5, help_heading = "Validation")]
+    pub patience: usize,
 }
 
 impl TrainArgs {
@@ -213,10 +213,12 @@ impl TrainArgs {
     /// optimizer config.
     pub fn run_options(&self) -> RunOptions {
         RunOptions {
-            valid_batches: self.valid_batches,
+            // 0 is the escape hatch: sweep every validation window / disable early
+            // stopping, mapped to the `None` the runner expects.
+            valid_batches: (self.valid_batches != 0).then_some(self.valid_batches),
             max_tickers: self.max_tickers,
             valid_days: self.valid_days,
-            patience: self.patience,
+            patience: (self.patience != 0).then_some(self.patience),
         }
     }
 }
