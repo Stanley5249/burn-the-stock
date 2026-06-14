@@ -218,21 +218,16 @@ impl TickerStore {
     }
 
     /// Materialize every `steps`-length window of every ticker as an
-    /// [`InferenceWindow`] paired with the realized barrier reward at its prediction
-    /// bar, the window's last day. This is the offline backtest counterpart to
-    /// [`Self::enumerate_windows`]: where that hands the batcher row indices, this
-    /// hands a predictor the windows directly and the realized return each one heads
-    /// toward.
+    /// [`InferenceWindow`] dated at its prediction bar, the window's last day. This is
+    /// the offline backtest counterpart to [`Self::enumerate_windows`]: where that
+    /// hands the batcher row indices, this hands a predictor the windows directly.
     ///
     /// The features are the same cross-sectionally standardized values [`Self::load`]
     /// already produced, so feeding them straight to a predictor matches training
-    /// without standardizing again. The two vectors share an index, so `windows[i]`
-    /// pairs with `rewards[i]` and a predictor's per-window output zips back onto the
-    /// realized returns.
-    pub fn backtest_windows(&self, steps: usize) -> (Vec<InferenceWindow>, Vec<f32>) {
+    /// without standardizing again.
+    pub fn backtest_windows(&self, steps: usize) -> Vec<InferenceWindow> {
         let stride = FEATURE_NAMES.len();
         let mut windows = Vec::new();
-        let mut rewards = Vec::new();
 
         for ticker in &self.tickers {
             if ticker.rows() < steps {
@@ -240,19 +235,18 @@ impl TickerStore {
             }
             let last_start = ticker.rows() - steps;
             for start in 0..=last_start {
-                // The prediction is made from the window's last bar, so its reward and
-                // date come from that row.
+                // The prediction is made from the window's last bar, so its date comes
+                // from that row.
                 let last = start + steps - 1;
                 windows.push(InferenceWindow {
                     ticker: ticker.name.to_string(),
                     date: ticker.dates[last],
                     features: ticker.features[start * stride..(last + 1) * stride].to_vec(),
                 });
-                rewards.push(ticker.rewards[last]);
             }
         }
 
-        (windows, rewards)
+        windows
     }
 
     /// Hand out each ticker's raw daily prices, the execution and valuation data the

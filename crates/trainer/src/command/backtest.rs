@@ -48,7 +48,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         .into_diagnostic()?;
 
     // Score every window, then index each signal by (ticker, signal date).
-    let (windows, _rewards) = valid.backtest_windows(config.steps);
+    let windows = valid.backtest_windows(config.steps);
     let predictions = predictor.predict(&windows);
 
     let mut signals: HashMap<String, HashMap<NaiveDate, (f32, Action)>> = HashMap::new();
