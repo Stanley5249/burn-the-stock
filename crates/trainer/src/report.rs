@@ -3,7 +3,7 @@ use stock_model::inference::{Action, Prediction};
 /// Print the predictions, then the buy candidates sorted by how strong the long
 /// signal is. This is an offline diagnostic, so it reports the actions a trader
 /// would take without placing any order.
-pub fn print(predictions: &[Prediction], min_position: f32) {
+pub fn render(predictions: &[Prediction], min_position: f32) {
     if predictions.is_empty() {
         println!("No tickers had enough history to fill the model's window.");
         return;

@@ -7,8 +7,8 @@ use burn::train::metric::{Adaptor, ConfusionStatsInput, ItemLazy, LossInput};
 use burn::train::{InferenceStep, TrainOutput, TrainStep};
 use stock_model::model::{NUM_CLASSES, StockModel, StockModelConfig};
 
-use crate::batcher::StockBatch;
-use crate::metric::StockEvalInput;
+use crate::training::batcher::StockBatch;
+use crate::training::metric::StockEvalInput;
 
 /// Sell, Hold, Buy loss weights, upweighting the rare actionable classes against
 /// the Hold majority.

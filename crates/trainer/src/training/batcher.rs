@@ -1,5 +1,5 @@
-use crate::dataset::StockItem;
 use crate::store::TickerStore;
+use crate::training::dataset::StockItem;
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
 use stock_model::features::FEATURE_NAMES;

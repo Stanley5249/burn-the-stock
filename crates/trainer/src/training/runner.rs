@@ -13,11 +13,11 @@ use burn::train::metric::{ClassReduction, FBetaScoreMetric, LossMetric};
 use burn::train::{Learner, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining};
 use miette::{IntoDiagnostic, Result, bail};
 
-use crate::batcher::StockBatcher;
-use crate::dataset::WindowDataset;
-use crate::metric::{PrecisionClassMetric, SharpeMetric};
-use crate::model::StockClassifier;
 use crate::store::TickerStore;
+use crate::training::batcher::StockBatcher;
+use crate::training::dataset::WindowDataset;
+use crate::training::metric::{PrecisionClassMetric, SharpeMetric};
+use crate::training::model::StockClassifier;
 use stock_model::model::StockModelConfig;
 
 /// Top-level training configuration.
