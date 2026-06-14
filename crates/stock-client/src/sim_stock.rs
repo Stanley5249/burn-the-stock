@@ -16,12 +16,11 @@ impl SimStockClient {
         &self.http
     }
 
-    /// Load credentials from `STOCK_ACCOUNT` and `STOCK_PASSWORD` env vars.
-    /// Call `dotenvy::dotenv().ok()` before this if using a `.env` file.
+    /// Load credentials from `STOCK_ACCOUNT` and `STOCK_PASSWORD`. Call
+    /// `dotenvy::dotenv().ok()` first if using a `.env` file.
     ///
     /// # Errors
-    ///
-    /// Returns an error if either env var is missing.
+    /// If either env var is missing.
     pub fn from_env(http: reqwest::Client) -> Result<Self> {
         let account = std::env::var("STOCK_ACCOUNT")?;
         let password = std::env::var("STOCK_PASSWORD")?;
@@ -33,8 +32,7 @@ impl SimStockClient {
     }
 
     /// # Errors
-    ///
-    /// Returns an error on network or deserialization failure.
+    /// Network or deserialization failure.
     pub async fn stock_list(&self) -> Result<HashMap<String, StockInfo>> {
         let list = self
             .http
@@ -51,8 +49,7 @@ impl SimStockClient {
     }
 
     /// # Errors
-    ///
-    /// Returns an error on network or deserialization failure.
+    /// Network or deserialization failure.
     pub async fn stock_market(&self, code: &str) -> Result<MarketType> {
         #[derive(Debug, Deserialize)]
         #[serde(tag = "result", deny_unknown_fields)]
@@ -86,8 +83,7 @@ impl SimStockClient {
     }
 
     /// # Errors
-    ///
-    /// Returns an error on network or deserialization failure.
+    /// Network or deserialization failure.
     pub async fn user_stocks(&self) -> Result<Vec<UserStock>> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -115,15 +111,13 @@ impl SimStockClient {
     }
 
     /// # Errors
-    ///
-    /// Returns an error on network failure or if the server rejects the order.
+    /// Network failure or if the server rejects the order.
     pub async fn buy(&self, code: &str, shares: u64, price: f64) -> Result<()> {
         self.order("buy", code, shares, price).await
     }
 
     /// # Errors
-    ///
-    /// Returns an error on network failure or if the server rejects the order.
+    /// Network failure or if the server rejects the order.
     pub async fn sell(&self, code: &str, shares: u64, price: f64) -> Result<()> {
         self.order("sell", code, shares, price).await
     }

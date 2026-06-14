@@ -58,8 +58,7 @@ async fn test_fugle_tickers_otc() {
 #[tokio::test]
 #[ignore = "requires network access and FUGLE_API_KEY"]
 async fn test_fugle_ticker_industry() {
-    // Fetch only two tickers to confirm the end-to-end path: a general stock
-    // and an ETF, both of which should carry an industry classification.
+    // A general stock and an ETF, both expected to carry an industry.
     for symbol in ["2330", "0050"] {
         let detail = fetch_ticker(&HTTP, symbol).await.unwrap();
 

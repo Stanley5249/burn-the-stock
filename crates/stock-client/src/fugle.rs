@@ -3,13 +3,10 @@ use crate::urls;
 use chrono::NaiveDate;
 use serde::Deserialize;
 
-// --- Public API ---
-
 /// Fetch the list of equity tickers for `market`.
 ///
 /// # Errors
-///
-/// Returns an error on network or deserialization failure.
+/// Network or deserialization failure.
 pub async fn fetch_tickers(
     http: &reqwest::Client,
     market: FugleMarket,
@@ -32,12 +29,8 @@ pub async fn fetch_tickers(
 
 /// Fetch the static metadata for a single `symbol`.
 ///
-/// Used to read per-ticker fields like `industry` and `securityType` that the
-/// list endpoint does not return per row.
-///
 /// # Errors
-///
-/// Returns an error on network or deserialization failure.
+/// Network or deserialization failure.
 pub async fn fetch_ticker(http: &reqwest::Client, symbol: &str) -> Result<FugleTickerDetail> {
     let url = format!("{}/{}", urls::FUGLE_INTRADAY_TICKER, symbol);
 
@@ -52,13 +45,11 @@ pub async fn fetch_ticker(http: &reqwest::Client, symbol: &str) -> Result<FugleT
     Ok(response)
 }
 
-/// Fetch adjusted daily candles for `symbol` over a single `[from, to]` window.
-///
-/// The window must be at most [`CANDLE_CHUNK_DAYS`] days.
+/// Fetch adjusted daily candles for `symbol` over `[from, to]`, at most
+/// [`CANDLE_CHUNK_DAYS`] days.
 ///
 /// # Errors
-///
-/// Returns an error on network or deserialization failure.
+/// Network or deserialization failure.
 pub async fn fetch_candles(
     http: &reqwest::Client,
     symbol: &str,
@@ -84,8 +75,6 @@ pub async fn fetch_candles(
 
     Ok(response)
 }
-
-// --- Market enum ---
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum FugleMarket {
@@ -123,8 +112,6 @@ impl std::fmt::Display for FugleMarket {
     }
 }
 
-// --- Response types ---
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FugleTickersResponse {
@@ -151,11 +138,8 @@ pub struct FugleTickerItem {
     pub industry: Option<String>,
 }
 
-/// Static metadata for a single ticker from the `intraday/ticker` endpoint.
-///
-/// The endpoint returns many extra fields (warrant and index specifics) that we
-/// do not model, so this type does not use `deny_unknown_fields` and lets serde
-/// ignore the rest.
+/// Static metadata for a single ticker. No `deny_unknown_fields`: the endpoint
+/// returns extra warrant and index fields we do not model.
 #[derive(Clone, Debug, Deserialize)]
 pub struct FugleTickerDetail {
     pub symbol: String,

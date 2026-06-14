@@ -3,8 +3,6 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-// sim server types
-
 /// One entry from the sim server's `stock_list` endpoint.
 #[derive(Debug, Deserialize)]
 pub struct StockInfo {
@@ -25,8 +23,7 @@ pub struct UserStock {
     pub user_uid_id: u64,
 }
 
-// OHLCV row shared by all market sources
-
+/// OHLCV row shared by all market sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OhlcvRow {
     pub date: NaiveDate,
