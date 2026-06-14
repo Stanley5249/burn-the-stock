@@ -1,5 +1,4 @@
-//! One module per CLI subcommand, each owning the orchestration that turns parsed
-//! args into a run: the train loop or the portfolio backtest.
+//! One module per CLI subcommand, turning parsed args into a run.
 
 pub mod backtest;
 pub mod train;

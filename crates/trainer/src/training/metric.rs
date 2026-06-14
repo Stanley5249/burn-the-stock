@@ -18,8 +18,8 @@ const BUY: usize = 2;
 /// blown-up ratio.
 const EPS: f32 = 1e-8;
 
-/// Input shared by the trade-aware metrics: the class logits, the true class
-/// index, and the signed forward return each row heads toward.
+/// Input shared by the trade-aware metrics: logits, true class, and signed forward
+/// return per row.
 pub struct StockEvalInput<B: Backend> {
     pub logits: Tensor<B, 2>,
     pub targets: Tensor<B, 1, Int>,
@@ -36,23 +36,13 @@ impl<B: Backend> StockEvalInput<B> {
     }
 }
 
-/// Per-trade Sharpe ratio of the long-only soft policy, read off the logits.
+/// Per-trade Sharpe of the long-only soft policy. The softmax becomes a position
+/// `clamp(P(Buy) - P(Sell), 0, 1)`; each row earns its forward `reward` scaled by it,
+/// less the round-trip `fee`, and the batch of net returns gives `mean / std`.
 ///
-/// The softmax becomes a position `clamp(P(Buy) - P(Sell), 0, 1)`, the same map the
-/// trader deploys, so a Sell only vetoes a Buy toward flat and never shorts. Each
-/// row earns its forward `reward` scaled by the position, less the round-trip `fee`
-/// as a turnover cost, and the batch of those net returns gives a Sharpe of
-/// `mean / std`. Higher is better, and the `EPS` floor keeps a flat batch finite.
-///
-/// Two caveats the number carries, both fundamental to a Sharpe metric here:
-/// - **Batch size.** burn aggregates a metric as the mean of its per-batch values,
-///   and Sharpe is non-linear, so this is a per-batch Sharpe averaged over the
-///   epoch, not one pooled over every trade. Its scale rides on `batch_size`
-///   through the std estimate, so only compare runs at the same batch size.
-/// - **Duration.** The reward is a per-trade return over the triple-barrier holding
-///   horizon, so this is a per-trade Sharpe over that period, not daily and not
-///   annualized. Overlapping entry windows break the IID assumption annualizing
-///   would need.
+/// Two caveats: this is a per-batch Sharpe averaged over the epoch (burn averages
+/// per-batch values, and Sharpe is non-linear), so its scale rides on `batch_size`;
+/// and the reward is a per-trade return over the holding horizon, not annualized.
 #[derive(Clone)]
 pub struct SharpeMetric<B: Backend> {
     name: MetricName,
@@ -87,8 +77,7 @@ impl<B: Backend> Metric for SharpeMetric<B> {
             .slice([0..batch_size, BUY..BUY + 1])
             .reshape([batch_size]);
 
-        // Sell only vetoes a Buy toward flat; a negative position would short a
-        // market that ignores a Sell with no holding, so clamp it away.
+        // Clamp away negatives: a Sell only vetoes a Buy, it never shorts.
         let position = (probability_buy - probability_sell).clamp_min(0.0);
 
         let net = position * input.reward.clone().sub_scalar(self.fee);
@@ -97,7 +86,7 @@ impl<B: Backend> Metric for SharpeMetric<B> {
         let deviation = net.var(0).sqrt().add_scalar(EPS);
         let sharpe = (mean / deviation).into_scalar().elem::<f64>();
 
-        // Weight by batch size; the epoch value is then the mean of per-batch Sharpes.
+        // Weighting by batch size makes the epoch value the mean of per-batch Sharpes.
         self.state.update(
             sharpe,
             batch_size,
@@ -132,12 +121,9 @@ impl<B: Backend> Numeric for SharpeMetric<B> {
     }
 }
 
-/// Precision for one action class, in percent.
-///
-/// Of the rows predicted as this class, the fraction whose true label matches.
-/// Weighting by the predicted count makes the running value the precision over
-/// every such prediction in the epoch. Reported per class because the macro
-/// F-beta hides whether the rare Buy and Sell calls are the trustworthy ones.
+/// Precision for one action class, in percent: of the rows predicted as this class,
+/// the fraction whose true label matches. Per class, since the macro F-beta hides
+/// whether the rare Buy and Sell calls are the trustworthy ones.
 #[derive(Clone)]
 pub struct PrecisionClassMetric<B: Backend> {
     name: MetricName,

@@ -10,13 +10,11 @@ use stock_model::model::{NUM_CLASSES, StockModel, StockModelConfig};
 use crate::training::batcher::StockBatch;
 use crate::training::metric::StockEvalInput;
 
-/// Sell, Hold, Buy loss weights, upweighting the rare actionable classes against
-/// the Hold majority.
+/// Sell, Hold, Buy loss weights, upweighting the rare actionable classes.
 pub const CLASS_WEIGHTS: [f32; NUM_CLASSES] = [2.0, 1.0, 2.0];
 
-/// Training wrapper around the shared [`StockModel`]: it adds the loss and the
-/// train/eval steps. Keeping these here leaves the model crate free of any training
-/// machinery, so a model loaded for inference carries only the architecture.
+/// Training wrapper around [`StockModel`], adding the loss and the train/eval steps,
+/// so the model crate stays free of training machinery.
 #[derive(Module, Debug)]
 pub struct StockClassifier<B: Backend> {
     model: StockModel<B>,
@@ -33,7 +31,7 @@ impl<B: Backend> StockClassifier<B> {
         Self { model, loss }
     }
 
-    /// The trained architecture without the loss, the model to save for inference.
+    /// The architecture without the loss, to save for inference.
     pub fn into_model(self) -> StockModel<B> {
         self.model
     }
@@ -52,14 +50,10 @@ impl<B: Backend> StockClassifier<B> {
     }
 }
 
-/// Model output carrying the reward alongside the usual classification fields.
-///
-/// A local stand-in for burn's `ClassificationOutput` so it can adapt to the
-/// trade-aware Sharpe and precision metrics as well as the built-in Loss and
-/// confusion-based (F-beta) metrics. The orphan rule blocks adding that adaptor to
-/// the foreign type.
-///
-/// Input shapes: `output` `[batch, NUM_CLASSES]`, `targets` and `reward` `[batch]`.
+/// Model output carrying the reward alongside the classification fields. A local
+/// stand-in for burn's `ClassificationOutput`, which the orphan rule blocks us from
+/// adapting to the trade-aware metrics. Shapes: `output` `[batch, NUM_CLASSES]`,
+/// `targets` and `reward` `[batch]`.
 pub struct StockOutput<B: Backend> {
     pub loss: Tensor<B, 1>,
     pub output: Tensor<B, 2>,

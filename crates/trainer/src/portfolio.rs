@@ -1,16 +1,10 @@
-//! A stateful, long-only portfolio simulation under the `sim_stock` platform rules.
+//! Stateful long-only portfolio simulation under the `sim_stock` rules. The engine
+//! walks one trading day at a time over a pre-built [`TradingDay`] stream, realizing
+//! profit only on a sell. Pure: signals and prices in, a [`BacktestReport`] out.
 //!
-//! The engine walks forward one trading day at a time over a pre-built stream of
-//! [`TradingDay`]s, holding positions and realizing profit only on a sell. It is
-//! pure: no IO, no model, no parquet, just signals and prices in, a
-//! [`BacktestReport`] out, so it is exercised by the unit tests below without a
-//! trained model on disk. The command layer builds the day stream (handling the
-//! one-day signal lag) and renders the report.
-//!
-//! Rules modeled (see the `sim_stock` notes): 100M starting cash, equal-weight across
-//! at most ten holdings, whole 1,000-share lots, buys filled at the day's low and
-//! sells at the day's high (optimistic best case, snapped to a legal tick that stays
-//! in range), 0.1425% commission per side, and a 0.3% tax on sells only.
+//! Rules: 100M starting cash, equal weight across at most ten holdings, whole
+//! 1,000-share lots, buys at the day's low and sells at the high (snapped to a legal
+//! tick in range), 0.1425% commission per side, 0.3% sell-only tax.
 
 use std::collections::HashMap;
 
@@ -20,8 +14,7 @@ use stock_model::inference::Action;
 /// The platform's simulated starting balance.
 pub const STARTING_CASH: f64 = 100_000_000.0;
 
-/// Shares per Taiwan lot; buys round down to whole lots. Share counts are kept as
-/// f64 whole-lot multiples so the money math needs no integer casts.
+/// Shares per Taiwan lot. Counts stay f64 lot-multiples to avoid integer casts.
 const LOT: f64 = 1_000.0;
 /// Commission charged on each buy and sell.
 const COMMISSION_RATE: f64 = 0.001_425;
@@ -53,9 +46,8 @@ pub struct BacktestConfig {
     pub starting_cash: f64,
 }
 
-/// One ticker's signal and prices on one trading day. `score` (net-bullish) and
-/// `action` are the model's call for this day, already shifted to use only data
-/// through the previous close, and the four prices are this day's actual bar.
+/// One ticker's signal and prices on one trading day. `score` and `action` are the
+/// model's call, already lagged to the previous close.
 pub struct DayBar {
     pub score: f32,
     pub action: Action,
@@ -132,8 +124,7 @@ fn tick_size(price: f64) -> f64 {
     }
 }
 
-/// Largest legal tick price `<= price`. The small epsilon absorbs the float error
-/// of `price / tick` landing just under a whole multiple.
+/// Largest legal tick `<= price`; the epsilon absorbs float error.
 fn tick_floor(price: f64) -> f64 {
     let tick = tick_size(price);
     ((price / tick) + 1e-9).floor() * tick
@@ -145,8 +136,7 @@ fn tick_ceil(price: f64) -> f64 {
     ((price / tick) - 1e-9).ceil() * tick
 }
 
-/// Fill price for a buy: the lowest legal tick at or above the day's low (or open),
-/// so the order sits inside the day's range and fills.
+/// Buy fill: lowest legal tick at or above the day's low (or open).
 fn buy_price(bar: &DayBar, fill: Fill) -> f64 {
     match fill {
         Fill::LowHigh => tick_ceil(f64::from(bar.low)),
@@ -154,7 +144,7 @@ fn buy_price(bar: &DayBar, fill: Fill) -> f64 {
     }
 }
 
-/// Fill price for a sell: the highest legal tick at or below the day's high (or open).
+/// Sell fill: highest legal tick at or below the day's high (or open).
 fn sell_price(bar: &DayBar, fill: Fill) -> f64 {
     match fill {
         Fill::LowHigh => tick_floor(f64::from(bar.high)),
@@ -176,16 +166,13 @@ fn holdings_value(holdings: &HashMap<String, Holding>, bars: &HashMap<String, Da
         .sum()
 }
 
-/// Convert a small count to f64 exactly. The backtest's counts (holdings, days,
-/// trades) stay far below `u32`, so the conversion is lossless; it panics only on an
-/// absurd count that cannot arise here.
+/// Convert a small count to f64. Backtest counts stay well below `u32`.
 fn count_f64(count: usize) -> f64 {
     f64::from(u32::try_from(count).expect("backtest count fits in u32"))
 }
 
-/// Whole-lot share count affordable for `budget`, trimmed until the cash also covers
-/// the commission. Returns 0 when even one lot is out of reach. Everything is f64
-/// whole-lot multiples, so there is no integer cast.
+/// Whole-lot shares affordable for `budget`, trimmed until `cash` also covers the
+/// commission. Zero when even one lot is out of reach.
 fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
     let mut shares = (budget / (price * LOT)).floor() * LOT;
     while shares > 0.0 {
@@ -198,11 +185,9 @@ fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
     shares
 }
 
-/// Run the portfolio simulation over `days` (ascending by date).
-///
-/// Each day, in order: sell holdings the model flags Sell (and everything on the
-/// final day), then buy the strongest above-threshold names into open slots sized to
-/// an equal tenth of equity, then mark the account to that day's closes.
+/// Run the simulation over `days` (ascending). Each day: sell Sell-flagged holdings
+/// (and all on the final day), buy the strongest above-threshold names into open
+/// slots, then mark to the closes.
 pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     let mut cash = config.starting_cash;
     let mut holdings: HashMap<String, Holding> = HashMap::new();
@@ -227,7 +212,7 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
             buy_phase(day, config, &mut holdings, &mut cash);
         }
 
-        // Refresh marks for held tickers that traded today, then value the account.
+        // Refresh marks for held tickers that traded today.
         for (ticker, holding) in &mut holdings {
             if let Some(bar) = day.bars.get(ticker) {
                 holding.mark = f64::from(bar.close);
@@ -270,7 +255,7 @@ fn sell_phase(
 
     for ticker in to_sell {
         let holding = holdings.remove(&ticker).expect("ticker is held");
-        // Sell at the day's high when there is a bar, else at the last mark.
+        // Sell at the high when there is a bar, else at the last mark.
         let price = day
             .bars
             .get(&ticker)
@@ -293,8 +278,8 @@ fn buy_phase(
     holdings: &mut HashMap<String, Holding>,
     cash: &mut f64,
 ) {
-    // Equal-weight target from equity at the start of the buy phase, so all of the
-    // day's buys size against the same account value.
+    // Equal-weight target from equity at the buy phase start, so all of the day's
+    // buys size against the same value.
     let equity = *cash + holdings_value(holdings, &day.bars);
     let target = equity / count_f64(config.max_holdings.max(1));
 
@@ -303,7 +288,7 @@ fn buy_phase(
         .iter()
         .filter(|(ticker, bar)| !holdings.contains_key(*ticker) && bar.score > config.threshold)
         .collect();
-    // Strongest signal first, ticker name breaking ties so the run is deterministic.
+    // Strongest first, ticker breaking ties for determinism.
     candidates.sort_by(|left, right| {
         right
             .1
@@ -507,7 +492,7 @@ mod tests {
         assert!((report.cumulative_return - 0.494_862_5).abs() < 1e-6);
         assert!((report.win_rate - 1.0).abs() < 1e-9);
         assert!(report.profit_factor.is_infinite());
-        // The lone winner's net return on cost; mean over one trade is that trade.
+        // Net return on cost of the lone winner.
         assert!((report.avg_win_return - 0.988_32).abs() < 1e-4);
     }
 

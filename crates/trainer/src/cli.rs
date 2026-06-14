@@ -21,14 +21,13 @@ pub struct Cli {
 pub enum Command {
     /// Train the model and write the run's artifacts.
     Train(TrainArgs),
-    /// Simulate a stateful long-only portfolio over the held-out window under the
-    /// `sim_stock` platform rules, reporting cumulative return, win rate, and more.
+    /// Simulate a long-only portfolio over the held-out window under `sim_stock`
+    /// rules, reporting cumulative return, win rate, and more.
     Backtest(BacktestArgs),
 }
 
-/// Every hyperparameter is an `Option` so an omitted flag falls through to the
-/// default baked into the `Config` struct it feeds, keeping one source of truth for
-/// defaults.
+/// Every hyperparameter is an `Option` so an omitted flag falls through to its
+/// `Config` default, keeping one source of truth.
 #[derive(Parser, Debug)]
 pub struct TrainArgs {
     /// Aggregated OHLCV history.
@@ -39,14 +38,12 @@ pub struct TrainArgs {
     )]
     pub data: PathBuf,
 
-    /// Directory for this run's checkpoints, config, and final model. Required, so
-    /// each run gets its own directory rather than overwriting a shared default.
-    /// After the run, the train command points `<parent>/latest` at this directory
-    /// so predict and other tools can open the newest run without naming it.
+    /// Directory for this run's checkpoints, config, and model. Required, so each run
+    /// is its own directory; `<parent>/latest` is pointed here afterward.
     #[arg(long, help_heading = "Data")]
     pub artifact_dir: PathBuf,
 
-    /// GRU hidden size, the temporal summary width. A smaller value trains faster.
+    /// GRU hidden size; smaller trains faster.
     #[arg(long, help_heading = "Model")]
     pub d_hidden: Option<usize>,
 
@@ -78,14 +75,12 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Optimizer")]
     pub epsilon: Option<f32>,
 
-    /// Number of full passes over the training data. Validation runs every
-    /// epoch, so smaller epochs validate more often within a pass.
+    /// Number of full passes over the training data.
     #[arg(long, help_heading = "Training schedule")]
     pub passes: Option<usize>,
 
-    /// Training batches per epoch, which sets the validation cadence. Each epoch
-    /// samples this many batches without replacement. The validation-side
-    /// counterpart is `--valid-batches`.
+    /// Training batches per epoch, setting the validation cadence. Sampled without
+    /// replacement; the valid-side counterpart is `--valid-batches`.
     #[arg(long, help_heading = "Training schedule")]
     pub batches_per_epoch: Option<usize>,
 
@@ -93,13 +88,11 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Training schedule")]
     pub batch_size: Option<usize>,
 
-    /// GRU input window length in trading days. This is the sequence length fed to
-    /// the model, not the number of optimizer updates.
+    /// GRU input window length in trading days (the sequence length).
     #[arg(long, help_heading = "Training schedule")]
     pub window_steps: Option<usize>,
 
-    /// Random seed for the train/valid split, ticker and window sampling, and
-    /// parameter initialization.
+    /// Random seed for the split, sampling, and parameter initialization.
     #[arg(long, help_heading = "Training schedule")]
     pub seed: Option<u64>,
 
@@ -115,39 +108,34 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Labeling (triple-barrier)")]
     pub label_horizon: Option<usize>,
 
-    /// Round-trip transaction cost the Sharpe metric charges each position, as a
-    /// fraction. Taiwan is 0.1425% brokerage on each of the buy and sell legs plus
-    /// 0.3% sell tax, so 0.585% round trip.
+    /// Round-trip transaction cost the Sharpe metric charges per position. Taiwan is
+    /// 0.1425% per leg plus 0.3% sell tax, so 0.585% round trip.
     #[arg(long, help_heading = "Labeling (triple-barrier)")]
     pub fee: Option<f32>,
 
-    /// Validation batches per epoch: a fixed-seed subsample of this many batches,
-    /// drawn across all tickers and dates and stable across epochs. Set 0 to sweep
-    /// every window, which dwarfs a short training run. The training-side
-    /// counterpart is `--batches-per-epoch`.
+    /// Validation batches per epoch, a fixed-seed subsample stable across epochs. Set
+    /// 0 to sweep every window. Valid-side counterpart of `--batches-per-epoch`.
     #[arg(long, default_value_t = 200, help_heading = "Validation")]
     pub valid_batches: usize,
 
-    /// Length in days of the recent window used for validation. Everything
-    /// before it trains, so a smaller value leaves more data for training.
+    /// Length in days of the recent validation window; everything before it trains.
     #[arg(long, default_value_t = 180, help_heading = "Validation")]
     pub valid_days: i64,
 
-    /// Keep only this many tickers, drawn at random by the seed. For overfit
-    /// diagnostics on a small subset; omit to train on every ticker.
+    /// Keep only this many tickers, drawn at random by the seed, for overfit
+    /// diagnostics. Omit to train on every ticker.
     #[arg(long, help_heading = "Validation")]
     pub max_tickers: Option<usize>,
 
-    /// Stop early if validation loss does not improve for this many epochs.
-    /// Set 0 to disable early stopping.
+    /// Stop early after this many epochs without validation-loss improvement; 0
+    /// disables.
     #[arg(long, default_value_t = 5, help_heading = "Validation")]
     pub patience: usize,
 }
 
 impl TrainArgs {
-    /// Fold the model, optimizer, and schedule flags into a [`TrainingConfig`]. Each
-    /// omitted flag leaves its config default untouched, so the defaults live in one
-    /// place rather than being restated here.
+    /// Fold the flags into a [`TrainingConfig`], leaving each omitted flag's config
+    /// default untouched.
     pub fn training_config(&self) -> TrainingConfig {
         let mut model = StockModelConfig::new();
         if let Some(d_hidden) = self.d_hidden {
@@ -209,12 +197,10 @@ impl TrainArgs {
         config
     }
 
-    /// Gather the runtime knobs that shape one run without touching the model or
-    /// optimizer config.
+    /// Gather the runtime knobs that shape one run.
     pub fn run_options(&self) -> RunOptions {
         RunOptions {
-            // 0 is the escape hatch: sweep every validation window / disable early
-            // stopping, mapped to the `None` the runner expects.
+            // 0 means sweep every window / disable early stopping, mapped to `None`.
             valid_batches: (self.valid_batches != 0).then_some(self.valid_batches),
             max_tickers: self.max_tickers,
             valid_days: self.valid_days,
@@ -232,34 +218,31 @@ pub enum FillArg {
     Open,
 }
 
-/// Stateful long-only portfolio backtest over the held-out window, under the
-/// `sim_stock` platform rules (100M capital, ten equal-weight slots, whole lots, buy
-/// low / sell high, sell-side tax). Barriers and the split come from the saved
-/// `config.json`; the buy gate, fill model, and window are flags here.
+/// Long-only portfolio backtest over the held-out window under `sim_stock` rules.
+/// Barriers and the split come from the saved `config.json`; the buy gate, fill
+/// model, and window are flags here.
 #[derive(Parser, Debug)]
 pub struct BacktestArgs {
-    /// Directory holding a training run's `config.json` and `model.mpk`. Defaults to
-    /// the `latest` link the train command refreshes after each run.
+    /// Directory holding a run's `config.json` and `model.mpk`. Defaults to the
+    /// `latest` link.
     #[arg(long, default_value = "artifacts/latest")]
     pub artifact_dir: PathBuf,
 
-    /// OHLCV history to backtest over. It must hold the full ticker universe so the
-    /// per-date cross-sectional features match training.
+    /// OHLCV history to backtest over. Must hold the full ticker universe so the
+    /// cross-sectional features match training.
     #[arg(long, default_value = "data/yfinance/stocks.parquet")]
     pub data: PathBuf,
 
-    /// Length in days of the recent window to backtest. Match train's `--valid-days`
-    /// so the held-out split lines up with the one the model never fit.
+    /// Length in days of the recent window to backtest. Match train's `--valid-days`.
     #[arg(long, default_value_t = 180)]
     pub valid_days: i64,
 
-    /// Minimum net-bullish score `clamp(P(Buy) - P(Sell), 0)` to buy a stock, so weak
-    /// signals stay in cash.
+    /// Minimum net-bullish score `clamp(P(Buy) - P(Sell), 0)` to buy, so weak signals
+    /// stay in cash.
     #[arg(long, default_value_t = 0.0)]
     pub threshold: f32,
 
-    /// Which prices fills happen at: `low-high` is the optimistic best case, `open`
-    /// the pessimistic comparison.
+    /// Which prices fills happen at: `low-high` optimistic, `open` pessimistic.
     #[arg(long, value_enum, default_value_t = FillArg::LowHigh)]
     pub fill: FillArg,
 

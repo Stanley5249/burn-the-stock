@@ -2,24 +2,18 @@ use crate::data::store::TickerStore;
 use burn::data::dataset::Dataset;
 use fastrand::Rng;
 
-/// One training sample, reduced to the absolute row where its window starts in the
-/// store's concatenated row numbering. The batcher gathers the feature window,
-/// label, and reward from its resident device tensors using this index, so the item
+/// One training sample, reduced to the absolute store row where its window starts.
+/// The batcher gathers the window, label, and reward from this index, so the item
 /// carries no feature data and stays backend-free.
 #[derive(Clone, Copy, Debug)]
 pub struct StockItem {
-    /// Absolute row of the window's first day. The window spans `steps` consecutive
-    /// rows from here, and the label and reward are read at its last day.
+    /// Absolute row of the window's first day; it spans `steps` rows from here.
     pub start: u32,
 }
 
-/// A [`Dataset`] over every `steps`-length window of a [`TickerStore`].
-///
-/// Each `(ticker_index, window_start)` from the store is resolved once at
-/// construction into the single absolute start row the batcher gathers against, so
-/// the dataset owns only a flat `Vec<u32>` and borrows nothing. `get` is then a
-/// pointer-cheap lookup, which lets burn's data loader hand indices to the batcher
-/// without touching the store on the hot path.
+/// A [`Dataset`] over every `steps`-length window of a [`TickerStore`]. Each window
+/// is resolved at construction into its absolute start row, so the dataset owns only
+/// a flat `Vec<u32>` and `get` is a cheap lookup off the store's hot path.
 pub struct WindowDataset {
     /// Absolute start row of every window, in ticker-then-date order.
     windows: Vec<u32>,
@@ -33,10 +27,8 @@ impl WindowDataset {
         }
     }
 
-    /// Like [`Self::new`] but shuffle the window order once with `seed`. Pairing
-    /// this with a [`burn::data::dataset::transform::PartialDataset`] cap yields
-    /// a validation subsample drawn evenly across tickers and dates rather than
-    /// biased to the earliest ones, and stable across epochs.
+    /// Like [`Self::new`] but shuffle once with `seed`, so a `PartialDataset` cap
+    /// yields a validation subsample drawn evenly across tickers and dates.
     pub fn subsample(store: &TickerStore, steps: usize, seed: u64) -> Self {
         let mut windows = Self::absolute_starts(store, steps);
         Rng::with_seed(seed).shuffle(&mut windows);
@@ -77,7 +69,7 @@ mod tests {
         let store = TickerStore::synthetic(3, 20);
         let dataset = WindowDataset::new(&store, 4);
 
-        // Each ticker yields 20 - 4 + 1 = 17 windows across 3 tickers.
+        // 17 windows per ticker, 3 tickers.
         assert_eq!(dataset.len(), 17 * 3);
     }
 
@@ -86,11 +78,10 @@ mod tests {
         let store = TickerStore::synthetic(2, 10);
         let dataset = WindowDataset::new(&store, 4);
 
-        // The first ticker's first window starts at absolute row 0.
         assert_eq!(dataset.get(0).unwrap().start, 0);
 
-        // Each 10-row ticker yields 10 - 4 + 1 = 7 windows, so window index 7 is the
-        // second ticker's first window, whose absolute start is its row offset 10.
+        // 7 windows per 10-row ticker, so index 7 is the second ticker's first, at
+        // offset 10.
         assert_eq!(dataset.get(7).unwrap().start, 10);
     }
 

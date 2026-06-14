@@ -11,18 +11,15 @@ use stock_model::features::{
     standardized_features,
 };
 
-/// Scan the OHLCV parquet and run the shared feature transform, the entry point for
-/// both the training load and the inference windows.
+/// Scan the OHLCV parquet and run the shared feature transform.
 fn scan_standardized(path: &Path) -> PolarsResult<LazyFrame> {
     let frame =
         LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?;
     Ok(standardized_features(frame))
 }
 
-/// Pull a raw price column from the kept rows as `f32`, mapping any null to `NaN` so
-/// the vector stays aligned with `dates`. High/low/close are guaranteed non-null by
-/// the label check in [`compute_labels_rewards`]; open is not checked, so a missing
-/// open becomes `NaN` and the backtest leaves that bar untraded.
+/// Pull a raw price column as `f32`, null mapped to `NaN` to stay aligned with
+/// `dates`. A `NaN` open leaves that bar untraded in the backtest.
 fn price_column(frame: &DataFrame, name: &PlSmallStr) -> PolarsResult<Vec<f32>> {
     Ok(frame
         .column(name)?
@@ -32,25 +29,21 @@ fn price_column(frame: &DataFrame, name: &PlSmallStr) -> PolarsResult<Vec<f32>> 
         .collect())
 }
 
-/// One ticker's history flattened out of polars into plain buffers, so window
-/// extraction in the hot path is pointer-offset indexing rather than Arrow array
-/// traversal. Rows are sorted ascending by date, and the three vectors share that
-/// row order: `dates[i]`, `labels[i]`, and `features[i*5 .. i*5+5]` are the same
-/// trading day.
+/// One ticker's history flattened out of polars into plain buffers for fast window
+/// extraction. Rows ascend by date; every vector shares that order, so `dates[i]`,
+/// `labels[i]`, and `features[i*5 .. i*5+5]` are the same trading day.
 #[derive(Clone)]
 struct Ticker {
     name: PlSmallStr,
-    /// Trading dates, ascending.
     dates: Vec<NaiveDate>,
-    /// Row-major stationary features, length `dates.len() * 5`.
+    /// Row-major features, length `dates.len() * 5`.
     features: Vec<f32>,
-    /// One action label per row.
     labels: Vec<u8>,
-    /// Signed realized return of each row's barrier outcome, one per row.
+    /// Signed realized return of each row's barrier outcome.
     rewards: Vec<f32>,
-    /// Raw daily open/high/low/close price per row, one each, kept untouched by the
-    /// feature pipeline. The backtest fills buys at `low`, sells at `high`, marks
-    /// holdings at `close`, and uses `open` for the pessimistic fill mode.
+    /// Raw daily prices, untouched by the feature pipeline. The backtest fills buys
+    /// at `low`, sells at `high`, marks at `close`, and uses `open` for pessimistic
+    /// fills.
     open: Vec<f32>,
     high: Vec<f32>,
     low: Vec<f32>,
@@ -62,8 +55,7 @@ impl Ticker {
         self.dates.len()
     }
 
-    /// Split into rows `[0, at)` and `[at, rows)`, keeping every per-row buffer
-    /// aligned (features are five wide per row, prices one wide).
+    /// Split into rows `[0, at)` and `[at, rows)`, keeping every buffer aligned.
     fn split_at(&self, at: usize) -> (Ticker, Ticker) {
         let (dates_left, dates_right) = self.dates.split_at(at);
         let (features_left, features_right) = self.features.split_at(at * FEATURE_NAMES.len());
@@ -101,32 +93,20 @@ impl Ticker {
     }
 }
 
-/// Backend-free store of every ticker's flattened history. This is the data
-/// layer: it owns the loaded parquet data and the train/valid split and
-/// ticker-subset transforms, but knows nothing about windows, tensors, or
-/// devices. A [`crate::dataset::WindowDataset`] borrows it behind an `Arc` to
-/// enumerate and materialize training samples.
+/// Backend-free store of every ticker's flattened history. Owns the loaded data
+/// and the split and subset transforms, but knows nothing about windows, tensors,
+/// or devices.
 pub struct TickerStore {
     tickers: Vec<Ticker>,
 }
 
 impl TickerStore {
-    /// Load the parquet file into one flat [`Ticker`] per stock, deriving the
-    /// stationary feature window from the raw OHLCV columns in polars once and
-    /// then standardizing each feature cross-sectionally across the whole loaded
-    /// universe per date.
-    ///
-    /// Each ticker's first row carries null features because its previous-bar
-    /// reference does not exist, so it is dropped. The final `horizon` rows of
-    /// each ticker are then dropped so every kept row has a full forward window for
-    /// its triple-barrier label. Tickers too short to yield a single window are
-    /// kept but simply produce no windows later. `take_profit`, `stop_loss`, and
-    /// `horizon` set the barriers passed to [`compute_labels_rewards`].
-    ///
-    /// Rows with a non-positive close are dropped as corrupt. yfinance back
-    /// adjustment can drive a delisted ticker's whole history negative, which
-    /// would otherwise poison the log-return and ratio features and the barrier
-    /// labels that compare prices.
+    /// Load the parquet into one flat [`Ticker`] per stock, standardized features and
+    /// triple-barrier labels included. Each ticker's null first row and its trailing
+    /// `horizon` label-less rows are dropped. `take_profit`, `stop_loss`, and
+    /// `horizon` set the barriers for [`compute_labels_rewards`]. Non-positive closes
+    /// are dropped as corrupt, since yfinance back-adjustment can drive a delisted
+    /// history negative and poison the features.
     #[instrument(level = "info", skip_all, fields(path = %path.display()))]
     pub fn load(
         path: &Path,
@@ -139,10 +119,8 @@ impl TickerStore {
                 col(TICKER),
                 col(DATE),
                 feature_array().alias(FEATURE),
-                // Raw open/high/low/close survive the feature pipeline untouched, since
-                // the z-score only rewrites the feature columns. The barrier labels need
-                // the intraday range to detect a touch, and the backtest fills orders and
-                // marks holdings against these prices.
+                // Raw prices survive the z-score untouched; the barrier labels and the
+                // backtest need them.
                 col(OPEN),
                 col(HIGH),
                 col(LOW),
@@ -157,16 +135,14 @@ impl TickerStore {
         for group in groups {
             let height = group.height();
 
-            // A labeled row needs a full `horizon`-bar forward window, so a ticker
-            // with no more rows than the horizon yields nothing.
+            // Too short for even one labeled row.
             if height <= horizon {
                 continue;
             }
 
             let name: PlSmallStr = group.column(&TICKER)?.str()?.get(0).unwrap().into();
 
-            // Labels and rewards are `horizon` short, already aligned to the rows we
-            // keep after dropping the trailing horizon-less rows.
+            // Already aligned to the kept rows after dropping the trailing horizon.
             let (labels, rewards) = compute_labels_rewards(
                 group.column(&HIGH)?,
                 group.column(&LOW)?,
@@ -178,8 +154,7 @@ impl TickerStore {
 
             let head = group.head(Some(height - horizon));
 
-            // Flatten the Array<f32, 5> feature column into row-major features
-            // once, so window extraction later is a contiguous slice.
+            // Flatten the Array<f32, 5> column so windows are contiguous slices.
             let features: Vec<f32> = head
                 .column(&FEATURE)?
                 .array()?
@@ -195,7 +170,7 @@ impl TickerStore {
                 .flatten()
                 .collect();
 
-            // Raw prices for the kept rows, aligned with `dates`, for the backtest.
+            // Raw prices for the backtest, aligned with `dates`.
             let open = price_column(&head, &OPEN)?;
             let high = price_column(&head, &HIGH)?;
             let low = price_column(&head, &LOW)?;
@@ -217,14 +192,9 @@ impl TickerStore {
         Ok(Self { tickers })
     }
 
-    /// Materialize every `steps`-length window of every ticker as an
-    /// [`InferenceWindow`] dated at its prediction bar, the window's last day. This is
-    /// the offline backtest counterpart to [`Self::enumerate_windows`]: where that
-    /// hands the batcher row indices, this hands a predictor the windows directly.
-    ///
-    /// The features are the same cross-sectionally standardized values [`Self::load`]
-    /// already produced, so feeding them straight to a predictor matches training
-    /// without standardizing again.
+    /// Every `steps`-length window of every ticker as an [`InferenceWindow`] dated at
+    /// its last bar, for the offline backtest. Features are the standardized values
+    /// [`Self::load`] already produced, fed straight to a predictor.
     pub fn backtest_windows(&self, steps: usize) -> Vec<InferenceWindow> {
         let stride = FEATURE_NAMES.len();
         let mut windows = Vec::new();
@@ -235,8 +205,6 @@ impl TickerStore {
             }
             let last_start = ticker.rows() - steps;
             for start in 0..=last_start {
-                // The prediction is made from the window's last bar, so its date comes
-                // from that row.
                 let last = start + steps - 1;
                 windows.push(InferenceWindow {
                     ticker: ticker.name.to_string(),
@@ -249,9 +217,8 @@ impl TickerStore {
         windows
     }
 
-    /// Hand out each ticker's raw daily prices, the execution and valuation data the
-    /// backtest needs alongside the model's per-window signals. One [`TickerQuotes`]
-    /// per ticker, with the price vectors aligned to `dates`.
+    /// Each ticker's raw daily prices for the backtest, one [`TickerQuotes`] per
+    /// ticker with the price vectors aligned to `dates`.
     pub fn quotes(&self) -> Vec<TickerQuotes> {
         self.tickers
             .iter()
@@ -266,10 +233,8 @@ impl TickerStore {
             .collect()
     }
 
-    /// Randomly keep `count` tickers, chosen with `seed` so the subset is
-    /// reproducible. Asking for at least as many tickers as exist is a no-op.
-    /// Used to carve a small subset for overfit diagnostics, where we want a
-    /// representative random sample rather than the first `count` by sort order.
+    /// Randomly keep `count` tickers, reproducible by `seed`, for overfit
+    /// diagnostics. A no-op when `count` is at least the ticker count.
     pub fn sample_tickers(mut self, count: usize, seed: u64) -> Self {
         if count >= self.tickers.len() {
             return self;
@@ -287,17 +252,16 @@ impl TickerStore {
         self
     }
 
-    /// Split every ticker at `cutoff` into an earlier train store and a later
-    /// valid store. Tickers whose train or valid side has fewer than `steps`
-    /// rows are dropped from that side. Errors if either side ends up empty.
+    /// Split every ticker at `cutoff` into an earlier train store and a later valid
+    /// store. A side with fewer than `steps` rows is dropped. Errors if either side
+    /// ends up empty.
     #[instrument(level = "info", skip_all, fields(steps))]
     pub fn train_valid_split(&self, cutoff: NaiveDate, steps: usize) -> PolarsResult<(Self, Self)> {
         let mut train_tickers = Vec::with_capacity(self.tickers.len());
         let mut valid_tickers = Vec::with_capacity(self.tickers.len());
 
         for ticker in &self.tickers {
-            // Dates are ascending, so `partition_point` is the count of rows
-            // strictly before the cutoff.
+            // Dates ascend, so this is the count of rows before the cutoff.
             let split = ticker.dates.partition_point(|&day| day < cutoff);
             let (train, valid) = ticker.split_at(split);
 
@@ -324,8 +288,7 @@ impl TickerStore {
         ))
     }
 
-    /// Per-class label counts across every ticker, indexed Sell 0, Hold 1, Buy 2,
-    /// for logging the triple-barrier balance after a split.
+    /// Per-class label counts, indexed Sell 0, Hold 1, Buy 2.
     pub fn label_counts(&self) -> [usize; 3] {
         let mut counts = [0usize; 3];
         for ticker in &self.tickers {
@@ -336,20 +299,18 @@ impl TickerStore {
         counts
     }
 
-    /// The latest date across every ticker, used to anchor a recent-window
-    /// train/valid split. `None` only when no ticker has a dated row.
+    /// The latest date across every ticker, to anchor the split. `None` only when no
+    /// ticker has a dated row.
     pub fn max_date(&self) -> Option<NaiveDate> {
         self.tickers
             .iter()
-            // Dates are ascending, so the last is the ticker's latest.
+            // Dates ascend, so the last is the ticker's latest.
             .filter_map(|ticker| ticker.dates.last().copied())
             .max()
     }
 
-    /// Enumerate every `steps`-length window of every ticker as a
-    /// `(ticker_index, window_start)` pair. Tickers too short for a single
-    /// window contribute none. This is the pool a [`crate::dataset::WindowDataset`]
-    /// indexes into.
+    /// Every `steps`-length window as a `(ticker_index, window_start)` pair, the pool
+    /// a [`crate::dataset::WindowDataset`] indexes into. Short tickers contribute none.
     pub(crate) fn enumerate_windows(&self, steps: usize) -> Vec<(u32, u32)> {
         let mut windows = Vec::new();
 
@@ -370,11 +331,8 @@ impl TickerStore {
         windows
     }
 
-    /// The first row each ticker occupies once every ticker's history is laid out
-    /// end to end in ticker order, as the prefix sum of the per-ticker row counts.
-    /// A `(ticker_index, start)` window from [`Self::enumerate_windows`] maps to the
-    /// single absolute row `row_offsets()[ticker_index] + start`, which the batcher
-    /// gathers against the resident tensors built by [`Self::resident_buffers`].
+    /// Prefix sum of per-ticker row counts: a `(ticker_index, start)` window maps to
+    /// the absolute row `row_offsets()[ticker_index] + start`.
     pub(crate) fn row_offsets(&self) -> Vec<u32> {
         let mut offsets = Vec::with_capacity(self.tickers.len());
         let mut offset = 0u32;
@@ -386,11 +344,9 @@ impl TickerStore {
         offsets
     }
 
-    /// Flatten every ticker's history into single contiguous buffers, in the same
-    /// ticker order as [`Self::row_offsets`], so the batcher can upload them to the
-    /// device once and then gather each batch on-device by absolute row. The three
-    /// buffers share the row order: `features[row*5 .. row*5+5]`, `labels[row]`,
-    /// and `rewards[row]` are the same trading day.
+    /// Flatten every ticker's history into contiguous buffers in [`Self::row_offsets`]
+    /// order, so the batcher uploads once and gathers each batch on-device by absolute
+    /// row. The buffers share row order.
     pub(crate) fn resident_buffers(&self) -> ResidentBuffers {
         let stride = FEATURE_NAMES.len();
         let total: usize = self.tickers.iter().map(Ticker::rows).sum();
@@ -414,10 +370,8 @@ impl TickerStore {
     }
 }
 
-/// Every ticker's history flattened into one set of row-aligned buffers, ready to
-/// upload to the device as the batcher's resident gather tensors. Produced by
-/// [`TickerStore::resident_buffers`]; `rows` is the shared length (`features` is
-/// five wide per row).
+/// Every ticker's history in row-aligned buffers, the batcher's resident gather
+/// tensors. `rows` is the shared length; `features` is five wide per row.
 pub(crate) struct ResidentBuffers {
     pub(crate) rows: usize,
     pub(crate) features: Vec<f32>,
@@ -425,9 +379,8 @@ pub(crate) struct ResidentBuffers {
     pub(crate) rewards: Vec<f32>,
 }
 
-/// One ticker's raw daily prices for the backtest, produced by
-/// [`TickerStore::quotes`]. The four price vectors share `dates`' row order, so
-/// `low[i]`, `high[i]`, `close[i]`, and `open[i]` are all the trading day `dates[i]`.
+/// One ticker's raw daily prices for the backtest. The price vectors share `dates`'
+/// row order.
 pub struct TickerQuotes {
     pub ticker: String,
     pub dates: Vec<NaiveDate>,
@@ -437,14 +390,12 @@ pub struct TickerQuotes {
     pub close: Vec<f32>,
 }
 
-/// Synthetic builders shared across the crate's module tests, so `dataset` and
-/// `batcher` can exercise a [`TickerStore`] without a parquet file on disk.
+/// Synthetic builders for the crate's module tests, so they can exercise a
+/// [`TickerStore`] without a parquet file.
 #[cfg(test)]
 impl TickerStore {
-    /// `n_tickers` tickers of `rows` rows each. Every feature slot in row `i`
-    /// shares the value `base + i`, so `base` separates tickers and the per-row
-    /// value rises monotonically. Labels cycle 0/1/2; dates ascend from the
-    /// epoch.
+    /// `n_tickers` tickers of `rows` rows each. Row `i`'s feature slots all hold
+    /// `base + i`, so `base` separates tickers. Labels cycle 0/1/2.
     pub(crate) fn synthetic(n_tickers: i16, rows: i16) -> Self {
         let tickers = (0..n_tickers)
             .map(|t| make_ticker(&format!("t{t}"), f32::from(t) * 1000.0, rows))
@@ -454,8 +405,7 @@ impl TickerStore {
     }
 }
 
-/// Build one flat ticker of `rows` rows, used by the synthetic store builders
-/// and the short-ticker test below.
+/// Build one flat ticker of `rows` rows for the tests.
 #[cfg(test)]
 fn make_ticker(name: &str, base: f32, rows: i16) -> Ticker {
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
@@ -474,7 +424,7 @@ fn make_ticker(name: &str, base: f32, rows: i16) -> Ticker {
     let labels = (0..rows).map(|i| u8::try_from(i % 3).unwrap()).collect();
     let rewards = (0..rows).map(|i| f32::from(i) * 0.01).collect();
 
-    // Synthetic prices that rise with the row, with a one-unit intraday range.
+    // Prices rise with the row, one-unit intraday range.
     let close: Vec<f32> = (0..rows).map(|i| base + f32::from(i)).collect();
     let open = close.clone();
     let high: Vec<f32> = close.iter().map(|price| price + 1.0).collect();
@@ -504,14 +454,13 @@ mod tests {
     #[test]
     fn enumerate_windows_skips_short_tickers() {
         let mut store = make_store(2, 6);
-        // Append a ticker too short to yield any window of length 4.
+        // Too short for any window of length 4.
         store.tickers.push(make_ticker("short", 9000.0, 3));
 
         let windows = store.enumerate_windows(4);
 
-        // Each 6-row ticker yields 6 - 4 + 1 = 3 windows; the 3-row ticker none.
+        // Each 6-row ticker yields 3 windows; the 3-row ticker none.
         assert_eq!(windows.len(), 6);
-        // The short ticker is index 2, so no window references it.
         assert!(windows.iter().all(|&(ticker, _)| ticker != 2));
     }
 
@@ -542,13 +491,13 @@ mod tests {
 
         assert_eq!(quotes.len(), 2);
         let first = &quotes[0];
-        // Every price vector matches the date count, so rows stay aligned.
+        // Every price vector matches the date count.
         assert_eq!(first.dates.len(), 8);
         assert_eq!(first.open.len(), 8);
         assert_eq!(first.high.len(), 8);
         assert_eq!(first.low.len(), 8);
         assert_eq!(first.close.len(), 8);
-        // The synthetic builder gives a one-unit range around the close.
+        // One-unit range around the close.
         assert!((first.high[3] - first.close[3] - 1.0).abs() < 1e-6);
         assert!((first.close[3] - first.low[3] - 1.0).abs() < 1e-6);
     }

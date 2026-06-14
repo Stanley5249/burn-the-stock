@@ -1,15 +1,9 @@
 use polars::prelude::*;
 
 /// Trade action paired with the signed realized return of its triple-barrier
-/// outcome. A Buy carries `+take_profit` and a Sell `-stop_loss`, the payoff of
-/// exiting a long at the touched barrier, while a Hold carries the realized
-/// close-to-close move at the vertical barrier. The reward is the per-sample
-/// payoff the Sharpe metric weights each soft position by.
-///
-/// The data-carrying variants rule out an explicit discriminant, so [`class`]
-/// defines the 0/1/2 order the model's output index relies on.
-///
-/// [`class`]: Label::class
+/// outcome: Buy carries `+take_profit`, Sell `-stop_loss`, Hold the close-to-close
+/// move at the vertical barrier. The reward is what the Sharpe metric weights by.
+/// [`Label::class`] defines the 0/1/2 order the model output relies on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Label {
     Sell(f32),
@@ -36,18 +30,13 @@ impl Label {
 }
 
 /// Label each row with the triple-barrier outcome of opening a long at its close.
+/// For entry `close[t]`, scan the next `horizon` bars: the first high crossing
+/// `entry * (1 + take_profit)` is a [`Label::Buy`], the first low crossing
+/// `entry * (1 - stop_loss)` a [`Label::Sell`]. A bar touching both, or no touch
+/// through the horizon, is a [`Label::Hold`] closed at the vertical barrier.
 ///
-/// For row `t` the entry is `close[t]`, with a take-profit barrier at
-/// `entry * (1 + take_profit)` and a stop-loss barrier at `entry * (1 - stop_loss)`.
-/// The next `horizon` bars are scanned in order and the first barrier touched wins:
-/// the intraday high crossing take-profit is a [`Label::Buy`], the intraday low
-/// crossing stop-loss is a [`Label::Sell`]. When one bar touches both, the
-/// intraday order is unknown, so it falls back to the vertical-barrier
-/// [`Label::Hold`]. A row whose price stays inside both barriers for the whole
-/// horizon is also a Hold, closed at the vertical barrier.
-///
-/// The last `horizon` rows have no full forward window, so the result is
-/// `horizon` shorter than the input, empty when `close.len() <= horizon`.
+/// The result is `horizon` rows shorter than the input, empty when
+/// `close.len() <= horizon`.
 pub fn triple_barrier_labels(
     high: &[f32],
     low: &[f32],
@@ -81,8 +70,7 @@ pub fn triple_barrier_labels(
                 let hit_take_profit = high[k] >= upper;
                 let hit_stop_loss = low[k] <= lower;
 
-                // One bar touching both barriers hides the intraday order, so the
-                // outcome is ambiguous and defaults to the vertical-barrier Hold.
+                // Both touched in one bar: order unknown, default to Hold.
                 if hit_take_profit && hit_stop_loss {
                     return Label::Hold((close[k] - entry) / entry);
                 }
@@ -94,18 +82,15 @@ pub fn triple_barrier_labels(
                 }
             }
 
-            // Untouched through the horizon: closed at the vertical barrier and
-            // labeled by its realized close-to-close move.
+            // Untouched: close at the vertical barrier.
             Label::Hold((close[t + horizon] - entry) / entry)
         })
         .collect()
 }
 
-/// Build aligned `u8` class and `f32` reward vectors from `high`, `low`, and
-/// `close` price columns.
-///
-/// Both are `horizon` rows shorter than the input, so callers must keep the
-/// matching leading rows. Errors if a column is not `f32` or contains nulls.
+/// Aligned `u8` class and `f32` reward vectors from the price columns, both
+/// `horizon` rows shorter than the input. Errors if a column is not `f32` or has
+/// nulls.
 pub fn compute_labels_rewards(
     high: &Column,
     low: &Column,

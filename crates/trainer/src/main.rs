@@ -11,8 +11,7 @@ use miette::Result;
 use crate::cli::{Cli, Command};
 
 fn main() -> Result<()> {
-    // Install the global subscriber before anything runs so every command logs
-    // through it; training redirects the writer to its artifact dir once known.
+    // Install the global subscriber first; training redirects it to its artifact dir.
     logging::install();
 
     match Cli::parse().command {

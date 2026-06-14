@@ -29,69 +29,53 @@ pub struct TrainingConfig {
     pub optimizer: AdamWConfig,
     #[config(default = 1.0e-4)]
     pub learning_rate: f64,
-    /// Take-profit barrier for the triple-barrier labels, as a positive fraction
-    /// of the entry close.
+    /// Take-profit barrier, a positive fraction of the entry close.
     #[config(default = 0.09)]
     pub take_profit: f32,
-    /// Stop-loss barrier for the triple-barrier labels, as a positive fraction of
-    /// the entry close.
+    /// Stop-loss barrier, a positive fraction of the entry close.
     #[config(default = 0.09)]
     pub stop_loss: f32,
-    /// Vertical-barrier horizon in trading days for the triple-barrier labels.
+    /// Vertical-barrier horizon in trading days.
     #[config(default = 25)]
     pub label_horizon: usize,
-    /// Round-trip transaction cost the Sharpe metric charges each position, as a
-    /// fraction. Taiwan brokerage is 0.1425% on each of the buy and sell legs, plus
-    /// a 0.3% tax on the sell, so the default is 0.1425% * 2 + 0.3% = 0.585%.
+    /// Round-trip transaction cost per position. 0.1425% per leg plus 0.3% sell tax
+    /// is 0.585%.
     #[config(default = 0.005_85)]
     pub fee: f32,
-    /// Number of full passes over the training data. With a fixed `epoch_size`
-    /// this sets how many epochs run: `passes * windows / epoch_size`.
+    /// Full passes over the training data; `passes * windows / epoch_size` epochs run.
     #[config(default = 3)]
     pub passes: usize,
     /// Window length fed to the GRU.
     #[config(default = 30)]
     pub steps: usize,
-    /// Tickers per batch, which is the batch size.
+    /// Tickers per batch.
     #[config(default = 64)]
     pub batch_size: usize,
-    /// Batches per epoch, which sets the validation cadence. Each epoch samples
-    /// `epoch_size * batch_size` windows without replacement, so on a large
-    /// dataset validation runs long before a full pass completes.
+    /// Batches per epoch, setting the validation cadence. Each epoch samples
+    /// `epoch_size * batch_size` windows without replacement.
     #[config(default = 200)]
     pub epoch_size: usize,
     #[config(default = 42)]
     pub seed: u64,
 }
 
-/// Runtime knobs that shape one run without touching the model or optimizer
-/// config, kept separate so a baseline run and a diagnostic run differ only
-/// here.
+/// Runtime knobs that shape one run without touching the model or optimizer config.
 #[derive(Debug, Clone, Copy)]
 pub struct RunOptions {
-    /// Fixed-seed validation subsample size in batches; `None` sweeps every
-    /// window.
+    /// Fixed-seed validation subsample size in batches; `None` sweeps every window.
     pub valid_batches: Option<usize>,
-    /// Random ticker-subset cap for overfit diagnostics; `None` uses every
-    /// ticker.
+    /// Random ticker-subset cap for overfit diagnostics; `None` uses every ticker.
     pub max_tickers: Option<usize>,
-    /// Length in days of the recent window that validates; everything before it
-    /// trains.
+    /// Length in days of the recent validation window; everything before it trains.
     pub valid_days: i64,
-    /// Stop early if validation loss does not improve for this many epochs;
-    /// `None` disables early stopping.
+    /// Epochs without validation-loss improvement before stopping; `None` disables.
     pub patience: Option<usize>,
 }
 
 /// Run the full training loop.
 ///
-/// `data_path`    - aggregated `stocks.parquet` with the OHLCV history.
-/// `artifact_dir` - directory where checkpoints, config, and the final model land.
-/// `options`      - runtime knobs, see [`RunOptions`].
-///
 /// # Errors
-///
-/// Returns an error if the data cannot be loaded or the artifacts cannot be saved.
+/// If the data cannot be loaded or the artifacts cannot be saved.
 #[allow(
     clippy::too_many_lines,
     reason = "linear pipeline reads better unsplit"
@@ -110,8 +94,8 @@ pub fn train<B: AutodiffBackend>(
         patience,
     } = options;
 
-    // Refuse an existing dir: stale checkpoints and metric logs from a prior run mix
-    // with this one and corrupt the best-epoch selection.
+    // Refuse an existing dir: a prior run's checkpoints and logs corrupt the
+    // best-epoch selection.
     if artifact_dir.exists() {
         bail!(
             "artifact dir {} already exists; pick a fresh --artifact-dir",
@@ -124,9 +108,8 @@ pub fn train<B: AutodiffBackend>(
 
     B::seed(device, config.seed);
 
-    // Load the backend-free store once. The store carries the train/valid split
-    // and tensors are produced later by two batchers, so there is no per-backend
-    // copy of the data.
+    // Load the backend-free store once; the batchers produce tensors later, so the
+    // data is not copied per backend.
     let store = TickerStore::load(
         data_path,
         config.take_profit,
@@ -135,16 +118,13 @@ pub fn train<B: AutodiffBackend>(
     )
     .into_diagnostic()?;
 
-    // Trim to a random ticker subset before the split so both sides shrink
-    // together.
+    // Trim before the split so both sides shrink together.
     let store = match max_tickers {
         Some(count) => store.sample_tickers(count, config.seed),
         None => store,
     };
 
-    // Anchor the split to the most recent date in the data so the last
-    // `valid_days` validate and everything earlier trains. One global cutoff
-    // keeps the split aligned across tickers.
+    // One global cutoff `valid_days` before the latest date, aligned across tickers.
     let max_date = store
         .max_date()
         .expect("loaded data should have at least one dated row");
@@ -154,9 +134,7 @@ pub fn train<B: AutodiffBackend>(
         .train_valid_split(cutoff, config.steps)
         .into_diagnostic()?;
 
-    // Surface the triple-barrier class balance per split, indexed Sell 0, Hold 1,
-    // Buy 2, so the take-profit and stop-loss knobs can be tuned toward an even
-    // Sell/Hold/Buy mix.
+    // Class balance per split, to tune the barriers toward an even mix.
     let train_counts = train_store.label_counts();
     let valid_counts = valid_store.label_counts();
     tracing::info!(
@@ -173,10 +151,8 @@ pub fn train<B: AutodiffBackend>(
         .save(artifact_dir.join("config.json"))
         .expect("config should be saved successfully");
 
-    // Build the train pipeline. `SamplerDataset` caps each epoch to a fixed
-    // window budget independent of the pool size and walks a reshuffled
-    // permutation across the run, so `passes` full passes take
-    // `passes * windows / epoch_size` epochs.
+    // `SamplerDataset` caps each epoch to a fixed window budget and walks a reshuffled
+    // permutation across the run.
     let train_windows = WindowDataset::new(&train_store, config.steps);
     let total_windows = train_windows.len();
     if total_windows == 0 {
@@ -186,9 +162,7 @@ pub fn train<B: AutodiffBackend>(
     let epoch_items = (config.epoch_size * config.batch_size).min(total_windows);
     let num_epochs = (config.passes * total_windows).div_ceil(epoch_items).max(1);
 
-    // The flags and config live in `config.json`; only the counts derived from them
-    // are worth a log line, so a later read ties the schedule back to the data size
-    // without restating what the saved config already holds.
+    // Log the derived counts, which `config.json` does not hold.
     tracing::info!(total_windows, epoch_items, num_epochs, "training schedule");
 
     let train_sampler = SamplerDataset::new(
@@ -204,10 +178,8 @@ pub fn train<B: AutodiffBackend>(
             .set_device(device.clone())
             .build(train_sampler);
 
-    // Build the valid pipeline on the inner backend, as burn expects. A full
-    // sweep over every window dwarfs a training run, so when asked, cap a
-    // once-shuffled pool: representative across tickers and dates, and stable
-    // from one epoch to the next.
+    // Valid pipeline on the inner backend. A full sweep dwarfs a training run, so when
+    // asked, cap a once-shuffled pool, stable across epochs.
     let valid_batcher = StockBatcher::<B::InnerBackend>::new(config.steps, &valid_store, device);
     let valid_builder = || {
         DataLoaderBuilder::new(valid_batcher.clone())
@@ -238,14 +210,12 @@ pub fn train<B: AutodiffBackend>(
             LossMetric::new(),
         ))
         .with_file_checkpointer(CompactRecorder::new())
-        // The logger installed at startup owns `experiment.log`, so stop burn from
-        // installing its own subscriber over it.
+        // Our startup logger owns `experiment.log`; stop burn installing its own.
         .with_application_logger(None)
         .num_epochs(num_epochs)
         .summary();
 
-    // Halt once validation loss stops improving, so a run does not sail past its
-    // optimum and overfit.
+    // Halt once validation loss stops improving, so the run does not overfit.
     if let Some(patience) = patience {
         let strategy = MetricEarlyStoppingStrategy::new::<LossMetric<B::InnerBackend>>(
             &LossMetric::new(),
@@ -259,11 +229,9 @@ pub fn train<B: AutodiffBackend>(
 
     let result = training.launch(learner);
 
-    // burn's `launch` returns the final-epoch model, which early stopping leaves
-    // `patience` epochs past the valid-loss optimum. Recover the best checkpoint by
-    // valid loss and export that one, falling back to the final model if the summary
-    // is unavailable. Save only the inner model, dropping the loss, so the artifact
-    // loads straight into a `StockModel` for inference.
+    // `launch` returns the final-epoch model, `patience` epochs past the valid-loss
+    // optimum. Export the best checkpoint instead, falling back to the final model.
+    // Save only the inner model so the artifact loads straight into a `StockModel`.
     let best_model = if let Some(epoch) = best_valid_loss_epoch(artifact_dir) {
         tracing::info!(best_epoch = epoch, "exporting best-checkpoint model");
         let checkpoint = artifact_dir
@@ -288,11 +256,10 @@ pub fn train<B: AutodiffBackend>(
     Ok(())
 }
 
-/// Epoch (1-based, matching the checkpoint filenames) of the lowest-valid-loss model
-/// still on disk. burn exposes no best-checkpoint accessor, so we read every epoch's
-/// loss from `LearnerSummary` (its structured reader over the metric event store).
-/// The metric store remembers all epochs, but burn's checkpointer keeps only the last
-/// few plus its own best, so we filter to surviving files before taking the min.
+/// Epoch (1-based) of the lowest-valid-loss checkpoint still on disk. burn has no
+/// best-checkpoint accessor and its checkpointer prunes all but the last few plus its
+/// own best, so we read every epoch's loss from `LearnerSummary` and filter to the
+/// surviving files before taking the min.
 fn best_valid_loss_epoch(artifact_dir: &Path) -> Option<usize> {
     let summary = LearnerSummary::new(artifact_dir, &["Loss"]).ok()?;
     let loss = summary.metrics.valid.iter().find(|m| m.name == "Loss")?;

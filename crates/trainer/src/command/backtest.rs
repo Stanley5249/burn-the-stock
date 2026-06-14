@@ -15,16 +15,16 @@ use crate::training::TrainingConfig;
 
 type InferenceBackend = Wgpu;
 
-/// Maximum stocks held at once; each new buy targets an equal tenth of equity.
+/// Maximum stocks held at once; each buy targets an equal tenth of equity.
 const MAX_HOLDINGS: usize = 10;
 
-/// Run the stateful portfolio backtest over the held-out split and report the
-/// platform's performance metrics, plus a CSV of the daily account value.
+/// Run the portfolio backtest over the held-out split, reporting metrics and a CSV of
+/// the daily account value.
 pub fn run(args: &BacktestArgs) -> Result<()> {
     let device = WgpuDevice::default();
 
-    // The full training config carries the barrier knobs the Predictor's inference
-    // subset omits, so reload it to rebuild the same labels and split.
+    // The full training config carries the barrier knobs the inference subset omits,
+    // so reload it to rebuild the same labels and split.
     let config = TrainingConfig::load(args.artifact_dir.join("config.json")).into_diagnostic()?;
 
     let predictor = Predictor::<InferenceBackend>::load(&args.artifact_dir, device)?;
@@ -37,8 +37,8 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     )
     .into_diagnostic()?;
 
-    // Reproduce the training split and keep only the held-out tail, the same window
-    // `eval` scores, so the backtest trades data the model never fit.
+    // Reproduce the split and keep only the held-out tail, so the backtest trades
+    // data the model never fit.
     let max_date = store
         .max_date()
         .expect("loaded data should have at least one dated row");
@@ -86,9 +86,8 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     Ok(())
 }
 
-/// Assemble the time-ordered day stream the engine consumes. Each ticker's signal
-/// from the window ending the previous trading day drives the order filled today
-/// (the no-look-ahead lag), priced from today's bar. Bars with a missing price are
+/// Assemble the time-ordered day stream. The previous day's signal drives today's
+/// order (the no-look-ahead lag), priced from today's bar; missing-price bars are
 /// skipped.
 fn build_days(
     valid: &TickerStore,
