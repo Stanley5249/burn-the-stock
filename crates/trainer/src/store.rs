@@ -7,7 +7,7 @@ use polars::prelude::*;
 use tracing::instrument;
 
 use stock_model::features::{
-    CLOSE, DATE, FEATURE, FEATURE_NAMES, HIGH, InferenceWindow, LOW, TICKER, feature_array,
+    CLOSE, DATE, FEATURE, FEATURE_NAMES, HIGH, InferenceWindow, LOW, OPEN, TICKER, feature_array,
     standardized_features,
 };
 
@@ -17,6 +17,19 @@ fn scan_standardized(path: &Path) -> PolarsResult<LazyFrame> {
     let frame =
         LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?;
     Ok(standardized_features(frame))
+}
+
+/// Pull a raw price column from the kept rows as `f32`, mapping any null to `NaN` so
+/// the vector stays aligned with `dates`. High/low/close are guaranteed non-null by
+/// the label check in [`compute_labels_rewards`]; open is not checked, so a missing
+/// open becomes `NaN` and the backtest leaves that bar untraded.
+fn price_column(frame: &DataFrame, name: &PlSmallStr) -> PolarsResult<Vec<f32>> {
+    Ok(frame
+        .column(name)?
+        .f32()?
+        .into_iter()
+        .map(|value| value.unwrap_or(f32::NAN))
+        .collect())
 }
 
 /// One ticker's history flattened out of polars into plain buffers, so window
@@ -35,6 +48,13 @@ struct Ticker {
     labels: Vec<u8>,
     /// Signed realized return of each row's barrier outcome, one per row.
     rewards: Vec<f32>,
+    /// Raw daily open/high/low/close price per row, one each, kept untouched by the
+    /// feature pipeline. The backtest fills buys at `low`, sells at `high`, marks
+    /// holdings at `close`, and uses `open` for the pessimistic fill mode.
+    open: Vec<f32>,
+    high: Vec<f32>,
+    low: Vec<f32>,
+    close: Vec<f32>,
 }
 
 impl Ticker {
@@ -42,13 +62,17 @@ impl Ticker {
         self.dates.len()
     }
 
-    /// Split into rows `[0, at)` and `[at, rows)`, keeping the three buffers
-    /// aligned (features are five wide per row).
+    /// Split into rows `[0, at)` and `[at, rows)`, keeping every per-row buffer
+    /// aligned (features are five wide per row, prices one wide).
     fn split_at(&self, at: usize) -> (Ticker, Ticker) {
         let (dates_left, dates_right) = self.dates.split_at(at);
         let (features_left, features_right) = self.features.split_at(at * FEATURE_NAMES.len());
         let (labels_left, labels_right) = self.labels.split_at(at);
         let (rewards_left, rewards_right) = self.rewards.split_at(at);
+        let (open_left, open_right) = self.open.split_at(at);
+        let (high_left, high_right) = self.high.split_at(at);
+        let (low_left, low_right) = self.low.split_at(at);
+        let (close_left, close_right) = self.close.split_at(at);
 
         let left = Ticker {
             name: self.name.clone(),
@@ -56,6 +80,10 @@ impl Ticker {
             features: features_left.to_vec(),
             labels: labels_left.to_vec(),
             rewards: rewards_left.to_vec(),
+            open: open_left.to_vec(),
+            high: high_left.to_vec(),
+            low: low_left.to_vec(),
+            close: close_left.to_vec(),
         };
         let right = Ticker {
             name: self.name.clone(),
@@ -63,6 +91,10 @@ impl Ticker {
             features: features_right.to_vec(),
             labels: labels_right.to_vec(),
             rewards: rewards_right.to_vec(),
+            open: open_right.to_vec(),
+            high: high_right.to_vec(),
+            low: low_right.to_vec(),
+            close: close_right.to_vec(),
         };
 
         (left, right)
@@ -107,9 +139,11 @@ impl TickerStore {
                 col(TICKER),
                 col(DATE),
                 feature_array().alias(FEATURE),
-                // Raw high/low/close survive the feature pipeline untouched, since the
-                // z-score only rewrites the feature columns, and the barrier labels
-                // need the intraday range to detect a touch.
+                // Raw open/high/low/close survive the feature pipeline untouched, since
+                // the z-score only rewrites the feature columns. The barrier labels need
+                // the intraday range to detect a touch, and the backtest fills orders and
+                // marks holdings against these prices.
+                col(OPEN),
                 col(HIGH),
                 col(LOW),
                 col(CLOSE),
@@ -161,12 +195,22 @@ impl TickerStore {
                 .flatten()
                 .collect();
 
+            // Raw prices for the kept rows, aligned with `dates`, for the backtest.
+            let open = price_column(&head, &OPEN)?;
+            let high = price_column(&head, &HIGH)?;
+            let low = price_column(&head, &LOW)?;
+            let close = price_column(&head, &CLOSE)?;
+
             tickers.push(Ticker {
                 name,
                 dates,
                 features,
                 labels,
                 rewards,
+                open,
+                high,
+                low,
+                close,
             });
         }
 
@@ -209,6 +253,27 @@ impl TickerStore {
         }
 
         (windows, rewards)
+    }
+
+    /// Hand out each ticker's raw daily prices, the execution and valuation data the
+    /// backtest needs alongside the model's per-window signals. One [`TickerQuotes`]
+    /// per ticker, with the price vectors aligned to `dates`.
+    #[allow(
+        dead_code,
+        reason = "consumed by the backtest command in the next commit"
+    )]
+    pub fn quotes(&self) -> Vec<TickerQuotes> {
+        self.tickers
+            .iter()
+            .map(|ticker| TickerQuotes {
+                ticker: ticker.name.to_string(),
+                dates: ticker.dates.clone(),
+                open: ticker.open.clone(),
+                high: ticker.high.clone(),
+                low: ticker.low.clone(),
+                close: ticker.close.clone(),
+            })
+            .collect()
     }
 
     /// Randomly keep `count` tickers, chosen with `seed` so the subset is
@@ -370,6 +435,22 @@ pub(crate) struct ResidentBuffers {
     pub(crate) rewards: Vec<f32>,
 }
 
+/// One ticker's raw daily prices for the backtest, produced by
+/// [`TickerStore::quotes`]. The four price vectors share `dates`' row order, so
+/// `low[i]`, `high[i]`, `close[i]`, and `open[i]` are all the trading day `dates[i]`.
+#[allow(
+    dead_code,
+    reason = "consumed by the backtest command in the next commit"
+)]
+pub struct TickerQuotes {
+    pub ticker: String,
+    pub dates: Vec<NaiveDate>,
+    pub open: Vec<f32>,
+    pub high: Vec<f32>,
+    pub low: Vec<f32>,
+    pub close: Vec<f32>,
+}
+
 /// Synthetic builders shared across the crate's module tests, so `dataset` and
 /// `batcher` can exercise a [`TickerStore`] without a parquet file on disk.
 #[cfg(test)]
@@ -407,12 +488,22 @@ fn make_ticker(name: &str, base: f32, rows: i16) -> Ticker {
     let labels = (0..rows).map(|i| u8::try_from(i % 3).unwrap()).collect();
     let rewards = (0..rows).map(|i| f32::from(i) * 0.01).collect();
 
+    // Synthetic prices that rise with the row, with a one-unit intraday range.
+    let close: Vec<f32> = (0..rows).map(|i| base + f32::from(i)).collect();
+    let open = close.clone();
+    let high: Vec<f32> = close.iter().map(|price| price + 1.0).collect();
+    let low: Vec<f32> = close.iter().map(|price| price - 1.0).collect();
+
     Ticker {
         name: name.into(),
         dates,
         features,
         labels,
         rewards,
+        open,
+        high,
+        low,
+        close,
     }
 }
 
@@ -456,6 +547,24 @@ mod tests {
         let store = make_store(3, 20);
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         assert_eq!(store.max_date(), Some(epoch + chrono::Duration::days(19)));
+    }
+
+    #[test]
+    fn quotes_align_prices_with_dates() {
+        let store = make_store(2, 8);
+        let quotes = store.quotes();
+
+        assert_eq!(quotes.len(), 2);
+        let first = &quotes[0];
+        // Every price vector matches the date count, so rows stay aligned.
+        assert_eq!(first.dates.len(), 8);
+        assert_eq!(first.open.len(), 8);
+        assert_eq!(first.high.len(), 8);
+        assert_eq!(first.low.len(), 8);
+        assert_eq!(first.close.len(), 8);
+        // The synthetic builder gives a one-unit range around the close.
+        assert!((first.high[3] - first.close[3] - 1.0).abs() < 1e-6);
+        assert!((first.close[3] - first.low[3] - 1.0).abs() < 1e-6);
     }
 
     #[test]
