@@ -15,6 +15,10 @@ use crate::model::{NUM_CLASSES, StockModel, StockModelConfig};
 const SELL: usize = 0;
 const BUY: usize = 2;
 
+/// Windows per forward pass. Caps GPU memory so a universe-wide backtest does not
+/// allocate one tensor over every window at once.
+const BATCH_SIZE: usize = 1024;
+
 /// The slice of a training run's config that inference needs: the model shape and
 /// the window length. A run writes a fuller config, but `Config` deserialization
 /// ignores the extra training-only fields, so this loads from the same file.
@@ -105,9 +109,9 @@ impl<B: Backend> Predictor<B> {
         self.steps
     }
 
-    /// Score every window in one batched forward pass. Each window must hold exactly
-    /// `steps * 5` features, as produced by [`crate::features::latest_windows`] with
-    /// [`Self::steps`].
+    /// Score every window, in [`BATCH_SIZE`] chunks so the forward pass never holds
+    /// the whole universe at once. Each window must hold exactly `steps * 5` features,
+    /// as produced by [`crate::features::latest_windows`] with [`Self::steps`].
     ///
     /// # Panics
     ///
@@ -115,55 +119,51 @@ impl<B: Backend> Predictor<B> {
     /// happens when the windows were built for a different step count.
     #[must_use]
     pub fn predict(&self, windows: &[InferenceWindow]) -> Vec<Prediction> {
-        if windows.is_empty() {
-            return Vec::new();
-        }
-
         let width = FEATURE_NAMES.len();
-        let count = windows.len();
+        let mut predictions = Vec::with_capacity(windows.len());
 
-        let mut features = Vec::with_capacity(count * self.steps * width);
-        for window in windows {
-            assert_eq!(
-                window.features.len(),
-                self.steps * width,
-                "window feature length does not match the model's steps"
+        for chunk in windows.chunks(BATCH_SIZE) {
+            let mut features = Vec::with_capacity(chunk.len() * self.steps * width);
+            for window in chunk {
+                assert_eq!(
+                    window.features.len(),
+                    self.steps * width,
+                    "window feature length does not match the model's steps"
+                );
+                features.extend_from_slice(&window.features);
+            }
+
+            let technical = Tensor::<B, 3>::from_data(
+                TensorData::new(features, [chunk.len(), self.steps, width]),
+                &self.device,
             );
-            features.extend_from_slice(&window.features);
-        }
 
-        let technical = Tensor::<B, 3>::from_data(
-            TensorData::new(features, [count, self.steps, width]),
-            &self.device,
-        );
+            let probabilities = softmax(self.model.forward(technical), 1);
 
-        let probabilities = softmax(self.model.forward(technical), 1);
+            // One host transfer per chunk, then read each row's class probabilities
+            // back into a Prediction.
+            let flat = probabilities
+                .into_data()
+                .to_vec::<f32>()
+                .expect("softmax output is f32");
 
-        // One host transfer for the whole batch, then read each row's class
-        // probabilities back into a Prediction.
-        let flat = probabilities
-            .into_data()
-            .to_vec::<f32>()
-            .expect("softmax output is f32");
-
-        windows
-            .iter()
-            .enumerate()
-            .map(|(row, window)| {
+            for (row, window) in chunk.iter().enumerate() {
                 let offset = row * NUM_CLASSES;
                 let probabilities: [f32; NUM_CLASSES] = flat[offset..offset + NUM_CLASSES]
                     .try_into()
                     .expect("one row holds NUM_CLASSES probabilities");
 
-                Prediction {
+                predictions.push(Prediction {
                     ticker: window.ticker.clone(),
                     date: window.date,
                     probabilities,
                     action: Action::from_class(argmax(&probabilities)),
                     position: (probabilities[BUY] - probabilities[SELL]).max(0.0),
-                }
-            })
-            .collect()
+                });
+            }
+        }
+
+        predictions
     }
 }
 
