@@ -1,6 +1,12 @@
 use chrono::NaiveDate;
 use stock_model::inference::Prediction;
 
+/// Convert a window or trade count to f64 exactly. These counts stay far below
+/// `u32`, so the conversion is lossless; it panics only on an impossible count.
+fn count_f64(count: usize) -> f64 {
+    f64::from(u32::try_from(count).expect("eval count fits in u32"))
+}
+
 /// Realized performance of the long-only policy over a held-out set, the offline
 /// backtest's output. Two views sit side by side: pooled over every window scored
 /// (flat positions included, comparable to the training Sharpe metric), and over the
@@ -34,10 +40,6 @@ impl EvalReport {
     /// map the Sharpe metric trains on, then pool it. `predictions` and `rewards`
     /// share an index, so `predictions[i].position` pairs with `rewards[i]`.
     /// `min_position` is the gate above which a window counts as a taken trade.
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "window counts stay far below f64's exact-integer range"
-    )]
     pub fn aggregate(
         predictions: &[Prediction],
         rewards: &[f32],
@@ -63,12 +65,12 @@ impl EvalReport {
 
         let total_net: f64 = nets.iter().sum();
         let mean_net = if windows > 0 {
-            total_net / windows as f64
+            total_net / count_f64(windows)
         } else {
             0.0
         };
         let variance = if windows > 0 {
-            nets.iter().map(|net| (net - mean_net).powi(2)).sum::<f64>() / windows as f64
+            nets.iter().map(|net| (net - mean_net).powi(2)).sum::<f64>() / count_f64(windows)
         } else {
             0.0
         };
@@ -87,13 +89,13 @@ impl EvalReport {
             .collect();
         let trades = traded_nets.len();
         let traded_mean_net = if trades > 0 {
-            traded_nets.iter().sum::<f64>() / trades as f64
+            traded_nets.iter().sum::<f64>() / count_f64(trades)
         } else {
             0.0
         };
         let wins = traded_nets.iter().filter(|&&net| net > 0.0).count();
         let hit_rate = if trades > 0 {
-            wins as f64 / trades as f64
+            count_f64(wins) / count_f64(trades)
         } else {
             0.0
         };

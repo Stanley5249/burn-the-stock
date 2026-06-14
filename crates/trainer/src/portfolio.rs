@@ -20,8 +20,9 @@ use stock_model::inference::Action;
 /// The platform's simulated starting balance.
 pub const STARTING_CASH: f64 = 100_000_000.0;
 
-/// Shares per Taiwan lot; buys round down to whole lots.
-const LOT: u64 = 1_000;
+/// Shares per Taiwan lot; buys round down to whole lots. Share counts are kept as
+/// f64 whole-lot multiples so the money math needs no integer casts.
+const LOT: f64 = 1_000.0;
 /// Commission charged on each buy and sell.
 const COMMISSION_RATE: f64 = 0.001_425;
 /// Minimum commission per transaction.
@@ -72,7 +73,8 @@ pub struct TradingDay {
 
 /// An open position.
 struct Holding {
-    shares: u64,
+    /// Whole shares held, always a multiple of [`LOT`].
+    shares: f64,
     /// Cash paid to open, including the buy commission.
     cost: f64,
     /// Most recent close seen, used to value the holding on days it has no bar.
@@ -169,35 +171,25 @@ fn holdings_value(holdings: &HashMap<String, Holding>, bars: &HashMap<String, Da
             let mark = bars
                 .get(ticker)
                 .map_or(holding.mark, |bar| f64::from(bar.close));
-            mark * shares_as_f64(holding.shares)
+            mark * holding.shares
         })
         .sum()
 }
 
-/// Share counts and lot counts are small integers well inside f64's exact range, and
-/// lot counts are non-negative and floored, so these conversions are exact.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "share/lot counts are small non-negative integers, exact in f64"
-)]
-fn shares_as_f64(shares: u64) -> f64 {
-    shares as f64
+/// Convert a small count to f64 exactly. The backtest's counts (holdings, days,
+/// trades) stay far below `u32`, so the conversion is lossless; it panics only on an
+/// absurd count that cannot arise here.
+fn count_f64(count: usize) -> f64 {
+    f64::from(u32::try_from(count).expect("backtest count fits in u32"))
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "share/lot counts are small non-negative integers, exact in f64"
-)]
-fn affordable_shares(budget: f64, price: f64, cash: f64) -> u64 {
-    let mut shares = (budget / (price * LOT as f64)).floor() as u64 * LOT;
-    // Trim one lot at a time until the cash covers the shares plus commission, in
-    // case the floored budget plus the fee still tops the balance.
-    while shares > 0 {
-        let amount = price * shares as f64;
+/// Whole-lot share count affordable for `budget`, trimmed until the cash also covers
+/// the commission. Returns 0 when even one lot is out of reach. Everything is f64
+/// whole-lot multiples, so there is no integer cast.
+fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
+    let mut shares = (budget / (price * LOT)).floor() * LOT;
+    while shares > 0.0 {
+        let amount = price * shares;
         if amount + commission(amount) <= cash {
             break;
         }
@@ -244,7 +236,7 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
         let equity = cash
             + holdings
                 .values()
-                .map(|holding| holding.mark * shares_as_f64(holding.shares))
+                .map(|holding| holding.mark * holding.shares)
                 .sum::<f64>();
         equity_curve.push(EquityPoint {
             date: day.date,
@@ -283,7 +275,7 @@ fn sell_phase(
             .bars
             .get(&ticker)
             .map_or(holding.mark, |bar| sell_price(bar, fill));
-        let amount = price * shares_as_f64(holding.shares);
+        let amount = price * holding.shares;
         let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
         *cash += proceeds;
         let pnl = proceeds - holding.cost;
@@ -295,10 +287,6 @@ fn sell_phase(
 }
 
 /// Fill open slots with the strongest above-threshold names not already held.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "max_holdings is a small integer, exact in f64"
-)]
 fn buy_phase(
     day: &TradingDay,
     config: &BacktestConfig,
@@ -308,7 +296,7 @@ fn buy_phase(
     // Equal-weight target from equity at the start of the buy phase, so all of the
     // day's buys size against the same account value.
     let equity = *cash + holdings_value(holdings, &day.bars);
-    let target = equity / config.max_holdings.max(1) as f64;
+    let target = equity / count_f64(config.max_holdings.max(1));
 
     let mut candidates: Vec<(&String, &DayBar)> = day
         .bars
@@ -330,10 +318,10 @@ fn buy_phase(
         }
         let price = buy_price(bar, config.fill);
         let shares = affordable_shares(target.min(*cash), price, *cash);
-        if shares == 0 {
+        if shares <= 0.0 {
             continue;
         }
-        let amount = price * shares_as_f64(shares);
+        let amount = price * shares;
         let cost = amount + commission(amount);
         *cash -= cost;
         holdings.insert(
@@ -348,10 +336,6 @@ fn buy_phase(
 }
 
 impl BacktestReport {
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "trade and day counts are small integers, exact in f64"
-    )]
     fn new(starting_cash: f64, trades: &[Trade], equity_curve: Vec<EquityPoint>) -> Self {
         let final_equity = equity_curve
             .last()
@@ -378,7 +362,7 @@ impl BacktestReport {
 
         let trading_days = equity_curve.len();
         let annualized_return = if trading_days > 0 {
-            cumulative_return / trading_days as f64 * ANNUAL_TRADING_DAYS
+            cumulative_return / count_f64(trading_days) * ANNUAL_TRADING_DAYS
         } else {
             0.0
         };
@@ -415,15 +399,11 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
 }
 
 /// `numerator / denominator` as a fraction, zero when the denominator is zero.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "counts are small integers, exact in f64"
-)]
 fn ratio(numerator: usize, denominator: usize) -> f64 {
     if denominator == 0 {
         0.0
     } else {
-        numerator as f64 / denominator as f64
+        count_f64(numerator) / count_f64(denominator)
     }
 }
 
