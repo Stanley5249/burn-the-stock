@@ -44,6 +44,12 @@ pub struct BacktestConfig {
     pub max_holdings: usize,
     /// Opening balance.
     pub starting_cash: f64,
+    /// Take-profit exit, a positive fraction of the entry price.
+    pub take_profit: f64,
+    /// Stop-loss exit, a positive fraction of the entry price.
+    pub stop_loss: f64,
+    /// Trading days to hold before a time exit, the vertical barrier.
+    pub max_hold_days: usize,
 }
 
 /// One ticker's signal and prices on one trading day. `score` and `action` are the
@@ -73,6 +79,17 @@ struct Holding {
     mark: f64,
     entry_date: NaiveDate,
     entry_price: f64,
+    /// Day-loop index at entry, for counting trading days held.
+    entry_index: usize,
+}
+
+/// Mutable account state the day phases evolve: cash, open positions, and the trade
+/// and action logs.
+struct Ledger {
+    cash: f64,
+    holdings: HashMap<String, Holding>,
+    trades: Vec<Trade>,
+    events: Vec<TradeEvent>,
 }
 
 /// A completed round trip.
@@ -91,6 +108,8 @@ pub struct Trade {
     pub pnl: f64,
     /// Net return on cost, `pnl / cost`.
     pub return_pct: f64,
+    /// Exit rule that closed the trade.
+    pub exit_reason: &'static str,
 }
 
 /// One executed buy or sell, for the action log.
@@ -98,6 +117,8 @@ pub struct TradeEvent {
     pub date: NaiveDate,
     pub ticker: String,
     pub side: &'static str,
+    /// Exit rule for a sell, empty for a buy.
+    pub reason: &'static str,
     pub price: f64,
     pub shares: f64,
     /// Gross fill value, `price * shares`, before fees.
@@ -215,10 +236,12 @@ fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
 /// (and all on the final day), buy the strongest above-threshold names into open
 /// slots, then mark to the closes.
 pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
-    let mut cash = config.starting_cash;
-    let mut holdings: HashMap<String, Holding> = HashMap::new();
-    let mut trades: Vec<Trade> = Vec::new();
-    let mut events: Vec<TradeEvent> = Vec::new();
+    let mut ledger = Ledger {
+        cash: config.starting_cash,
+        holdings: HashMap::new(),
+        trades: Vec::new(),
+        events: Vec::new(),
+    };
     let mut equity_curve: Vec<EquityPoint> = Vec::with_capacity(days.len());
 
     let last_index = days.len().saturating_sub(1);
@@ -226,28 +249,21 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     for (index, day) in days.iter().enumerate() {
         let is_last = index == last_index;
 
-        sell_phase(
-            day,
-            is_last,
-            config.fill,
-            &mut holdings,
-            &mut cash,
-            &mut trades,
-            &mut events,
-        );
+        sell_phase(day, index, is_last, config, &mut ledger);
 
         if !is_last {
-            buy_phase(day, config, &mut holdings, &mut cash, &mut events);
+            buy_phase(day, index, config, &mut ledger);
         }
 
         // Refresh marks for held tickers that traded today.
-        for (ticker, holding) in &mut holdings {
+        for (ticker, holding) in &mut ledger.holdings {
             if let Some(bar) = day.bars.get(ticker) {
                 holding.mark = f64::from(bar.close);
             }
         }
-        let equity = cash
-            + holdings
+        let equity = ledger.cash
+            + ledger
+                .holdings
                 .values()
                 .map(|holding| holding.mark * holding.shares)
                 .sum::<f64>();
@@ -257,52 +273,81 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
         });
     }
 
-    BacktestReport::new(config.starting_cash, trades, events, equity_curve)
+    BacktestReport::new(
+        config.starting_cash,
+        ledger.trades,
+        ledger.events,
+        equity_curve,
+    )
 }
 
-/// Sell holdings that flipped to Sell today, or every holding on the final day.
+/// Exit price and reason for a holding today, or `None` to keep holding. Take-profit
+/// wins a both-touch bar; then stop-loss, the time barrier, a model Sell, and finally
+/// the forced liquidation on the last day.
+fn exit_decision(
+    holding: &Holding,
+    bar: Option<&DayBar>,
+    index: usize,
+    is_last: bool,
+    config: &BacktestConfig,
+) -> Option<(f64, &'static str)> {
+    let Some(bar) = bar else {
+        // No bar today: only the final day can liquidate, at the last mark.
+        return is_last.then_some((holding.mark, "final"));
+    };
+
+    let upper = holding.entry_price * (1.0 + config.take_profit);
+    let lower = holding.entry_price * (1.0 - config.stop_loss);
+
+    if f64::from(bar.high) >= upper {
+        Some((tick_floor(upper), "take_profit"))
+    } else if f64::from(bar.low) <= lower {
+        Some((tick_floor(lower), "stop_loss"))
+    } else if index - holding.entry_index >= config.max_hold_days {
+        Some((tick_floor(f64::from(bar.close)), "time"))
+    } else if bar.action == Action::Sell {
+        Some((sell_price(bar, config.fill), "signal"))
+    } else if is_last {
+        Some((sell_price(bar, config.fill), "final"))
+    } else {
+        None
+    }
+}
+
+/// Apply the exit ladder to every holding, booking each closed position.
 fn sell_phase(
     day: &TradingDay,
+    index: usize,
     is_last: bool,
-    fill: Fill,
-    holdings: &mut HashMap<String, Holding>,
-    cash: &mut f64,
-    trades: &mut Vec<Trade>,
-    events: &mut Vec<TradeEvent>,
+    config: &BacktestConfig,
+    ledger: &mut Ledger,
 ) {
-    let to_sell: Vec<String> = holdings
-        .keys()
-        .filter(|ticker| {
-            is_last
-                || day
-                    .bars
-                    .get(*ticker)
-                    .is_some_and(|bar| bar.action == Action::Sell)
+    let exits: Vec<(String, f64, &'static str)> = ledger
+        .holdings
+        .iter()
+        .filter_map(|(ticker, holding)| {
+            exit_decision(holding, day.bars.get(ticker), index, is_last, config)
+                .map(|(price, reason)| (ticker.clone(), price, reason))
         })
-        .cloned()
         .collect();
 
-    for ticker in to_sell {
-        let holding = holdings.remove(&ticker).expect("ticker is held");
-        // Sell at the high when there is a bar, else at the last mark.
-        let price = day
-            .bars
-            .get(&ticker)
-            .map_or(holding.mark, |bar| sell_price(bar, fill));
+    for (ticker, price, reason) in exits {
+        let holding = ledger.holdings.remove(&ticker).expect("ticker is held");
         let amount = price * holding.shares;
         let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
-        *cash += proceeds;
+        ledger.cash += proceeds;
         let pnl = proceeds - holding.cost;
-        events.push(TradeEvent {
+        ledger.events.push(TradeEvent {
             date: day.date,
             ticker: ticker.clone(),
             side: "Sell",
+            reason,
             price,
             shares: holding.shares,
             amount,
-            cash_after: *cash,
+            cash_after: ledger.cash,
         });
-        trades.push(Trade {
+        ledger.trades.push(Trade {
             ticker,
             entry_date: holding.entry_date,
             exit_date: day.date,
@@ -313,27 +358,24 @@ fn sell_phase(
             proceeds,
             pnl,
             return_pct: pnl / holding.cost,
+            exit_reason: reason,
         });
     }
 }
 
 /// Fill open slots with the strongest above-threshold names not already held.
-fn buy_phase(
-    day: &TradingDay,
-    config: &BacktestConfig,
-    holdings: &mut HashMap<String, Holding>,
-    cash: &mut f64,
-    events: &mut Vec<TradeEvent>,
-) {
+fn buy_phase(day: &TradingDay, index: usize, config: &BacktestConfig, ledger: &mut Ledger) {
     // Equal-weight target from equity at the buy phase start, so all of the day's
     // buys size against the same value.
-    let equity = *cash + holdings_value(holdings, &day.bars);
+    let equity = ledger.cash + holdings_value(&ledger.holdings, &day.bars);
     let target = equity / count_f64(config.max_holdings.max(1));
 
     let mut candidates: Vec<(&String, &DayBar)> = day
         .bars
         .iter()
-        .filter(|(ticker, bar)| !holdings.contains_key(*ticker) && bar.score > config.threshold)
+        .filter(|(ticker, bar)| {
+            !ledger.holdings.contains_key(*ticker) && bar.score > config.threshold
+        })
         .collect();
     // Strongest first, ticker breaking ties for determinism.
     candidates.sort_by(|left, right| {
@@ -345,27 +387,28 @@ fn buy_phase(
     });
 
     for (ticker, bar) in candidates {
-        if holdings.len() >= config.max_holdings {
+        if ledger.holdings.len() >= config.max_holdings {
             break;
         }
         let price = buy_price(bar, config.fill);
-        let shares = affordable_shares(target.min(*cash), price, *cash);
+        let shares = affordable_shares(target.min(ledger.cash), price, ledger.cash);
         if shares <= 0.0 {
             continue;
         }
         let amount = price * shares;
         let cost = amount + commission(amount);
-        *cash -= cost;
-        events.push(TradeEvent {
+        ledger.cash -= cost;
+        ledger.events.push(TradeEvent {
             date: day.date,
             ticker: ticker.clone(),
             side: "Buy",
+            reason: "",
             price,
             shares,
             amount,
-            cash_after: *cash,
+            cash_after: ledger.cash,
         });
-        holdings.insert(
+        ledger.holdings.insert(
             ticker.clone(),
             Holding {
                 shares,
@@ -373,6 +416,7 @@ fn buy_phase(
                 mark: f64::from(bar.close),
                 entry_date: day.date,
                 entry_price: price,
+                entry_index: index,
             },
         );
     }
@@ -484,6 +528,20 @@ fn format_ntd(value: f64) -> String {
     format!("NT${sign}{grouped}")
 }
 
+/// Count trades by exit reason, e.g.
+/// `take-profit 12 / stop-loss 9 / time 5 / signal 2 / final 1`.
+fn exit_tally(trades: &[Trade]) -> String {
+    let count = |reason| trades.iter().filter(|t| t.exit_reason == reason).count();
+    format!(
+        "take-profit {} / stop-loss {} / time {} / signal {} / final {}",
+        count("take_profit"),
+        count("stop_loss"),
+        count("time"),
+        count("signal"),
+        count("final"),
+    )
+}
+
 /// Build the grouped summary as one string, so the caller prints it in a single write.
 #[must_use]
 pub fn summary(report: &BacktestReport, context: &RenderContext) -> String {
@@ -502,59 +560,71 @@ pub fn summary(report: &BacktestReport, context: &RenderContext) -> String {
     } else {
         "inf".to_string()
     };
+    let exits = exit_tally(&report.trades);
 
     let mut out = String::new();
     let _ = writeln!(out, "Backtest summary");
     let _ = writeln!(out, "  Window");
-    let _ = writeln!(out, "    dates          : {dates}");
-    let _ = writeln!(out, "    trading days   : {}", report.trading_days);
-    let _ = writeln!(out, "    tickers scored : {}", context.tickers);
-    let _ = writeln!(out, "    windows scored : {}", context.windows_scored);
-    let _ = writeln!(out, "    buy gate       : score > {:.2}", context.threshold);
-    let _ = writeln!(out, "    fills          : {fill}");
+    summary_row(&mut out, "dates", &dates);
+    summary_row(&mut out, "trading days", &report.trading_days.to_string());
+    summary_row(&mut out, "tickers scored", &context.tickers.to_string());
+    summary_row(
+        &mut out,
+        "windows scored",
+        &context.windows_scored.to_string(),
+    );
+    summary_row(
+        &mut out,
+        "buy gate",
+        &format!("score > {:.2}", context.threshold),
+    );
+    summary_row(&mut out, "fills", fill);
     let _ = writeln!(out, "  Performance");
-    let _ = writeln!(
-        out,
-        "    starting cash  : {}",
-        format_ntd(report.starting_cash)
+    summary_row(&mut out, "starting cash", &format_ntd(report.starting_cash));
+    summary_row(&mut out, "final equity", &format_ntd(report.final_equity));
+    summary_row(
+        &mut out,
+        "cumulative",
+        &format!("{:+.2}%", report.cumulative_return * 100.0),
+    );
+    summary_row(
+        &mut out,
+        "annualized",
+        &format!("{:+.2}%", report.annualized_return * 100.0),
+    );
+    summary_row(&mut out, "trades", &report.trade_count.to_string());
+    summary_row(&mut out, "exits", &exits);
+    summary_row(
+        &mut out,
+        "win rate",
+        &format!("{:.1}%  (trades closed in profit)", report.win_rate * 100.0),
+    );
+    summary_row(
+        &mut out,
+        "profit factor",
+        &format!("{profit_factor}  (gross profit / gross loss)"),
+    );
+    summary_row(
+        &mut out,
+        "average win / loss",
+        &format!(
+            "{:+.2}% / {:+.2}%  (return on cost)",
+            report.avg_win_return * 100.0,
+            report.avg_loss_return * 100.0
+        ),
     );
     let _ = writeln!(
         out,
-        "    final equity   : {}",
-        format_ntd(report.final_equity)
-    );
-    let _ = writeln!(
-        out,
-        "    cumulative     : {:+.2}%",
-        report.cumulative_return * 100.0
-    );
-    let _ = writeln!(
-        out,
-        "    annualized*    : {:+.2}%",
-        report.annualized_return * 100.0
-    );
-    let _ = writeln!(out, "    trades         : {}", report.trade_count);
-    let _ = writeln!(
-        out,
-        "    win rate       : {:.1}%  (trades closed in profit)",
-        report.win_rate * 100.0
-    );
-    let _ = writeln!(
-        out,
-        "    profit factor  : {profit_factor}  (gross profit / gross loss)"
-    );
-    let _ = writeln!(
-        out,
-        "    avg win / loss : {:+.2}% / {:+.2}%  (return on cost)",
-        report.avg_win_return * 100.0,
-        report.avg_loss_return * 100.0
-    );
-    let _ = writeln!(
-        out,
-        "  * annualized is naive linear (x252/day) and is unreliable under ~30 trading days"
+        "  Note: annualized is naive linear (x252 per day), unreliable under ~30 trading days"
     );
 
     out
+}
+
+/// Append one aligned `label : value` row under a summary section.
+fn summary_row(out: &mut String, label: &str, value: &str) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "    {label:<18}: {value}");
 }
 
 #[cfg(test)]
@@ -582,6 +652,11 @@ mod tests {
             fill: Fill::LowHigh,
             max_holdings,
             starting_cash,
+            // Barriers wide enough never to fire, so these tests exercise the
+            // model-Sell and final-day exits only.
+            take_profit: 100.0,
+            stop_loss: 0.99,
+            max_hold_days: usize::MAX,
         }
     }
 
@@ -681,5 +756,93 @@ mod tests {
 
         assert_eq!(report.trade_count, 0);
         assert!((report.final_equity - 1_000_000.0).abs() < 1e-9);
+    }
+
+    fn barrier_config(take_profit: f64, stop_loss: f64, max_hold_days: usize) -> BacktestConfig {
+        BacktestConfig {
+            threshold: 0.0,
+            fill: Fill::LowHigh,
+            max_holdings: 1,
+            starting_cash: 1_000_000.0,
+            take_profit,
+            stop_loss,
+            max_hold_days,
+        }
+    }
+
+    /// One ticker bought day 1 at low 10, then a trigger bar, then a filler day so the
+    /// trigger is not the forced final-day exit.
+    fn run_exit_scenario(trigger: DayBar, config: &BacktestConfig) -> BacktestReport {
+        let mut day1 = TradingDay {
+            date: date(1),
+            bars: HashMap::new(),
+        };
+        day1.bars
+            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 10.0, 10.0));
+        let mut day2 = TradingDay {
+            date: date(2),
+            bars: HashMap::new(),
+        };
+        day2.bars.insert("A".to_string(), trigger);
+        let day3 = TradingDay {
+            date: date(3),
+            bars: HashMap::new(),
+        };
+
+        run(&[day1, day2, day3], config)
+    }
+
+    #[test]
+    fn take_profit_exit_fills_at_the_barrier() {
+        // High 12 crosses the +10% barrier (11); sell at the barrier tick.
+        let report = run_exit_scenario(
+            bar(0.0, Action::Hold, 10.0, 12.0, 11.0),
+            &barrier_config(0.1, 0.5, 100),
+        );
+
+        assert_eq!(report.trade_count, 1);
+        assert_eq!(report.trades[0].exit_reason, "take_profit");
+        assert!((report.trades[0].exit_price - 11.0).abs() < 1e-9);
+        assert!(report.trades[0].pnl > 0.0);
+    }
+
+    #[test]
+    fn stop_loss_exit_fills_at_the_barrier() {
+        // Low 8 crosses the -10% barrier (9); sell at the barrier tick.
+        let report = run_exit_scenario(
+            bar(0.0, Action::Hold, 8.0, 10.0, 9.0),
+            &barrier_config(0.5, 0.1, 100),
+        );
+
+        assert_eq!(report.trade_count, 1);
+        assert_eq!(report.trades[0].exit_reason, "stop_loss");
+        assert!((report.trades[0].exit_price - 9.0).abs() < 1e-9);
+        assert!(report.trades[0].pnl < 0.0);
+    }
+
+    #[test]
+    fn time_exit_sells_at_the_horizon_close() {
+        // Neither barrier touched, but the one-day hold limit is reached on day 2.
+        let report = run_exit_scenario(
+            bar(0.0, Action::Hold, 10.0, 11.0, 10.5),
+            &barrier_config(0.5, 0.5, 1),
+        );
+
+        assert_eq!(report.trade_count, 1);
+        assert_eq!(report.trades[0].exit_reason, "time");
+        assert!((report.trades[0].exit_price - 10.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn both_barriers_in_one_bar_takes_profit() {
+        // Bar touches both the +10% and -10% barriers; the optimistic rule takes profit.
+        let report = run_exit_scenario(
+            bar(0.0, Action::Hold, 8.0, 12.0, 10.0),
+            &barrier_config(0.1, 0.1, 100),
+        );
+
+        assert_eq!(report.trade_count, 1);
+        assert_eq!(report.trades[0].exit_reason, "take_profit");
+        assert!((report.trades[0].exit_price - 11.0).abs() < 1e-9);
     }
 }

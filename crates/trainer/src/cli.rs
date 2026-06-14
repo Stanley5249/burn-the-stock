@@ -244,6 +244,22 @@ pub struct BacktestArgs {
     #[arg(long, default_value_t = 0.0)]
     pub threshold: f32,
 
+    /// Take-profit exit, a fraction of the entry price. Defaults to the run's config.
+    #[arg(long)]
+    pub take_profit: Option<f32>,
+
+    /// Stop-loss exit, a fraction of the entry price. Defaults to the run's config.
+    #[arg(long)]
+    pub stop_loss: Option<f32>,
+
+    /// Trading days to hold before a time exit. Defaults to the run's `label_horizon`.
+    #[arg(long)]
+    pub max_hold: Option<usize>,
+
+    /// Most stocks held at once; each buy targets an equal `equity / slots`.
+    #[arg(long, default_value_t = 10)]
+    pub max_holdings: usize,
+
     /// Which prices fills happen at: `low-high` optimistic, `open` pessimistic.
     #[arg(long, value_enum, default_value_t = FillArg::LowHigh)]
     pub fill: FillArg,

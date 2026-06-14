@@ -18,9 +18,6 @@ use crate::training::TrainingConfig;
 
 type InferenceBackend = Wgpu;
 
-/// Maximum stocks held at once; each buy targets an equal tenth of equity.
-const MAX_HOLDINGS: usize = 10;
-
 /// Run the portfolio backtest over the held-out split, reporting metrics and a CSV of
 /// the daily account value.
 pub fn run(args: &BacktestArgs) -> Result<()> {
@@ -63,8 +60,11 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     let backtest_config = BacktestConfig {
         threshold: args.threshold,
         fill,
-        max_holdings: MAX_HOLDINGS,
+        max_holdings: args.max_holdings,
         starting_cash: STARTING_CASH,
+        take_profit: f64::from(args.take_profit.unwrap_or(config.take_profit)),
+        stop_loss: f64::from(args.stop_loss.unwrap_or(config.stop_loss)),
+        max_hold_days: args.max_hold.unwrap_or(config.label_horizon),
     };
     let report = portfolio::run(&days, &backtest_config);
 
@@ -179,6 +179,7 @@ fn write_trades_csv(report: &BacktestReport, path: &Path) -> Result<()> {
         "proceeds" => trades.iter().map(|t| t.proceeds).collect::<Vec<_>>(),
         "pnl" => trades.iter().map(|t| t.pnl).collect::<Vec<_>>(),
         "return_pct" => trades.iter().map(|t| t.return_pct).collect::<Vec<_>>(),
+        "exit_reason" => trades.iter().map(|t| t.exit_reason.to_string()).collect::<Vec<_>>(),
     )
     .into_diagnostic()?;
     write_csv(&mut frame, path)
@@ -191,6 +192,7 @@ fn write_actions_csv(report: &BacktestReport, path: &Path) -> Result<()> {
         "date" => events.iter().map(|e| e.date).collect::<Vec<_>>(),
         "ticker" => events.iter().map(|e| e.ticker.clone()).collect::<Vec<_>>(),
         "side" => events.iter().map(|e| e.side.to_string()).collect::<Vec<_>>(),
+        "reason" => events.iter().map(|e| e.reason.to_string()).collect::<Vec<_>>(),
         "price" => events.iter().map(|e| e.price).collect::<Vec<_>>(),
         "shares" => events.iter().map(|e| e.shares).collect::<Vec<_>>(),
         "amount" => events.iter().map(|e| e.amount).collect::<Vec<_>>(),
