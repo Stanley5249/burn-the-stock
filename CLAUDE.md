@@ -51,6 +51,8 @@ Single-letter loop counters are fine (`i`, `j`, `k`), but prefer meaningful name
 
 Favor explicit conjunctions and transition words to connect your thoughts. Use natural phrasing instead of colons or semicolons, and limit punctuation to standard ASCII characters.
 
-Comments explain why, not what. Only add a comment when the reason is non-obvious.
+Keep comments and docstrings minimal. A comment explains why, never what, and earns its place only when the reason is non-obvious and cannot be read from names or types. Reduce it to the shortest phrase that carries the point.
+
+Doc comments are a single line. Drop module-level rationale paragraphs. Keep a clippy-required `# Errors` or `# Panics` section, but to one line. Never restate the code, a parameter, or a type in prose.
 
 Commits use conventional commit format. Subject under 50 chars (hard limit 72).
