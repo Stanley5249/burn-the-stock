@@ -71,14 +71,38 @@ struct Holding {
     cost: f64,
     /// Most recent close seen, used to value the holding on days it has no bar.
     mark: f64,
+    entry_date: NaiveDate,
+    entry_price: f64,
 }
 
-/// A completed round trip, kept just long enough to aggregate the trade metrics.
-struct Trade {
-    /// Net profit in cash after every fee and the sell tax.
-    pnl: f64,
+/// A completed round trip.
+pub struct Trade {
+    pub ticker: String,
+    pub entry_date: NaiveDate,
+    pub exit_date: NaiveDate,
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub shares: f64,
+    /// Cash paid to open, including the buy commission.
+    pub cost: f64,
+    /// Cash received on close, net of commission and the sell tax.
+    pub proceeds: f64,
+    /// Net profit in cash, `proceeds - cost`.
+    pub pnl: f64,
     /// Net return on cost, `pnl / cost`.
-    return_pct: f64,
+    pub return_pct: f64,
+}
+
+/// One executed buy or sell, for the action log.
+pub struct TradeEvent {
+    pub date: NaiveDate,
+    pub ticker: String,
+    pub side: &'static str,
+    pub price: f64,
+    pub shares: f64,
+    /// Gross fill value, `price * shares`, before fees.
+    pub amount: f64,
+    pub cash_after: f64,
 }
 
 /// The account value at the close of one trading day, for the equity curve CSV.
@@ -100,6 +124,8 @@ pub struct BacktestReport {
     pub avg_loss_return: f64,
     pub trading_days: usize,
     pub equity_curve: Vec<EquityPoint>,
+    pub trades: Vec<Trade>,
+    pub events: Vec<TradeEvent>,
 }
 
 /// Commission on a trade of `amount`, with the per-transaction floor.
@@ -192,6 +218,7 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     let mut cash = config.starting_cash;
     let mut holdings: HashMap<String, Holding> = HashMap::new();
     let mut trades: Vec<Trade> = Vec::new();
+    let mut events: Vec<TradeEvent> = Vec::new();
     let mut equity_curve: Vec<EquityPoint> = Vec::with_capacity(days.len());
 
     let last_index = days.len().saturating_sub(1);
@@ -206,10 +233,11 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
             &mut holdings,
             &mut cash,
             &mut trades,
+            &mut events,
         );
 
         if !is_last {
-            buy_phase(day, config, &mut holdings, &mut cash);
+            buy_phase(day, config, &mut holdings, &mut cash, &mut events);
         }
 
         // Refresh marks for held tickers that traded today.
@@ -229,7 +257,7 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
         });
     }
 
-    BacktestReport::new(config.starting_cash, &trades, equity_curve)
+    BacktestReport::new(config.starting_cash, trades, events, equity_curve)
 }
 
 /// Sell holdings that flipped to Sell today, or every holding on the final day.
@@ -240,6 +268,7 @@ fn sell_phase(
     holdings: &mut HashMap<String, Holding>,
     cash: &mut f64,
     trades: &mut Vec<Trade>,
+    events: &mut Vec<TradeEvent>,
 ) {
     let to_sell: Vec<String> = holdings
         .keys()
@@ -264,7 +293,24 @@ fn sell_phase(
         let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
         *cash += proceeds;
         let pnl = proceeds - holding.cost;
+        events.push(TradeEvent {
+            date: day.date,
+            ticker: ticker.clone(),
+            side: "Sell",
+            price,
+            shares: holding.shares,
+            amount,
+            cash_after: *cash,
+        });
         trades.push(Trade {
+            ticker,
+            entry_date: holding.entry_date,
+            exit_date: day.date,
+            entry_price: holding.entry_price,
+            exit_price: price,
+            shares: holding.shares,
+            cost: holding.cost,
+            proceeds,
             pnl,
             return_pct: pnl / holding.cost,
         });
@@ -277,6 +323,7 @@ fn buy_phase(
     config: &BacktestConfig,
     holdings: &mut HashMap<String, Holding>,
     cash: &mut f64,
+    events: &mut Vec<TradeEvent>,
 ) {
     // Equal-weight target from equity at the buy phase start, so all of the day's
     // buys size against the same value.
@@ -309,19 +356,35 @@ fn buy_phase(
         let amount = price * shares;
         let cost = amount + commission(amount);
         *cash -= cost;
+        events.push(TradeEvent {
+            date: day.date,
+            ticker: ticker.clone(),
+            side: "Buy",
+            price,
+            shares,
+            amount,
+            cash_after: *cash,
+        });
         holdings.insert(
             ticker.clone(),
             Holding {
                 shares,
                 cost,
                 mark: f64::from(bar.close),
+                entry_date: day.date,
+                entry_price: price,
             },
         );
     }
 }
 
 impl BacktestReport {
-    fn new(starting_cash: f64, trades: &[Trade], equity_curve: Vec<EquityPoint>) -> Self {
+    fn new(
+        starting_cash: f64,
+        trades: Vec<Trade>,
+        events: Vec<TradeEvent>,
+        equity_curve: Vec<EquityPoint>,
+    ) -> Self {
         let final_equity = equity_curve
             .last()
             .map_or(starting_cash, |point| point.equity);
@@ -364,6 +427,8 @@ impl BacktestReport {
             avg_loss_return,
             trading_days,
             equity_curve,
+            trades,
+            events,
         }
     }
 }
@@ -392,31 +457,104 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
     }
 }
 
-/// Print the platform's performance metrics.
-pub fn render(report: &BacktestReport) {
-    println!("Portfolio backtest ({} trading days):", report.trading_days);
-    println!("  starting cash    : {:>16.0}", report.starting_cash);
-    println!("  final equity     : {:>16.0}", report.final_equity);
-    println!(
-        "  cumulative return: {:+.2}%",
+/// Window-level context for the summary, the parts the report itself does not carry.
+pub struct RenderContext {
+    pub tickers: usize,
+    pub windows_scored: usize,
+    pub threshold: f32,
+    pub fill: Fill,
+}
+
+/// NT$ with thousands separators, no decimals, e.g. `NT$100,000,000`.
+fn format_ntd(value: f64) -> String {
+    let rounded = format!("{value:.0}");
+    let (sign, digits) = rounded
+        .strip_prefix('-')
+        .map_or(("", rounded.as_str()), |rest| ("-", rest));
+
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    let len = digits.len();
+    for (index, byte) in digits.bytes().enumerate() {
+        if index > 0 && (len - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(char::from(byte));
+    }
+
+    format!("NT${sign}{grouped}")
+}
+
+/// Build the grouped summary as one string, so the caller prints it in a single write.
+#[must_use]
+pub fn summary(report: &BacktestReport, context: &RenderContext) -> String {
+    use std::fmt::Write as _;
+
+    let fill = match context.fill {
+        Fill::LowHigh => "low/high (optimistic)",
+        Fill::Open => "open (pessimistic)",
+    };
+    let dates = match (report.equity_curve.first(), report.equity_curve.last()) {
+        (Some(first), Some(last)) => format!("{} -> {}", first.date, last.date),
+        _ => "none".to_string(),
+    };
+    let profit_factor = if report.profit_factor.is_finite() {
+        format!("{:.2}", report.profit_factor)
+    } else {
+        "inf".to_string()
+    };
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Backtest summary");
+    let _ = writeln!(out, "  Window");
+    let _ = writeln!(out, "    dates          : {dates}");
+    let _ = writeln!(out, "    trading days   : {}", report.trading_days);
+    let _ = writeln!(out, "    tickers scored : {}", context.tickers);
+    let _ = writeln!(out, "    windows scored : {}", context.windows_scored);
+    let _ = writeln!(out, "    buy gate       : score > {:.2}", context.threshold);
+    let _ = writeln!(out, "    fills          : {fill}");
+    let _ = writeln!(out, "  Performance");
+    let _ = writeln!(
+        out,
+        "    starting cash  : {}",
+        format_ntd(report.starting_cash)
+    );
+    let _ = writeln!(
+        out,
+        "    final equity   : {}",
+        format_ntd(report.final_equity)
+    );
+    let _ = writeln!(
+        out,
+        "    cumulative     : {:+.2}%",
         report.cumulative_return * 100.0
     );
-    println!(
-        "  annualized       : {:+.2}%",
+    let _ = writeln!(
+        out,
+        "    annualized*    : {:+.2}%",
         report.annualized_return * 100.0
     );
-    println!("  trades           : {}", report.trade_count);
-    println!("  win rate         : {:.1}%", report.win_rate * 100.0);
-    if report.profit_factor.is_finite() {
-        println!("  profit factor    : {:.2}", report.profit_factor);
-    } else {
-        println!("  profit factor    : inf (no losing trades)");
-    }
-    println!(
-        "  avg win / loss   : {:+.2}% / {:+.2}%",
+    let _ = writeln!(out, "    trades         : {}", report.trade_count);
+    let _ = writeln!(
+        out,
+        "    win rate       : {:.1}%  (trades closed in profit)",
+        report.win_rate * 100.0
+    );
+    let _ = writeln!(
+        out,
+        "    profit factor  : {profit_factor}  (gross profit / gross loss)"
+    );
+    let _ = writeln!(
+        out,
+        "    avg win / loss : {:+.2}% / {:+.2}%  (return on cost)",
         report.avg_win_return * 100.0,
         report.avg_loss_return * 100.0
     );
+    let _ = writeln!(
+        out,
+        "  * annualized is naive linear (x252/day) and is unreliable under ~30 trading days"
+    );
+
+    out
 }
 
 #[cfg(test)]

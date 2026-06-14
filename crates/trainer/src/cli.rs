@@ -233,7 +233,9 @@ pub struct BacktestArgs {
     #[arg(long, default_value = "data/yfinance/stocks.parquet")]
     pub data: PathBuf,
 
-    /// Length in days of the recent window to backtest. Match train's `--valid-days`.
+    /// Calendar days of the recent window to backtest. The lookback reaches before the
+    /// cutoff, so tradeable days are roughly the trading days within this window. Match
+    /// train's `--valid-days`.
     #[arg(long, default_value_t = 180)]
     pub valid_days: i64,
 

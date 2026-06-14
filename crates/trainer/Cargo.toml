@@ -19,6 +19,7 @@ polars = {
   workspace = true,
   features = [
     "concat_str",
+    "csv",
     "dtype-array",
     "dtype-date",
     "lazy",

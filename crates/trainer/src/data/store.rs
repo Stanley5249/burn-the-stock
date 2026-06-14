@@ -18,6 +18,59 @@ fn scan_standardized(path: &Path) -> PolarsResult<LazyFrame> {
     Ok(standardized_features(frame))
 }
 
+/// One stable-ordered frame per ticker, standardized features and raw prices selected.
+fn load_groups(path: &Path) -> PolarsResult<Vec<DataFrame>> {
+    let long = scan_standardized(path)?
+        .select([
+            col(TICKER),
+            col(DATE),
+            feature_array().alias(FEATURE),
+            // Raw prices survive the z-score untouched; the barrier labels and the
+            // backtest need them.
+            col(OPEN),
+            col(HIGH),
+            col(LOW),
+            col(CLOSE),
+        ])
+        .collect()?;
+
+    long.partition_by_stable([TICKER], true)
+}
+
+/// Dates, flattened features, then the open, high, low, and close price vectors.
+type TickerBuffers = (
+    Vec<NaiveDate>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+);
+
+/// Dates, flattened features, and the four raw price vectors from a group frame, all
+/// in its row order.
+fn ticker_buffers(frame: &DataFrame) -> PolarsResult<TickerBuffers> {
+    let features: Vec<f32> = frame
+        .column(&FEATURE)?
+        .array()?
+        .get_inner()
+        .f32()?
+        .into_no_null_iter()
+        .collect();
+    let dates: Vec<NaiveDate> = frame
+        .column(&DATE)?
+        .date()?
+        .as_date_iter()
+        .flatten()
+        .collect();
+    let open = price_column(frame, &OPEN)?;
+    let high = price_column(frame, &HIGH)?;
+    let low = price_column(frame, &LOW)?;
+    let close = price_column(frame, &CLOSE)?;
+
+    Ok((dates, features, open, high, low, close))
+}
+
 /// Pull a raw price column as `f32`, null mapped to `NaN` to stay aligned with
 /// `dates`. A `NaN` open leaves that bar untraded in the backtest.
 fn price_column(frame: &DataFrame, name: &PlSmallStr) -> PolarsResult<Vec<f32>> {
@@ -114,21 +167,7 @@ impl TickerStore {
         stop_loss: f32,
         horizon: usize,
     ) -> PolarsResult<Self> {
-        let long = scan_standardized(path)?
-            .select([
-                col(TICKER),
-                col(DATE),
-                feature_array().alias(FEATURE),
-                // Raw prices survive the z-score untouched; the barrier labels and the
-                // backtest need them.
-                col(OPEN),
-                col(HIGH),
-                col(LOW),
-                col(CLOSE),
-            ])
-            .collect()?;
-
-        let groups = long.partition_by_stable([TICKER], true)?;
+        let groups = load_groups(path)?;
 
         let mut tickers = Vec::with_capacity(groups.len());
 
@@ -153,28 +192,7 @@ impl TickerStore {
             )?;
 
             let head = group.head(Some(height - horizon));
-
-            // Flatten the Array<f32, 5> column so windows are contiguous slices.
-            let features: Vec<f32> = head
-                .column(&FEATURE)?
-                .array()?
-                .get_inner()
-                .f32()?
-                .into_no_null_iter()
-                .collect();
-
-            let dates: Vec<NaiveDate> = head
-                .column(&DATE)?
-                .date()?
-                .as_date_iter()
-                .flatten()
-                .collect();
-
-            // Raw prices for the backtest, aligned with `dates`.
-            let open = price_column(&head, &OPEN)?;
-            let high = price_column(&head, &HIGH)?;
-            let low = price_column(&head, &LOW)?;
-            let close = price_column(&head, &CLOSE)?;
+            let (dates, features, open, high, low, close) = ticker_buffers(&head)?;
 
             tickers.push(Ticker {
                 name,
@@ -192,10 +210,46 @@ impl TickerStore {
         Ok(Self { tickers })
     }
 
-    /// Every `steps`-length window of every ticker as an [`InferenceWindow`] dated at
-    /// its last bar, for the offline backtest. Features are the standardized values
-    /// [`Self::load`] already produced, fed straight to a predictor.
-    pub fn backtest_windows(&self, steps: usize) -> Vec<InferenceWindow> {
+    /// Load every row of every ticker for the backtest, no trailing-horizon chop and
+    /// no labels, so the most recent bars stay tradeable. `labels`/`rewards` are zeroed
+    /// since inference never reads them.
+    ///
+    /// # Errors
+    /// If the parquet cannot be scanned or a column has the wrong dtype.
+    pub fn load_prices(path: &Path) -> PolarsResult<Self> {
+        let groups = load_groups(path)?;
+
+        let mut tickers = Vec::with_capacity(groups.len());
+
+        for group in groups {
+            if group.height() == 0 {
+                continue;
+            }
+
+            let name: PlSmallStr = group.column(&TICKER)?.str()?.get(0).unwrap().into();
+            let (dates, features, open, high, low, close) = ticker_buffers(&group)?;
+
+            let rows = dates.len();
+            tickers.push(Ticker {
+                name,
+                dates,
+                features,
+                labels: vec![0; rows],
+                rewards: vec![0.0; rows],
+                open,
+                high,
+                low,
+                close,
+            });
+        }
+
+        Ok(Self { tickers })
+    }
+
+    /// Every `steps`-length window whose last bar is on or after `cutoff`, as an
+    /// [`InferenceWindow`] dated at that last bar. The window start may precede the
+    /// cutoff, so a held-out day draws its `steps - 1` lookback from earlier bars.
+    pub fn backtest_windows_since(&self, steps: usize, cutoff: NaiveDate) -> Vec<InferenceWindow> {
         let stride = FEATURE_NAMES.len();
         let mut windows = Vec::new();
 
@@ -206,6 +260,9 @@ impl TickerStore {
             let last_start = ticker.rows() - steps;
             for start in 0..=last_start {
                 let last = start + steps - 1;
+                if ticker.dates[last] < cutoff {
+                    continue;
+                }
                 windows.push(InferenceWindow {
                     ticker: ticker.name.to_string(),
                     date: ticker.dates[last],
@@ -286,6 +343,11 @@ impl TickerStore {
                 tickers: valid_tickers,
             },
         ))
+    }
+
+    /// Number of tickers in the store.
+    pub fn ticker_count(&self) -> usize {
+        self.tickers.len()
     }
 
     /// Per-class label counts, indexed Sell 0, Hold 1, Buy 2.
