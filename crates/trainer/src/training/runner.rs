@@ -10,7 +10,9 @@ use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{ClassReduction, FBetaScoreMetric, LossMetric};
-use burn::train::{Learner, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining};
+use burn::train::{
+    Learner, LearnerSummary, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining,
+};
 use miette::{IntoDiagnostic, Result, bail};
 
 use crate::store::TickerStore;
@@ -274,13 +276,49 @@ pub fn train<B: AutodiffBackend>(
 
     let result = training.launch(learner);
 
-    // Save only the inner model, dropping the loss, so the artifact loads straight
-    // into a `StockModel` for inference.
-    result
-        .model
-        .into_model()
+    // burn's `launch` returns the final-epoch model, which early stopping leaves
+    // `patience` epochs past the valid-loss optimum. Recover the best checkpoint by
+    // valid loss and export that one, falling back to the final model if the summary
+    // is unavailable. Save only the inner model, dropping the loss, so the artifact
+    // loads straight into a `StockModel` for inference.
+    let best_model = if let Some(epoch) = best_valid_loss_epoch(artifact_dir) {
+        tracing::info!(target: "experiment", best_epoch = epoch, "exporting best-checkpoint model");
+        StockClassifier::<B::InnerBackend>::new(&config.model, device)
+            .load_file(
+                artifact_dir
+                    .join("checkpoint")
+                    .join(format!("model-{epoch}")),
+                &CompactRecorder::new(),
+                device,
+            )
+            .into_diagnostic()?
+            .into_model()
+    } else {
+        tracing::warn!(target: "experiment", "no valid Loss summary; exporting final-epoch model");
+        result.model.into_model()
+    };
+
+    best_model
         .save_file(artifact_dir.join("model"), &CompactRecorder::new())
         .into_diagnostic()?;
 
     Ok(())
+}
+
+/// Epoch (1-based, matching the checkpoint filenames) with the lowest validation
+/// loss. burn exposes no built-in best-checkpoint accessor: `launch` only returns
+/// the final-epoch model, so we recover the best epoch from `LearnerSummary`, burn's
+/// own structured reader over the metric event store it writes during training (the
+/// same data its internal `EventStoreClient::find_epoch` uses), not by parsing text.
+fn best_valid_loss_epoch(artifact_dir: &Path) -> Option<usize> {
+    let summary = LearnerSummary::new(artifact_dir, &["Loss"]).ok()?;
+    let loss = summary.metrics.valid.iter().find(|m| m.name == "Loss")?;
+    loss.entries
+        .iter()
+        .min_by(|a, b| {
+            a.value
+                .partial_cmp(&b.value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|entry| entry.step)
 }
