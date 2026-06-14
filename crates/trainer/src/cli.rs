@@ -255,7 +255,7 @@ pub struct BacktestArgs {
 
     /// Minimum net-bullish score `clamp(P(Buy) - P(Sell), 0)` to buy a stock, so weak
     /// signals stay in cash.
-    #[arg(long, default_value_t = 0.2)]
+    #[arg(long, default_value_t = 0.0)]
     pub threshold: f32,
 
     /// Which prices fills happen at: `low-high` is the optimistic best case, `open`
