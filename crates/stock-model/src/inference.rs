@@ -15,13 +15,11 @@ use crate::model::{NUM_CLASSES, StockModel, StockModelConfig};
 const SELL: usize = 0;
 const BUY: usize = 2;
 
-/// Windows per forward pass. Caps GPU memory so a universe-wide backtest does not
-/// allocate one tensor over every window at once.
+/// Windows per forward pass, capping GPU memory on a universe-wide backtest.
 const BATCH_SIZE: usize = 1024;
 
-/// The slice of a training run's config that inference needs: the model shape and
-/// the window length. A run writes a fuller config, but `Config` deserialization
-/// ignores the extra training-only fields, so this loads from the same file.
+/// The inference slice of a run's config. `Config` ignores the extra training-only
+/// fields, so this loads from the same `config.json`.
 #[derive(Config, Debug)]
 pub struct InferenceConfig {
     pub model: StockModelConfig,
@@ -58,20 +56,17 @@ impl Action {
 /// One ticker's inference result.
 pub struct Prediction {
     pub ticker: String,
-    /// The bar this prediction was made from, the window's most recent day.
+    /// The bar this prediction was made from.
     pub date: NaiveDate,
     /// Class probabilities in model order: Sell, Hold, Buy.
     pub probabilities: [f32; NUM_CLASSES],
-    /// Argmax action.
     pub action: Action,
-    /// Long-only soft position the trader would size, identical to the Sharpe
-    /// metric's map `clamp(P(Buy) - P(Sell), 0)`. Zero means stay flat, since a Sell
-    /// only vetoes a Buy in a market that cannot short.
+    /// Long-only soft position, `clamp(P(Buy) - P(Sell), 0)`. Zero stays flat, since
+    /// a Sell only vetoes a Buy in a market that cannot short.
     pub position: f32,
 }
 
-/// A trained model bound to a device, ready to score inference windows. It carries
-/// the `steps` it was trained with so callers build windows of the matching length.
+/// A trained model bound to a device, carrying the `steps` it was trained with.
 pub struct Predictor<B: Backend> {
     model: StockModel<B>,
     steps: usize,
@@ -79,13 +74,11 @@ pub struct Predictor<B: Backend> {
 }
 
 impl<B: Backend> Predictor<B> {
-    /// Load the trained model and its config from `artifact_dir`, the directory a
-    /// training run wrote `config.json` and `model.mpk` into. The model is loaded on
-    /// a plain backend, so its dropout is inert and the forward pass is inference.
+    /// Load the trained model and its config from `artifact_dir`. On a plain backend
+    /// dropout is inert, so the forward pass is inference.
     ///
     /// # Errors
-    ///
-    /// Returns an error if the config or model file is missing or cannot be read.
+    /// If the config or model file is missing or cannot be read.
     pub fn load(artifact_dir: &Path, device: B::Device) -> Result<Self> {
         let config = InferenceConfig::load(artifact_dir.join("config.json")).into_diagnostic()?;
 
@@ -102,21 +95,17 @@ impl<B: Backend> Predictor<B> {
         })
     }
 
-    /// Window length the model expects, from the training config. Build the windows
-    /// passed to [`Self::predict`] with this many steps.
+    /// Window length the model expects. Build [`Self::predict`] windows this long.
     #[must_use]
     pub fn steps(&self) -> usize {
         self.steps
     }
 
-    /// Score every window, in [`BATCH_SIZE`] chunks so the forward pass never holds
-    /// the whole universe at once. Each window must hold exactly `steps * 5` features,
-    /// as produced by [`crate::features::latest_windows`] with [`Self::steps`].
+    /// Score every window, in [`BATCH_SIZE`] chunks. Each window holds `steps * 5`
+    /// features, as produced by [`crate::features::latest_windows`].
     ///
     /// # Panics
-    ///
-    /// Panics if a window's feature length does not match `steps * 5`, which only
-    /// happens when the windows were built for a different step count.
+    /// If a window's feature length does not match `steps * 5`.
     #[must_use]
     pub fn predict(&self, windows: &[InferenceWindow]) -> Vec<Prediction> {
         let width = FEATURE_NAMES.len();
@@ -140,8 +129,7 @@ impl<B: Backend> Predictor<B> {
 
             let probabilities = softmax(self.model.forward(technical), 1);
 
-            // One host transfer per chunk, then read each row's class probabilities
-            // back into a Prediction.
+            // One host transfer per chunk.
             let flat = probabilities
                 .into_data()
                 .to_vec::<f32>()
@@ -167,8 +155,7 @@ impl<B: Backend> Predictor<B> {
     }
 }
 
-/// Index of the largest probability, the predicted class. Ties resolve to the
-/// lower index, which is fine for reporting a single action.
+/// Index of the largest probability; ties resolve to the lower index.
 fn argmax(probabilities: &[f32]) -> usize {
     probabilities
         .iter()

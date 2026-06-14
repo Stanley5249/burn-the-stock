@@ -8,15 +8,11 @@ pub const NUM_CLASSES: usize = 3;
 /// Standardized feature width of the technical input, matching the feature column.
 const NUM_FEATURES: usize = 5;
 
-/// GRU classifier over the standardized feature window.
+/// GRU classifier over the standardized feature window. A two-layer GRU summarizes
+/// the window into its last hidden state, which an MLP head turns into action
+/// logits. Architecture only; the loss and training step live with the trainer.
 ///
-/// A two-layer GRU summarizes the window into its last hidden state, which a small
-/// MLP head turns into the action logits. This is the architecture only: the loss
-/// and the training step live with the trainer, so a model loaded for inference
-/// carries no training machinery.
-///
-/// Input:  technical `[batch, steps, 5]`
-/// Output: `[batch, NUM_CLASSES]` (logits)
+/// Input `[batch, steps, 5]`, output `[batch, NUM_CLASSES]` logits.
 #[derive(Module, Debug)]
 pub struct StockModel<B: Backend> {
     gru_1: Gru<B>,
@@ -51,14 +47,14 @@ impl<B: Backend> StockModel<B> {
         }
     }
 
-    /// Returns logits with shape `[batch, NUM_CLASSES]`. Dropout is inert on a plain
-    /// backend, so this is the inference path as well as the training forward.
+    /// Logits `[batch, NUM_CLASSES]`. Dropout is inert on a plain backend, so this
+    /// is both the inference and training forward.
     pub fn forward(&self, technical: Tensor<B, 3>) -> Tensor<B, 2> {
         let temporal_1 = self.gru_1.forward(technical, None);
         let temporal_1 = self.gru_1_norm.forward(temporal_1);
         let temporal_2 = self.gru_2.forward(temporal_1, None);
 
-        // Summarize the window by its last hidden state: [batch, d_hidden].
+        // Last hidden state: [batch, d_hidden].
         let [batch, sequence, d_hidden] = temporal_2.dims();
         let summary = temporal_2
             .slice([0..batch, sequence - 1..sequence, 0..d_hidden])
