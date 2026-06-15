@@ -4,6 +4,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 import pandas as pd
+import polars as pl
 from burn_the_stock.downloader import (
     OTC_SUFFIX,
     TSE_SUFFIX,
@@ -77,6 +78,23 @@ def test_incremental_merge(tmp_path: Path) -> None:
         date(2026, 6, 11),
         date(2026, 6, 12),
     ]
+
+
+def test_incremental_merge_int_volume(tmp_path: Path) -> None:
+    """An existing CSV whose volume parses as Int64 still merges with new bars."""
+    path = tmp_path / "2330.csv"
+    path.write_text(
+        "date,code,open,high,low,close,volume\n2026-06-10,2330,1.0,2.0,0.5,1.5,100\n",
+    )
+    existing = read_symbol(path)
+    assert existing is not None
+    assert existing.schema["volume"] == pl.Int64
+
+    batch = _fake_batch("2330.TW", ["2026-06-11"])
+    merged = save_symbol(batch, "2330.TW", "2330", tmp_path, existing)
+    assert merged is not None
+    assert merged.schema["volume"] == pl.Int64
+    assert merged.get_column("date").to_list() == [date(2026, 6, 10), date(2026, 6, 11)]
 
 
 def test_save_symbol_no_new_keeps_existing(tmp_path: Path) -> None:

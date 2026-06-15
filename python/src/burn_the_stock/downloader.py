@@ -26,7 +26,17 @@ OTC_SUFFIX = ".TWO"
 
 SUFFIX_MARKET = {TSE_SUFFIX: "tse", OTC_SUFFIX: "otc"}
 
-COLUMNS = ["date", "code", "open", "high", "low", "close", "volume"]
+SCHEMA: dict[str, pl.DataType] = {
+    "date": pl.Date(),
+    "code": pl.String(),
+    "open": pl.Float64(),
+    "high": pl.Float64(),
+    "low": pl.Float64(),
+    "close": pl.Float64(),
+    "volume": pl.Int64(),
+}
+
+COLUMNS = list(SCHEMA)
 
 
 # --- Pydantic models ---
@@ -135,7 +145,11 @@ def to_long(data: pd.DataFrame, ticker: str, symbol: str) -> pl.DataFrame | None
     }
     arrays["date"] = df["date"].to_numpy().astype("datetime64[D]")
     return (
-        pl.DataFrame(arrays).with_columns(pl.lit(symbol).alias("code")).select(COLUMNS)
+        pl.DataFrame(arrays)
+        .with_columns(pl.lit(symbol).alias("code"))
+        .select(
+            pl.col(name).cast(dtype, strict=False) for name, dtype in SCHEMA.items()
+        )
     )
 
 
@@ -147,11 +161,10 @@ def read_symbol(path: Path) -> pl.DataFrame | None:
     """
     if not path.exists():
         return None
-    return pl.read_csv(
-        path,
-        try_parse_dates=True,
-        schema_overrides={"code": pl.String},
-    ).select(COLUMNS)
+    df = pl.read_csv(path, try_parse_dates=True, schema_overrides={"code": pl.String()})
+    return df.select(
+        pl.col(name).cast(dtype, strict=False) for name, dtype in SCHEMA.items()
+    )
 
 
 def save_symbol(

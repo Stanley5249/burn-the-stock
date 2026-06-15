@@ -27,10 +27,10 @@ def read_market(market_dir: Path, market: str) -> pl.LazyFrame:
     df = pl.scan_csv(
         market_dir,
         try_parse_dates=True,
-        schema_overrides=({"code": pl.String}),
+        schema_overrides={"code": pl.String, "volume": pl.Float64},
     )
 
-    return df.with_columns(market_col)
+    return df.with_columns(market_col, pl.col("volume").cast(pl.Int64, strict=False))
 
 
 def save_parquet(df: pl.DataFrame, output: Path) -> None:
@@ -60,9 +60,12 @@ def run(input_dir: Path, output: Path) -> None:
         input_dir: Root directory with tse/ and otc/ subdirectories.
         output: Destination parquet file path.
     """
-    tse = read_market(input_dir / "tse", "tse")
-    otc = read_market(input_dir / "otc", "otc")
-    save_parquet(pl.concat([tse, otc]).collect(), output)
+    frames = [
+        read_market(input_dir / market, market)
+        for market in ("tse", "otc")
+        if (input_dir / market).is_dir()
+    ]
+    save_parquet(pl.concat(frames).collect(), output)
 
 
 def parse_args() -> argparse.Namespace:
