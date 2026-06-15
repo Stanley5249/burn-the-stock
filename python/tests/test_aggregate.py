@@ -34,6 +34,8 @@ def test_read_market_single(tmp_path: Path) -> None:
 
     assert not df.is_empty()
     assert df.select(pl.col("market").eq("tse").all()).item() is True
+    assert df.schema["date"] == pl.Date
+    assert df.schema["volume"] == pl.Float64
 
 
 def test_run(tmp_path: Path) -> None:

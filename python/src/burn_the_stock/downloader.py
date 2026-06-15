@@ -13,6 +13,7 @@ from pydantic import BaseModel, TypeAdapter
 
 import burn_the_stock.aggregate
 import burn_the_stock.log
+from burn_the_stock.schema import SCHEMA
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -25,18 +26,6 @@ TSE_SUFFIX = ".TW"
 OTC_SUFFIX = ".TWO"
 
 SUFFIX_MARKET = {TSE_SUFFIX: "tse", OTC_SUFFIX: "otc"}
-
-SCHEMA: dict[str, pl.DataType] = {
-    "date": pl.Date(),
-    "code": pl.String(),
-    "open": pl.Float64(),
-    "high": pl.Float64(),
-    "low": pl.Float64(),
-    "close": pl.Float64(),
-    "volume": pl.Int64(),
-}
-
-COLUMNS = list(SCHEMA)
 
 
 # --- Pydantic models ---
@@ -120,12 +109,8 @@ def batch_download(
 def to_long(data: pd.DataFrame, ticker: str, symbol: str) -> pl.DataFrame | None:
     """Extract one ticker from a batch DataFrame as a long-form Polars frame.
 
-    Builds the frame from numpy arrays rather than pl.from_pandas, so no pyarrow
-    is needed. yfinance dates arrive at second resolution which Polars rejects,
-    so they are cast to day resolution to land directly on a Polars Date.
-
     Returns:
-        A frame with COLUMNS, or None when the ticker is absent or empty.
+        A frame with the OHLCV schema, or None when the ticker is absent or empty.
     """
     try:
         df = cast("pd.DataFrame", data[ticker]).dropna(how="all")
@@ -140,16 +125,19 @@ def to_long(data: pd.DataFrame, ticker: str, symbol: str) -> pl.DataFrame | None
     df.index.name = "date"
     df = df.reset_index()
     df.columns = [str(col).lower() for col in df.columns]
-    arrays = {
-        name: df[name].to_numpy() for name in ("open", "high", "low", "close", "volume")
-    }
-    arrays["date"] = df["date"].to_numpy().astype("datetime64[D]")
-    return (
-        pl.DataFrame(arrays)
-        .with_columns(pl.lit(symbol).alias("code"))
-        .select(
-            pl.col(name).cast(dtype, strict=False) for name, dtype in SCHEMA.items()
-        )
+    # Build from numpy rather than pl.from_pandas, which needs pyarrow for the
+    # tz-aware yfinance dates. Day resolution lands directly on a Polars Date.
+    return pl.DataFrame(
+        {
+            "date": df["date"].to_numpy().astype("datetime64[D]"),
+            "code": symbol,
+            "open": df["open"].to_numpy(),
+            "high": df["high"].to_numpy(),
+            "low": df["low"].to_numpy(),
+            "close": df["close"].to_numpy(),
+            "volume": df["volume"].to_numpy(),
+        },
+        schema=SCHEMA,
     )
 
 
@@ -157,14 +145,11 @@ def read_symbol(path: Path) -> pl.DataFrame | None:
     """Read a symbol's existing CSV, or None when it is absent.
 
     Returns:
-        The stored frame with COLUMNS, or None.
+        The stored frame with the OHLCV schema, or None.
     """
     if not path.exists():
         return None
-    df = pl.read_csv(path, try_parse_dates=True, schema_overrides={"code": pl.String()})
-    return df.select(
-        pl.col(name).cast(dtype, strict=False) for name, dtype in SCHEMA.items()
-    )
+    return pl.read_csv(path, schema_overrides=SCHEMA)
 
 
 def save_symbol(
@@ -406,6 +391,6 @@ if __name__ == "__main__":
         parquet = output / "stocks.parquet"
         if args.symbols is None and dataset is not None:
             # A full run already holds every symbol in memory, so skip re-reading.
-            burn_the_stock.aggregate.save_parquet(dataset, parquet)
+            burn_the_stock.aggregate.save_parquet(dataset.lazy(), parquet)
         else:
             burn_the_stock.aggregate.run(output, parquet)
