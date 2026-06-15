@@ -139,7 +139,7 @@ def test_fetch_updates_skips_current(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bucket already current through end is collected without downloading."""
+    """A symbol already current through end is collected without downloading."""
     calls: list[object] = []
     monkeypatch.setattr(downloader, "fetch_and_save", lambda *a: calls.append(a) or [])
 
@@ -157,7 +157,7 @@ def test_fetch_updates_fetches_stale(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stale bucket is fetched from the day after its last bar."""
+    """A stale symbol is fetched from the day after its last bar."""
     calls: list[tuple[object, ...]] = []
     monkeypatch.setattr(downloader, "fetch_and_save", lambda *a: calls.append(a) or [])
 
@@ -168,3 +168,20 @@ def test_fetch_updates_fetches_stale(
     group, _suffix, _dir, _existing, span = calls[0]
     assert group == ["2330"]
     assert span == {"start": "2024-01-03", "end": "2026-06-16"}
+
+
+def test_find_dead_flags_stale() -> None:
+    """A symbol far behind the freshest is dead; a recent or missing one is not."""
+    existing: dict[str, pl.DataFrame | None] = {
+        "2330": _one_bar(date(2026, 6, 15)),
+        "0058": _one_bar(date(2019, 1, 1)),
+        "9999": None,
+    }
+    assert downloader.find_dead(existing) == {"0058"}
+
+
+def test_dead_roundtrip(tmp_path: Path) -> None:
+    """save_dead then load_dead returns the same set; a missing file reads empty."""
+    assert downloader.load_dead(tmp_path) == set()
+    downloader.save_dead(tmp_path, {"0080", "3454"})
+    assert downloader.load_dead(tmp_path) == {"0080", "3454"}

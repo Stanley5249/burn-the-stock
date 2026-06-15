@@ -1,7 +1,9 @@
 """Download daily OHLCV for Taiwan stocks via yfinance, updating existing CSVs."""
 
 import argparse
+import json
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -26,6 +28,18 @@ TSE_SUFFIX = ".TW"
 OTC_SUFFIX = ".TWO"
 
 SUFFIX_MARKET = {TSE_SUFFIX: "tse", OTC_SUFFIX: "otc"}
+
+DEAD_FILE = "dead.json"
+DEAD_STALE_DAYS = 90
+
+
+@dataclass(frozen=True)
+class Window:
+    """A download date range: a yfinance period, or a start/end span."""
+
+    start: str
+    end: str | None
+    period: str | None
 
 
 # --- Pydantic models ---
@@ -241,6 +255,23 @@ def fetch_and_save(
     return merge_save(data, codes, suffix, output_dir, existing)
 
 
+def find_dead(existing: dict[str, pl.DataFrame | None]) -> set[str]:
+    """Codes whose last saved bar is far behind the freshest, treated as delisted.
+
+    Returns:
+        The stale code set, empty when nothing is stored.
+    """
+    last_dates = {
+        code: cast("date", frame.get_column("date").max())
+        for code, frame in existing.items()
+        if frame is not None
+    }
+    if not last_dates:
+        return set()
+    cutoff = max(last_dates.values()) - timedelta(days=DEAD_STALE_DAYS)
+    return {code for code, last in last_dates.items() if last < cutoff}
+
+
 def fetch_updates(
     update_codes: list[str],
     suffix: str,
@@ -251,7 +282,7 @@ def fetch_updates(
     """Collect symbols current through end from disk and fetch the rest in one batch.
 
     Returns:
-        The merged per-symbol frames, including current ones taken from disk.
+        The merged frames, including current ones taken from disk.
     """
     market = pl.lit(SUFFIX_MARKET[suffix]).cast(pl.Categorical).alias("market")
     frames: list[pl.DataFrame] = []
@@ -277,67 +308,114 @@ def fetch_updates(
     return frames
 
 
+def load_dead(output: Path) -> set[str]:
+    """Read the persisted set of symbols yfinance has no advancing data for.
+
+    Returns:
+        The dead-symbol set, empty when the file is absent.
+    """
+    path = output / DEAD_FILE
+    if not path.exists():
+        return set()
+    return set(json.loads(path.read_text()))
+
+
+def save_dead(output: Path, dead: set[str]) -> None:
+    """Persist the dead-symbol set as a sorted JSON list."""
+    path = output / DEAD_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(dead), indent=2))
+
+
+def fetch_market(
+    codes: list[str],
+    suffix: str,
+    output: Path,
+    window: Window,
+) -> tuple[list[pl.DataFrame], set[str]]:
+    """Fetch one market's live symbols and collect stale ones from disk.
+
+    Returns:
+        The merged frames and the new codes yfinance returned no data for.
+    """
+    market_name = SUFFIX_MARKET[suffix]
+    output_dir = output / market_name
+    existing = {code: read_symbol(output_dir / f"{code}.csv") for code in codes}
+    market = pl.lit(market_name).cast(pl.Categorical).alias("market")
+
+    dead = find_dead(existing)
+    frames: list[pl.DataFrame] = [
+        cast("pl.DataFrame", existing[code]).with_columns(market) for code in dead
+    ]
+    live = [code for code in codes if code not in dead]
+
+    if window.period is not None:
+        logger.info(
+            "batch downloading all count=%s period=%s", len(live), window.period,
+        )
+        span = {"period": window.period}
+        frames.extend(fetch_and_save(live, suffix, output_dir, existing, span))
+        logger.info("done market=%s", market_name)
+        return frames, set()
+
+    new_codes = [code for code in live if existing[code] is None]
+    update_codes = [code for code in live if existing[code] is not None]
+
+    if new_codes:
+        logger.info(
+            "batch downloading new count=%s from=%s", len(new_codes), window.start,
+        )
+        span = {"start": window.start, "end": window.end}
+        frames.extend(fetch_and_save(new_codes, suffix, output_dir, existing, span))
+
+    frames.extend(fetch_updates(update_codes, suffix, output_dir, existing, window.end))
+
+    missing = {code for code in new_codes if not (output_dir / f"{code}.csv").exists()}
+    logger.info(
+        "done market=%s new=%s updated=%s dead=%s",
+        market_name,
+        len(new_codes),
+        len(update_codes),
+        len(dead),
+    )
+    return frames, missing
+
+
 def run(
     symbols: list[str] | None,
-    start: str,
-    end: str | None,
-    period: str | None,
+    window: Window,
     output: Path,
 ) -> pl.DataFrame | None:
     """Download OHLCV for the given symbols, creating or updating CSVs.
 
-    New symbols are fetched from start; symbols with an existing CSV are fetched
-    only from the day after their latest saved bar. Each existing CSV is read
-    once and merged in memory, then the full combined dataset is returned for
-    in-memory aggregation. When symbols is None the full sim stock universe is
-    used.
+    New symbols are fetched from the window start; symbols with an existing CSV
+    are fetched only from the day after their latest saved bar. Symbols far behind
+    the freshest skip the network but still aggregate from disk, and symbols
+    yfinance never returns are recorded in dead.json and skipped thereafter.
 
     Returns:
-        The combined dataset across every processed symbol, or None when nothing
-        had data.
+        The combined dataset across every processed symbol, or None.
     """
+    dead = load_dead(output)
     if symbols is not None:
         tse_codes, otc_codes = classify_symbols(symbols)
     else:
         tse_codes, otc_codes = fetch_sim_symbols()
+    tse_codes = [code for code in tse_codes if code not in dead]
+    otc_codes = [code for code in otc_codes if code not in dead]
 
     collected: list[pl.DataFrame] = []
-
+    new_dead: set[str] = set()
     for codes, suffix in ((tse_codes, TSE_SUFFIX), (otc_codes, OTC_SUFFIX)):
         if not codes:
             continue
-        market_name = SUFFIX_MARKET[suffix]
-        output_dir = output / market_name
-        existing = {code: read_symbol(output_dir / f"{code}.csv") for code in codes}
+        frames, missing = fetch_market(codes, suffix, output, window)
+        collected.extend(frames)
+        new_dead.update(missing)
 
-        if period is not None:
-            logger.info("batch downloading all count=%s period=%s", len(codes), period)
-            collected.extend(
-                fetch_and_save(codes, suffix, output_dir, existing, {"period": period}),
-            )
-            logger.info("done market=%s", market_name)
-            continue
-
-        new_codes = [code for code in codes if existing[code] is None]
-        update_codes = [code for code in codes if existing[code] is not None]
-
-        if new_codes:
-            logger.info("batch downloading new count=%s from=%s", len(new_codes), start)
-            span = {"start": start, "end": end}
-            collected.extend(
-                fetch_and_save(new_codes, suffix, output_dir, existing, span),
-            )
-
-        collected.extend(
-            fetch_updates(update_codes, suffix, output_dir, existing, end),
-        )
-
-        logger.info(
-            "done market=%s new=%s updated=%s",
-            market_name,
-            len(new_codes),
-            len(update_codes),
-        )
+    if new_dead:
+        logger.info("marked dead count=%s", len(new_dead))
+        save_dead(output, dead | new_dead)
 
     if not collected:
         return None
@@ -407,8 +485,9 @@ if __name__ == "__main__":
 
     args = parse_args()
     end = None if args.period else args.to_date
+    window = Window(start=args.from_date, end=end, period=args.period)
     output = Path(args.output)
-    dataset = run(args.symbols, args.from_date, end, args.period, output)
+    dataset = run(args.symbols, window, output)
 
     if not args.no_aggregate:
         parquet = output / "stocks.parquet"
