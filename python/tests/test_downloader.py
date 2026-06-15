@@ -185,14 +185,14 @@ def test_fetch_updates_fetches_stale(
     assert span == {"start": "2024-01-03", "end": "2026-06-16"}
 
 
-def test_find_dead_flags_stale() -> None:
-    """A symbol far behind the freshest is dead; a recent or missing one is not."""
+def test_find_stale_flags_old() -> None:
+    """A symbol far behind the freshest is stale; a recent or missing one is not."""
     existing: dict[str, pl.DataFrame | None] = {
         "2330": _one_bar(date(2026, 6, 15)),
         "0058": _one_bar(date(2019, 1, 1)),
         "9999": None,
     }
-    assert downloader.find_dead(existing) == {"0058"}
+    assert downloader.find_stale(existing) == {"0058"}
 
 
 def test_dead_roundtrip(tmp_path: Path) -> None:

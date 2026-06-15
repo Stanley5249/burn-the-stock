@@ -261,7 +261,7 @@ def fetch_and_save(
     return merge_save(data, codes, suffix, output_dir, existing)
 
 
-def find_dead(existing: dict[str, pl.DataFrame | None]) -> set[str]:
+def find_stale(existing: dict[str, pl.DataFrame | None]) -> set[str]:
     """Codes whose last saved bar is far behind the freshest, treated as delisted.
 
     Returns:
@@ -349,11 +349,11 @@ def fetch_market(
     existing = {code: read_symbol(output_dir / f"{code}.csv") for code in codes}
     market = pl.lit(market_name).cast(pl.Categorical).alias("market")
 
-    dead = find_dead(existing)
+    stale = find_stale(existing)
     frames: list[pl.DataFrame] = [
-        cast("pl.DataFrame", existing[code]).with_columns(market) for code in dead
+        cast("pl.DataFrame", existing[code]).with_columns(market) for code in stale
     ]
-    live = [code for code in codes if code not in dead]
+    live = [code for code in codes if code not in stale]
 
     if window.period is not None:
         logger.info(
@@ -378,11 +378,11 @@ def fetch_market(
 
     missing = {code for code in new_codes if not (output_dir / f"{code}.csv").exists()}
     logger.info(
-        "done market=%s new=%s existing=%s dead=%s",
+        "done market=%s new=%s existing=%s stale=%s",
         market_name,
         len(new_codes),
         len(update_codes),
-        len(dead),
+        len(stale),
     )
     return frames, missing
 
