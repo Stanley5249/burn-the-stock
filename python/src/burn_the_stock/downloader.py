@@ -175,25 +175,24 @@ def save_symbol(
 ) -> pl.DataFrame | None:
     """Merge a ticker's new bars into its CSV and return the full frame.
 
-    New dates are appended to the pre-read existing frame and the complete frame
-    is returned so the caller can aggregate in memory without re-reading. When
-    the batch carries nothing new the existing frame is returned untouched, and
-    None means the symbol has no data anywhere.
+    The CSV is rewritten only when the fetch adds a date beyond the last stored
+    bar. Otherwise the existing frame is returned untouched, and None means the
+    symbol has no data anywhere.
 
     Returns:
         The complete per-symbol frame, or None when no data exists.
     """
     new = to_long(data, ticker, symbol)
-
     if new is None:
         return existing
     if existing is not None:
+        before_max = cast("date", existing.get_column("date").max())
+        if cast("date", new.get_column("date").max()) <= before_max:
+            return existing
         new = pl.concat([existing, new]).unique("date", keep="last").sort("date")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{symbol}.csv"
-    new.write_csv(path)
-    logger.info("saved ticker=%s bars=%s path=%s", ticker, len(new), path)
+    new.write_csv(output_dir / f"{symbol}.csv")
     return new
 
 
@@ -231,10 +230,17 @@ def merge_save(
     """
     market = pl.lit(SUFFIX_MARKET[suffix]).cast(pl.Categorical).alias("market")
     frames: list[pl.DataFrame] = []
+    saved = 0
     for code in codes:
-        frame = save_symbol(data, code + suffix, code, output_dir, existing[code])
-        if frame is not None:
-            frames.append(frame.with_columns(market))
+        before = existing[code]
+        frame = save_symbol(data, code + suffix, code, output_dir, before)
+        if frame is None:
+            continue
+        frames.append(frame.with_columns(market))
+        if frame is not before:
+            saved += 1
+    if saved:
+        logger.info("saved count=%s market=%s", saved, SUFFIX_MARKET[suffix])
     return frames
 
 
@@ -372,7 +378,7 @@ def fetch_market(
 
     missing = {code for code in new_codes if not (output_dir / f"{code}.csv").exists()}
     logger.info(
-        "done market=%s new=%s updated=%s dead=%s",
+        "done market=%s new=%s existing=%s dead=%s",
         market_name,
         len(new_codes),
         len(update_codes),

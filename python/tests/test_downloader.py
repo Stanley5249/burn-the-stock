@@ -120,6 +120,21 @@ def test_read_symbol_missing(tmp_path: Path) -> None:
     assert read_symbol(tmp_path / "9999.csv") is None
 
 
+def test_save_symbol_skips_write_without_new_dates(tmp_path: Path) -> None:
+    """A fetch adding no date beyond the last stored bar returns existing untouched."""
+    first = save_symbol(
+        _fake_batch("2330.TW", ["2026-06-10", "2026-06-11"]),
+        "2330.TW",
+        "2330",
+        tmp_path,
+        None,
+    )
+    assert first is not None
+
+    stale = _fake_batch("2330.TW", ["2026-06-11"])
+    assert save_symbol(stale, "2330.TW", "2330", tmp_path, first) is first
+
+
 def _one_bar(last: date) -> pl.DataFrame:
     return pl.DataFrame(
         {
