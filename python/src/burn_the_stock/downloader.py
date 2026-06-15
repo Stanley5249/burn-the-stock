@@ -241,6 +241,26 @@ def fetch_and_save(
     return merge_save(data, codes, suffix, output_dir, existing)
 
 
+def bucket_by_start(
+    codes: list[str],
+    existing: dict[str, pl.DataFrame | None],
+) -> dict[str, list[str]]:
+    """Group codes by the start date one day after each symbol's last saved bar.
+
+    Returns:
+        A mapping of ISO update-start date to the codes sharing it.
+    """
+    buckets: dict[str, list[str]] = {}
+    for code in codes:
+        frame = existing[code]
+        if frame is None:
+            continue
+        last = cast("date", frame.get_column("date").max())
+        update_start = (last + timedelta(days=1)).isoformat()
+        buckets.setdefault(update_start, []).append(code)
+    return buckets
+
+
 def run(
     symbols: list[str] | None,
     start: str,
@@ -292,21 +312,15 @@ def run(
                 fetch_and_save(new_codes, suffix, output_dir, existing, span),
             )
 
-        if update_codes:
-            last = min(
-                cast("date", frame.get_column("date").max())
-                for code in update_codes
-                if (frame := existing[code]) is not None
-            )
-            update_start = (last + timedelta(days=1)).isoformat()
+        for update_start, group in bucket_by_start(update_codes, existing).items():
             logger.info(
                 "batch downloading update count=%s from=%s",
-                len(update_codes),
+                len(group),
                 update_start,
             )
             span = {"start": update_start, "end": end}
             collected.extend(
-                fetch_and_save(update_codes, suffix, output_dir, existing, span),
+                fetch_and_save(group, suffix, output_dir, existing, span),
             )
 
         logger.info(
