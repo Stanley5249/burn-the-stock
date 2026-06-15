@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 import polars as pl
+from burn_the_stock import downloader
 from burn_the_stock.downloader import (
     OTC_SUFFIX,
     TSE_SUFFIX,
@@ -12,9 +13,12 @@ from burn_the_stock.downloader import (
     read_symbol,
     save_symbol,
 )
+from burn_the_stock.schema import SCHEMA
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 
 TEST_SYMBOLS = {
@@ -114,3 +118,53 @@ def test_save_symbol_no_new_keeps_existing(tmp_path: Path) -> None:
 def test_read_symbol_missing(tmp_path: Path) -> None:
     """read_symbol returns None when no CSV exists yet."""
     assert read_symbol(tmp_path / "9999.csv") is None
+
+
+def _one_bar(last: date) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "date": [last],
+            "code": ["2330"],
+            "open": [1.0],
+            "high": [2.0],
+            "low": [0.5],
+            "close": [1.5],
+            "volume": [100.0],
+        },
+        schema=SCHEMA,
+    )
+
+
+def test_fetch_updates_skips_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bucket already current through end is collected without downloading."""
+    calls: list[object] = []
+    monkeypatch.setattr(downloader, "fetch_and_save", lambda *a: calls.append(a) or [])
+
+    existing = {"2330": _one_bar(date(2026, 6, 15))}
+    frames = downloader.fetch_updates(
+        ["2330"], TSE_SUFFIX, tmp_path, existing, "2026-06-16",
+    )
+
+    assert calls == []
+    assert len(frames) == 1
+    assert "market" in frames[0].columns
+
+
+def test_fetch_updates_fetches_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale bucket is fetched from the day after its last bar."""
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(downloader, "fetch_and_save", lambda *a: calls.append(a) or [])
+
+    existing = {"2330": _one_bar(date(2024, 1, 2))}
+    downloader.fetch_updates(["2330"], TSE_SUFFIX, tmp_path, existing, "2026-06-16")
+
+    assert len(calls) == 1
+    group, _suffix, _dir, _existing, span = calls[0]
+    assert group == ["2330"]
+    assert span == {"start": "2024-01-03", "end": "2026-06-16"}

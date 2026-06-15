@@ -261,6 +261,38 @@ def bucket_by_start(
     return buckets
 
 
+def fetch_updates(
+    update_codes: list[str],
+    suffix: str,
+    output_dir: Path,
+    existing: dict[str, pl.DataFrame | None],
+    end: str | None,
+) -> list[pl.DataFrame]:
+    """Fetch each last-date bucket, skipping any already current through end.
+
+    Returns:
+        The merged per-symbol frames, including current ones taken from disk.
+    """
+    market = pl.lit(SUFFIX_MARKET[suffix]).cast(pl.Categorical).alias("market")
+    frames: list[pl.DataFrame] = []
+    for update_start, group in bucket_by_start(update_codes, existing).items():
+        if end is not None and update_start >= end:
+            logger.info("up to date count=%s from=%s", len(group), update_start)
+            frames.extend(
+                cast("pl.DataFrame", existing[code]).with_columns(market)
+                for code in group
+            )
+            continue
+        logger.info(
+            "batch downloading update count=%s from=%s",
+            len(group),
+            update_start,
+        )
+        span = {"start": update_start, "end": end}
+        frames.extend(fetch_and_save(group, suffix, output_dir, existing, span))
+    return frames
+
+
 def run(
     symbols: list[str] | None,
     start: str,
@@ -312,16 +344,9 @@ def run(
                 fetch_and_save(new_codes, suffix, output_dir, existing, span),
             )
 
-        for update_start, group in bucket_by_start(update_codes, existing).items():
-            logger.info(
-                "batch downloading update count=%s from=%s",
-                len(group),
-                update_start,
-            )
-            span = {"start": update_start, "end": end}
-            collected.extend(
-                fetch_and_save(group, suffix, output_dir, existing, span),
-            )
+        collected.extend(
+            fetch_updates(update_codes, suffix, output_dir, existing, end),
+        )
 
         logger.info(
             "done market=%s new=%s updated=%s",
