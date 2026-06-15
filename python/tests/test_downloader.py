@@ -143,7 +143,7 @@ def test_fetch_updates_skips_current(
     calls: list[object] = []
     monkeypatch.setattr(downloader, "fetch_and_save", lambda *a: calls.append(a) or [])
 
-    existing = {"2330": _one_bar(date(2026, 6, 15))}
+    existing: dict[str, pl.DataFrame | None] = {"2330": _one_bar(date(2026, 6, 15))}
     frames = downloader.fetch_updates(
         ["2330"], TSE_SUFFIX, tmp_path, existing, "2026-06-16",
     )
@@ -161,7 +161,7 @@ def test_fetch_updates_fetches_stale(
     calls: list[tuple[object, ...]] = []
     monkeypatch.setattr(downloader, "fetch_and_save", lambda *a: calls.append(a) or [])
 
-    existing = {"2330": _one_bar(date(2024, 1, 2))}
+    existing: dict[str, pl.DataFrame | None] = {"2330": _one_bar(date(2024, 1, 2))}
     downloader.fetch_updates(["2330"], TSE_SUFFIX, tmp_path, existing, "2026-06-16")
 
     assert len(calls) == 1

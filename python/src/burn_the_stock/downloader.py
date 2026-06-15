@@ -241,26 +241,6 @@ def fetch_and_save(
     return merge_save(data, codes, suffix, output_dir, existing)
 
 
-def bucket_by_start(
-    codes: list[str],
-    existing: dict[str, pl.DataFrame | None],
-) -> dict[str, list[str]]:
-    """Group codes by the start date one day after each symbol's last saved bar.
-
-    Returns:
-        A mapping of ISO update-start date to the codes sharing it.
-    """
-    buckets: dict[str, list[str]] = {}
-    for code in codes:
-        frame = existing[code]
-        if frame is None:
-            continue
-        last = cast("date", frame.get_column("date").max())
-        update_start = (last + timedelta(days=1)).isoformat()
-        buckets.setdefault(update_start, []).append(code)
-    return buckets
-
-
 def fetch_updates(
     update_codes: list[str],
     suffix: str,
@@ -268,28 +248,32 @@ def fetch_updates(
     existing: dict[str, pl.DataFrame | None],
     end: str | None,
 ) -> list[pl.DataFrame]:
-    """Fetch each last-date bucket, skipping any already current through end.
+    """Collect symbols current through end from disk and fetch the rest in one batch.
 
     Returns:
         The merged per-symbol frames, including current ones taken from disk.
     """
     market = pl.lit(SUFFIX_MARKET[suffix]).cast(pl.Categorical).alias("market")
     frames: list[pl.DataFrame] = []
-    for update_start, group in bucket_by_start(update_codes, existing).items():
-        if end is not None and update_start >= end:
-            logger.info("up to date count=%s from=%s", len(group), update_start)
-            frames.extend(
-                cast("pl.DataFrame", existing[code]).with_columns(market)
-                for code in group
-            )
+    stale: dict[str, str] = {}
+    for code in update_codes:
+        frame = existing[code]
+        if frame is None:
             continue
-        logger.info(
-            "batch downloading update count=%s from=%s",
-            len(group),
-            update_start,
-        )
-        span = {"start": update_start, "end": end}
-        frames.extend(fetch_and_save(group, suffix, output_dir, existing, span))
+        last = cast("date", frame.get_column("date").max())
+        update_start = (last + timedelta(days=1)).isoformat()
+        if end is not None and update_start >= end:
+            frames.append(frame.with_columns(market))
+        else:
+            stale[code] = update_start
+
+    if frames:
+        logger.info("up to date count=%s", len(frames))
+    if stale:
+        start = min(stale.values())
+        logger.info("batch downloading update count=%s from=%s", len(stale), start)
+        span = {"start": start, "end": end}
+        frames.extend(fetch_and_save(list(stale), suffix, output_dir, existing, span))
     return frames
 
 
