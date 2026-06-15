@@ -6,7 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
-import burn_the_stock.logging
+import burn_the_stock.log
 
 logger = logging.getLogger(__name__)
 
@@ -33,29 +33,36 @@ def read_market(market_dir: Path, market: str) -> pl.LazyFrame:
     return df.with_columns(market_col)
 
 
+def save_parquet(df: pl.DataFrame, output: Path) -> None:
+    """Sort by market, code, date and write a zstd-compressed parquet.
+
+    Args:
+        df: Combined OHLCV frame carrying a market column.
+        output: Destination parquet file path.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    df = df.sort(["market", "code", "date"])
+    df.write_parquet(output, compression="zstd")
+
+    size_mb = output.stat().st_size / 1024 / 1024
+    logger.info("done output=%s size_mb=%.1f rows=%s", output, size_mb, df.height)
+
+    print(df)
+
+
 def run(input_dir: Path, output: Path) -> None:
     """Aggregate per-stock CSVs from input_dir into a single parquet file.
 
-    Reads TSE and OTC subdirectories, combines them, sorts by market, code,
-    and date, then writes the result as zstd-compressed parquet.
+    Reads TSE and OTC subdirectories, combines them, and writes parquet.
 
     Args:
         input_dir: Root directory with tse/ and otc/ subdirectories.
         output: Destination parquet file path.
     """
-    output.parent.mkdir(parents=True, exist_ok=True)
-
     tse = read_market(input_dir / "tse", "tse")
     otc = read_market(input_dir / "otc", "otc")
-
-    df = pl.concat([tse, otc]).sort(["market", "code", "date"]).collect()
-
-    df.write_parquet(output, compression="zstd")
-
-    size_mb = output.stat().st_size / 1024 / 1024
-    logger.info("done output=%s size_mb=%.1f", output, size_mb)
-
-    print(df)
+    save_parquet(pl.concat([tse, otc]).collect(), output)
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,19 +71,22 @@ def parse_args() -> argparse.Namespace:
     Returns:
         Parsed argument namespace.
     """
-    parser = argparse.ArgumentParser(description="Aggregate stock CSVs into parquet")
+    parser = argparse.ArgumentParser(
+        description="Aggregate stock CSVs into parquet",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument("--input", required=True, metavar="DIR")
     parser.add_argument(
         "--output",
         default=None,
         metavar="FILE",
-        help="Output parquet file (default: INPUT/stocks.parquet)",
+        help="Output parquet file, defaults to INPUT/stocks.parquet",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    burn_the_stock.logging.setup()
+    burn_the_stock.log.setup()
     args = parse_args()
     input_path = Path(args.input)
     output_path = Path(args.output) if args.output else input_path / "stocks.parquet"

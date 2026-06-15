@@ -15,12 +15,7 @@ if TYPE_CHECKING:
 
 
 def lazy_preview(file_path: str, rows: int = 10) -> None:
-    """Print the first rows of a data file using a lazy scan.
-
-    Args:
-        file_path: Path to the file. Its extension picks the scanner, so it
-            must be ``.parquet``, ``.csv``, or ``.tsv``.
-        rows: Number of leading rows to print.
+    """Print the first rows of a parquet, CSV, or TSV file using a lazy scan.
 
     Raises:
         PolarsError: If the file cannot be scanned or collected.
@@ -39,7 +34,6 @@ def lazy_preview(file_path: str, rows: int = 10) -> None:
         sys.exit(1)
 
     try:
-        # Lazily scan, grab the first N rows, and collect into memory.
         frame = scanners[ext](file_path)
         print(frame.head(rows).collect())
     except PolarsError as error:
@@ -49,13 +43,16 @@ def lazy_preview(file_path: str, rows: int = 10) -> None:
 
 def main() -> None:
     """Parse command-line arguments and run the preview."""
-    parser = argparse.ArgumentParser(description="Preview data files lazily")
+    parser = argparse.ArgumentParser(
+        description="Preview data files lazily",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument("path_to_file", help="Path to the file to preview")
     parser.add_argument(
         "--rows",
         type=int,
         default=10,
-        help="Number of rows to preview (default: 10)",
+        help="Number of rows to preview",
     )
 
     args = parser.parse_args()

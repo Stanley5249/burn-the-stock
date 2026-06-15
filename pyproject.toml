@@ -9,6 +9,7 @@ dependencies = [
   "pandas>=3.0.3",
   "polars>=1.41.0",
   "pydantic>=2.13.4",
+  "python-dotenv>=1.2.2",
   "yfinance>=1.3.0",
 ]
 
@@ -33,7 +34,7 @@ select = ["ALL"]
 ignore = ["CPY", "T20"]
 
 [tool.ruff.lint.extend-per-file-ignores]
-"python/tests/**" = ["S101"]
+"python/tests/**" = ["S101", "PLR2004", "RUF069"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
