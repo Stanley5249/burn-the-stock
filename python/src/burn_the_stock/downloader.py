@@ -46,9 +46,6 @@ class Window:
     period: str | None
 
 
-# --- Pydantic models ---
-
-
 class StockEntry(BaseModel):
     """A single stock entry from the sim stock API."""
 
@@ -59,17 +56,8 @@ class StockEntry(BaseModel):
 _stock_list_adapter = TypeAdapter(dict[str, StockEntry])
 
 
-# --- Symbol fetching ---
-
-
 def fetch_sim_symbols() -> tuple[list[str], list[str]]:
-    """Fetch the sim stock universe and split into TSE and OTC code lists.
-
-    ESB stocks are skipped because yfinance does not carry emerging-board data.
-
-    Returns:
-        A tuple of (tse_codes, otc_codes).
-    """
+    """Fetch the sim stock universe split into TSE and OTC code lists."""
     response = httpx.get(SIM_STOCK_LIST_URL, timeout=30)
     response.raise_for_status()
     stock_list = _stock_list_adapter.validate_python(response.json())
@@ -93,9 +81,6 @@ def fetch_sim_symbols() -> tuple[list[str], list[str]]:
     return tse_codes, otc_codes
 
 
-# --- Batch download ---
-
-
 def batch_download(
     tickers: list[str],
     *,
@@ -103,11 +88,7 @@ def batch_download(
     end: str | None = None,
     period: str | None = None,
 ) -> pd.DataFrame:
-    """Download all tickers at once via yfinance.
-
-    Returns:
-        A MultiIndex DataFrame grouped by ticker.
-    """
+    """Download all tickers at once via yfinance, grouped by ticker."""
     span = {"period": period} if period else {"start": start, "end": end}
     return yf.download(
         tickers,
@@ -121,23 +102,15 @@ def batch_download(
     )
 
 
-# --- Saving ---
-
-
 def to_long(data: pd.DataFrame, ticker: str, symbol: str) -> pl.DataFrame | None:
-    """Extract one ticker from a batch DataFrame as a long-form Polars frame.
-
-    Returns:
-        A frame with the OHLCV schema, or None when the ticker is absent or empty.
-    """
+    """Extract one ticker from a batch frame as long-form, or None when empty."""
     try:
         df = cast("pd.DataFrame", data[ticker])
     except KeyError:
         logger.warning("skip ticker=%s: not in batch result", ticker)
         return None
 
-    # Build from numpy rather than pl.from_pandas, which needs pyarrow for the
-    # tz-aware yfinance dates. Day resolution lands directly on a Polars Date.
+    # numpy avoids the pyarrow pl.from_pandas needs for tz-aware yfinance dates.
     frame = pl.DataFrame(
         {
             "date": df.index.to_numpy().astype("datetime64[D]"),
@@ -158,11 +131,7 @@ def to_long(data: pd.DataFrame, ticker: str, symbol: str) -> pl.DataFrame | None
 
 
 def read_symbol(path: Path) -> pl.DataFrame | None:
-    """Read a symbol's existing CSV, or None when it is absent.
-
-    Returns:
-        The stored frame with the OHLCV schema, or None.
-    """
+    """Read a symbol's existing CSV, or None when it is absent."""
     if not path.exists():
         return None
     return pl.read_csv(path, schema_overrides=SCHEMA)
@@ -175,15 +144,7 @@ def save_symbol(
     output_dir: Path,
     existing: pl.DataFrame | None,
 ) -> pl.DataFrame | None:
-    """Merge a ticker's new bars into its CSV and return the full frame.
-
-    The CSV is rewritten only when the merge actually changes a row, so a refetch
-    that fills a hole or revises a value writes even without a newer date. None
-    means the symbol has no data anywhere.
-
-    Returns:
-        The complete per-symbol frame, or None when no data exists.
-    """
+    """Merge a ticker's new bars into its CSV, rewriting only when a row changes."""
     new = to_long(data, ticker, symbol)
     if new is None:
         return existing
@@ -198,15 +159,8 @@ def save_symbol(
     return new
 
 
-# --- Orchestration ---
-
-
 def classify_symbols(symbols: list[str]) -> tuple[list[str], list[str]]:
-    """Split requested symbols into TSE and OTC by the sim stock universe.
-
-    Returns:
-        A tuple of (tse_codes, otc_codes); unknown or ESB symbols are dropped.
-    """
+    """Split requested symbols into TSE and OTC, dropping unknown or ESB codes."""
     all_tse, all_otc = fetch_sim_symbols()
     tse_set = set(all_tse)
     otc_set = set(all_otc)
@@ -225,11 +179,7 @@ def merge_save(
     output_dir: Path,
     existing: dict[str, pl.DataFrame | None],
 ) -> list[pl.DataFrame]:
-    """Save each code's slice, tagging the merged frames with their market.
-
-    Returns:
-        The merged per-symbol frames that had data.
-    """
+    """Save each code's slice, tagging the merged frames with their market."""
     market = pl.lit(SUFFIX_MARKET[suffix]).cast(pl.Categorical).alias("market")
     frames: list[pl.DataFrame] = []
     saved = 0
@@ -253,22 +203,14 @@ def fetch_and_save(
     existing: dict[str, pl.DataFrame | None],
     span: Mapping[str, str | None],
 ) -> list[pl.DataFrame]:
-    """Download one date span for the codes and merge each into its CSV.
-
-    Returns:
-        The merged per-symbol frames that had data.
-    """
+    """Download one date span for the codes and merge each into its CSV."""
     tickers = [code + suffix for code in codes]
     data = batch_download(tickers, **span)
     return merge_save(data, codes, suffix, output_dir, existing)
 
 
 def find_stale(existing: dict[str, pl.DataFrame | None]) -> set[str]:
-    """Codes whose last saved bar is far behind the freshest, treated as delisted.
-
-    Returns:
-        The stale code set, empty when nothing is stored.
-    """
+    """Codes whose last saved bar is far behind the freshest, treated as delisted."""
     last_dates = {
         code: cast("date", frame.get_column("date").max())
         for code, frame in existing.items()
@@ -287,11 +229,7 @@ def fetch_updates(
     existing: dict[str, pl.DataFrame | None],
     end: str | None,
 ) -> list[pl.DataFrame]:
-    """Collect symbols current through end from disk and fetch the rest in one batch.
-
-    Returns:
-        The merged frames, including current ones taken from disk.
-    """
+    """Collect symbols current through end from disk and fetch the rest in one batch."""
     market = pl.lit(SUFFIX_MARKET[suffix]).cast(pl.Categorical).alias("market")
     frames: list[pl.DataFrame] = []
     stale: dict[str, str] = {}
@@ -311,7 +249,10 @@ def fetch_updates(
     if stale:
         start = min(stale.values())
         logger.info(
-            "batch downloading update count=%s from=%s to=%s", len(stale), start, end,
+            "batch downloading update count=%s from=%s to=%s",
+            len(stale),
+            start,
+            end,
         )
         span = {"start": start, "end": end}
         frames.extend(fetch_and_save(list(stale), suffix, output_dir, existing, span))
@@ -319,11 +260,7 @@ def fetch_updates(
 
 
 def load_dead(output: Path) -> set[str]:
-    """Read the persisted set of symbols yfinance has no advancing data for.
-
-    Returns:
-        The dead-symbol set, empty when the file is absent.
-    """
+    """Read the persisted set of symbols yfinance has no advancing data for."""
     path = output / DEAD_FILE
     if not path.exists():
         return set()
@@ -345,11 +282,7 @@ def fetch_market(
     *,
     force: bool,
 ) -> tuple[list[pl.DataFrame], set[str]]:
-    """Fetch one market's live symbols and collect stale ones from disk.
-
-    Returns:
-        The merged frames and the new codes yfinance returned no data for.
-    """
+    """Fetch one market's live symbols and collect stale ones from disk."""
     market_name = SUFFIX_MARKET[suffix]
     output_dir = output / market_name
     existing = {code: read_symbol(output_dir / f"{code}.csv") for code in codes}
@@ -375,7 +308,9 @@ def fetch_market(
 
     if window.period is not None:
         logger.info(
-            "batch downloading all count=%s period=%s", len(live), window.period,
+            "batch downloading all count=%s period=%s",
+            len(live),
+            window.period,
         )
         span = {"period": window.period}
         frames.extend(fetch_and_save(live, suffix, output_dir, existing, span))
@@ -387,7 +322,9 @@ def fetch_market(
 
     if new_codes:
         logger.info(
-            "batch downloading new count=%s from=%s", len(new_codes), window.start,
+            "batch downloading new count=%s from=%s",
+            len(new_codes),
+            window.start,
         )
         span = {"start": window.start, "end": window.end}
         frames.extend(fetch_and_save(new_codes, suffix, output_dir, existing, span))
@@ -414,14 +351,9 @@ def run(
 ) -> pl.DataFrame | None:
     """Download OHLCV for the given symbols, creating or updating CSVs.
 
-    New symbols are fetched from the window start; symbols with an existing CSV
-    are fetched only from the day after their latest saved bar. Symbols far behind
-    the freshest skip the network but still aggregate from disk, and symbols
-    yfinance never returns are recorded in dead.json and skipped thereafter. With
-    force, every symbol is re-fetched over the full window and overwritten.
-
-    Returns:
-        The combined dataset across every processed symbol, or None.
+    New symbols fetch from the window start, existing ones from the day after
+    their latest bar. Stale symbols aggregate from disk without fetching, and
+    symbols yfinance never returns go to dead.json. Force re-fetches everything.
     """
     dead = load_dead(output)
     if symbols is not None:
@@ -452,15 +384,8 @@ def run(
     return dataset
 
 
-# --- CLI ---
-
-
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for the downloader script.
-
-    Returns:
-        Parsed argument namespace.
-    """
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Download daily OHLCV via yfinance, updating existing CSVs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

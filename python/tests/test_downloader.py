@@ -223,7 +223,11 @@ def test_fetch_updates_skips_current(
 
     existing: dict[str, pl.DataFrame | None] = {"2330": _one_bar(date(2026, 6, 15))}
     frames = downloader.fetch_updates(
-        ["2330"], TSE_SUFFIX, tmp_path, existing, "2026-06-16",
+        ["2330"],
+        TSE_SUFFIX,
+        tmp_path,
+        existing,
+        "2026-06-16",
     )
 
     assert calls == []

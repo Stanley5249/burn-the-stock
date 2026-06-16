@@ -35,11 +35,7 @@ class Quote(BaseModel):
 
     @classmethod
     def from_fugle(cls, symbol: str, raw: dict[str, Any]) -> Quote:
-        """Build a Quote from a Fugle intraday/quote response body.
-
-        Returns:
-            The parsed Quote.
-        """
+        """Build a Quote from a Fugle intraday/quote response body."""
         bids = raw.get("bids") or []
         asks = raw.get("asks") or []
         return cls(
@@ -61,11 +57,7 @@ async def fetch_quote(
     client: httpx.AsyncClient,
     symbol: str,
 ) -> Quote | None:
-    """Fetch one symbol's quote, returning None on any HTTP error.
-
-    Returns:
-        The Quote, or None when the request fails.
-    """
+    """Fetch one symbol's quote, returning None on any HTTP error."""
     try:
         response = await client.get(f"{FUGLE_QUOTE_URL}/{symbol}", timeout=10)
         response.raise_for_status()
@@ -76,11 +68,7 @@ async def fetch_quote(
 
 
 async def fetch_all(symbols: list[str], api_key: str) -> dict[str, Quote]:
-    """Fetch all symbols concurrently.
-
-    Returns:
-        A mapping of symbol to Quote, skipping any that failed.
-    """
+    """Fetch all symbols concurrently, skipping any that failed."""
     headers = {"X-API-KEY": api_key}
     async with httpx.AsyncClient(headers=headers) as client:
         quotes = await asyncio.gather(*[fetch_quote(client, s) for s in symbols])
@@ -88,11 +76,7 @@ async def fetch_all(symbols: list[str], api_key: str) -> dict[str, Quote]:
 
 
 def get_quotes(symbols: list[str], api_key: str | None = None) -> dict[str, Quote]:
-    """Fetch quotes for symbols, reading FUGLE_API_KEY from the env if needed.
-
-    Returns:
-        A mapping of symbol to Quote.
-    """
+    """Fetch quotes, reading FUGLE_API_KEY from the env when not given."""
     if api_key is None:
         load_dotenv()
         api_key = os.environ["FUGLE_API_KEY"]
@@ -100,11 +84,7 @@ def get_quotes(symbols: list[str], api_key: str | None = None) -> dict[str, Quot
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for the quotes script.
-
-    Returns:
-        Parsed argument namespace.
-    """
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Fetch live Fugle quotes",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

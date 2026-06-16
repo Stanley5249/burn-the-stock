@@ -31,7 +31,7 @@ preview = true
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["CPY", "T20"]
+ignore = ["CPY", "T20", "DOC201"]
 
 [tool.ruff.lint.extend-per-file-ignores]
 "python/tests/**" = ["S101", "PLR2004", "RUF069"]

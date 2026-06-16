@@ -16,11 +16,7 @@ PRICE_COLUMNS = ["open", "high", "low", "close"]
 
 
 def read_market(market_dir: Path, market: str) -> pl.LazyFrame:
-    """Lazily scan a market dir's CSVs and tag them with the market column.
-
-    Returns:
-        A lazy frame of the dir's bars carrying a categorical market column.
-    """
+    """Lazily scan a market dir's CSVs, tagged with the market column."""
     market_col = pl.lit(market).cast(pl.Categorical).alias("market")
     return pl.scan_csv(market_dir, schema_overrides=SCHEMA).with_columns(market_col)
 
@@ -46,11 +42,7 @@ def run(input_dir: Path, output: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for the aggregator script.
-
-    Returns:
-        Parsed argument namespace.
-    """
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Aggregate stock CSVs into parquet",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
