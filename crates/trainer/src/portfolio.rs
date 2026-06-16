@@ -6,7 +6,7 @@
 //! 1,000-share lots, buys at the day's low and sells at the high (snapped to a legal
 //! tick in range), 0.1425% commission per side, 0.3% sell-only tax.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDate;
 use stock_model::inference::Action;
@@ -234,9 +234,9 @@ fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
     shares
 }
 
-/// Run the simulation over `days` (ascending). Each day: sell Sell-flagged holdings
-/// (and all on the final day), buy the strongest above-threshold names into open
-/// slots, then mark to the closes.
+/// Run the simulation over `days` (ascending). Each day: run the exit ladder (barriers,
+/// the time stop, a model Sell, then a rotation out of the daily top-k), buy the
+/// strongest above-threshold names into open slots, then mark to the closes.
 pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     let mut ledger = Ledger {
         cash: config.starting_cash,
@@ -283,14 +283,32 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     )
 }
 
+/// The day's target book: the strongest above-threshold tickers, capped at
+/// `max_holdings`, ranked exactly as [`buy_phase`] ranks its candidates.
+fn target_tickers<'a>(day: &'a TradingDay, config: &BacktestConfig) -> HashSet<&'a str> {
+    let mut ranked: Vec<(&String, f32)> = day
+        .bars
+        .iter()
+        .filter(|(_, bar)| bar.score > config.threshold)
+        .map(|(ticker, bar)| (ticker, bar.score))
+        .collect();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    ranked
+        .into_iter()
+        .take(config.max_holdings)
+        .map(|(ticker, _)| ticker.as_str())
+        .collect()
+}
+
 /// Exit price and reason for a holding today, or `None` to keep holding. Take-profit
-/// wins a both-touch bar; then stop-loss, the time barrier, a model Sell, and finally
-/// the forced liquidation on the last day.
+/// wins a both-touch bar; then stop-loss, the time barrier, a model Sell, the forced
+/// liquidation on the last day, and finally a rotation out of the daily top-k.
 fn exit_decision(
     holding: &Holding,
     bar: Option<&DayBar>,
     index: usize,
     is_last: bool,
+    in_target: bool,
     config: &BacktestConfig,
 ) -> Option<(f64, &'static str)> {
     let Some(bar) = bar else {
@@ -311,6 +329,9 @@ fn exit_decision(
         Some((sell_price(bar, config.fill), "signal"))
     } else if is_last {
         Some((sell_price(bar, config.fill), "final"))
+    } else if !in_target {
+        // Outranked by stronger names today, so free the slot for them.
+        Some((sell_price(bar, config.fill), "rotate"))
     } else {
         None
     }
@@ -324,12 +345,21 @@ fn sell_phase(
     config: &BacktestConfig,
     ledger: &mut Ledger,
 ) {
+    let target = target_tickers(day, config);
     let exits: Vec<(String, f64, &'static str)> = ledger
         .holdings
         .iter()
         .filter_map(|(ticker, holding)| {
-            exit_decision(holding, day.bars.get(ticker), index, is_last, config)
-                .map(|(price, reason)| (ticker.clone(), price, reason))
+            let in_target = target.contains(ticker.as_str());
+            exit_decision(
+                holding,
+                day.bars.get(ticker),
+                index,
+                is_last,
+                in_target,
+                config,
+            )
+            .map(|(price, reason)| (ticker.clone(), price, reason))
         })
         .collect();
 
@@ -553,15 +583,16 @@ fn format_ntd(value: f64) -> String {
 }
 
 /// Count trades by exit reason, e.g.
-/// `take-profit 12 / stop-loss 9 / time 5 / signal 2 / final 1`.
+/// `take-profit 12 / stop-loss 9 / time 5 / signal 2 / rotate 4 / final 1`.
 fn exit_tally(trades: &[Trade]) -> String {
     let count = |reason| trades.iter().filter(|t| t.exit_reason == reason).count();
     format!(
-        "take-profit {} / stop-loss {} / time {} / signal {} / final {}",
+        "take-profit {} / stop-loss {} / time {} / signal {} / rotate {} / final {}",
         count("take_profit"),
         count("stop_loss"),
         count("time"),
         count("signal"),
+        count("rotate"),
         count("final"),
     )
 }
@@ -785,6 +816,39 @@ mod tests {
 
         assert_eq!(report.trade_count, 0);
         assert!((report.final_equity - 1_000_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn outranked_holding_rotates_out() {
+        // One slot: buy A day 1, then B outranks A day 2, so A rotates out for B.
+        let mut day1 = TradingDay {
+            date: date(1),
+            bars: HashMap::new(),
+        };
+        day1.bars
+            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 10.0, 10.0));
+        let mut day2 = TradingDay {
+            date: date(2),
+            bars: HashMap::new(),
+        };
+        day2.bars
+            .insert("A".to_string(), bar(0.2, Action::Hold, 11.0, 12.0, 11.0));
+        day2.bars
+            .insert("B".to_string(), bar(0.9, Action::Buy, 50.0, 51.0, 50.0));
+        let day3 = TradingDay {
+            date: date(3),
+            bars: HashMap::new(),
+        };
+
+        let report = run(&[day1, day2, day3], &config(1_000_000.0, 1));
+
+        let rotated = report
+            .trades
+            .iter()
+            .find(|trade| trade.exit_reason == "rotate")
+            .expect("A should rotate out");
+        assert_eq!(rotated.ticker, "A");
+        assert!((rotated.exit_price - 12.0).abs() < 1e-9);
     }
 
     fn barrier_config(take_profit: f64, stop_loss: f64, max_hold_days: usize) -> BacktestConfig {
