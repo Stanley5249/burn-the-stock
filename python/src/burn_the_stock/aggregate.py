@@ -12,6 +12,7 @@ from burn_the_stock.schema import SCHEMA
 logger = logging.getLogger(__name__)
 
 SORT_KEY = ["market", "code", "date"]
+PRICE_COLUMNS = ["open", "high", "low", "close"]
 
 
 def read_market(market_dir: Path, market: str) -> pl.LazyFrame:
@@ -25,9 +26,10 @@ def read_market(market_dir: Path, market: str) -> pl.LazyFrame:
 
 
 def save_parquet(frame: pl.LazyFrame, output: Path) -> None:
-    """Sort by market, code, date and stream to a zstd-compressed parquet."""
+    """Drop NaN-price rows, sort, and stream to a zstd-compressed parquet."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    frame.sort(SORT_KEY).sink_parquet(output, compression="zstd")
+    clean = frame.filter(pl.all_horizontal(pl.col(PRICE_COLUMNS).is_not_nan()))
+    clean.sort(SORT_KEY).sink_parquet(output, compression="zstd")
 
     size_mb = output.stat().st_size / 1024 / 1024
     logger.info("done output=%s size_mb=%.1f", output, size_mb)

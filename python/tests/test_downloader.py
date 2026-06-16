@@ -135,6 +135,69 @@ def test_save_symbol_skips_write_without_new_dates(tmp_path: Path) -> None:
     assert save_symbol(stale, "2330.TW", "2330", tmp_path, first) is first
 
 
+def test_save_symbol_drops_nan_price_bar(tmp_path: Path) -> None:
+    """A fetched bar with NaN prices is dropped before the CSV is written."""
+    ticker = "2330.TW"
+    batch = _fake_batch(ticker, ["2026-06-10", "2026-06-11"])
+    batch.loc[pd.Timestamp("2026-06-11"), (ticker, "Close")] = float("nan")
+
+    saved = save_symbol(batch, ticker, "2330", tmp_path, None)
+    assert saved is not None
+    assert saved.get_column("date").to_list() == [date(2026, 6, 10)]
+
+
+def test_read_symbol_keeps_raw_nan(tmp_path: Path) -> None:
+    """read_symbol returns stored rows verbatim, including a NaN-price bar."""
+    path = tmp_path / "2330.csv"
+    path.write_text(
+        "date,code,open,high,low,close,volume\n"
+        "2026-06-12,2330,1.0,2.0,0.5,1.5,100.0\n"
+        "2026-06-15,2330,NaN,NaN,NaN,NaN,371330.0\n",
+    )
+    existing = read_symbol(path)
+    assert existing is not None
+    assert existing.get_column("date").to_list() == [
+        date(2026, 6, 12),
+        date(2026, 6, 15),
+    ]
+
+
+def test_save_symbol_fills_hole(tmp_path: Path) -> None:
+    """A refetch with an earlier max still merges, filling an interior gap."""
+    existing = save_symbol(
+        _fake_batch("2330.TW", ["2026-06-12", "2026-06-16"]),
+        "2330.TW",
+        "2330",
+        tmp_path,
+        None,
+    )
+    assert existing is not None
+    assert date(2026, 6, 15) not in existing.get_column("date").to_list()
+
+    refetch = _fake_batch("2330.TW", ["2026-06-15"])
+    filled = save_symbol(refetch, "2330.TW", "2330", tmp_path, existing)
+    assert filled is not None
+    assert filled.get_column("date").to_list() == [
+        date(2026, 6, 12),
+        date(2026, 6, 15),
+        date(2026, 6, 16),
+    ]
+
+
+def test_save_symbol_skips_when_unchanged(tmp_path: Path) -> None:
+    """A refetch of identical bars rewrites nothing and returns the existing frame."""
+    existing = save_symbol(
+        _fake_batch("2330.TW", ["2026-06-10", "2026-06-11"]),
+        "2330.TW",
+        "2330",
+        tmp_path,
+        None,
+    )
+    assert existing is not None
+    same = _fake_batch("2330.TW", ["2026-06-10", "2026-06-11"])
+    assert save_symbol(same, "2330.TW", "2330", tmp_path, existing) is existing
+
+
 def _one_bar(last: date) -> pl.DataFrame:
     return pl.DataFrame(
         {

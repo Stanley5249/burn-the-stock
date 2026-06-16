@@ -58,3 +58,19 @@ def test_run(tmp_path: Path) -> None:
     assert set(df.columns) == expected
 
     assert not df.is_empty()
+
+
+def test_run_drops_nan_price_rows(tmp_path: Path) -> None:
+    """A stored NaN-price bar is filtered out of the aggregated parquet."""
+    tse_dir = tmp_path / "tse"
+    tse_dir.mkdir()
+    (tse_dir / "2330.csv").write_text(
+        _CSV_CONTENT + "2024-01-04,2330,NaN,NaN,NaN,NaN,9000000.0\n",
+    )
+
+    output = tmp_path / "stocks.parquet"
+    run(tmp_path, output)
+
+    df = pl.read_parquet(output)
+    assert df.height == 2
+    assert df.select(pl.col("close").is_not_nan().all()).item() is True

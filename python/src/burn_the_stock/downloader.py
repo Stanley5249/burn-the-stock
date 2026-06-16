@@ -18,6 +18,8 @@ import burn_the_stock.log
 from burn_the_stock.schema import SCHEMA
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,8 @@ SUFFIX_MARKET = {TSE_SUFFIX: "tse", OTC_SUFFIX: "otc"}
 
 DEAD_FILE = "dead.json"
 DEAD_STALE_DAYS = 90
+
+PRICE_COLUMNS = ["open", "high", "low", "close"]
 
 
 @dataclass(frozen=True)
@@ -127,32 +131,30 @@ def to_long(data: pd.DataFrame, ticker: str, symbol: str) -> pl.DataFrame | None
         A frame with the OHLCV schema, or None when the ticker is absent or empty.
     """
     try:
-        df = cast("pd.DataFrame", data[ticker]).dropna(how="all")
+        df = cast("pd.DataFrame", data[ticker])
     except KeyError:
         logger.warning("skip ticker=%s: not in batch result", ticker)
         return None
 
-    if df.empty:
-        logger.warning("skip ticker=%s: no data", ticker)
-        return None
-
-    df.index.name = "date"
-    df = df.reset_index()
-    df.columns = [str(col).lower() for col in df.columns]
     # Build from numpy rather than pl.from_pandas, which needs pyarrow for the
     # tz-aware yfinance dates. Day resolution lands directly on a Polars Date.
-    return pl.DataFrame(
+    frame = pl.DataFrame(
         {
-            "date": df["date"].to_numpy().astype("datetime64[D]"),
+            "date": df.index.to_numpy().astype("datetime64[D]"),
             "code": symbol,
-            "open": df["open"].to_numpy(),
-            "high": df["high"].to_numpy(),
-            "low": df["low"].to_numpy(),
-            "close": df["close"].to_numpy(),
-            "volume": df["volume"].to_numpy(),
+            "open": df["Open"].to_numpy(),
+            "high": df["High"].to_numpy(),
+            "low": df["Low"].to_numpy(),
+            "close": df["Close"].to_numpy(),
+            "volume": df["Volume"].to_numpy(),
         },
         schema=SCHEMA,
-    )
+    ).filter(pl.all_horizontal(pl.col(PRICE_COLUMNS).is_not_nan()))
+
+    if frame.is_empty():
+        logger.warning("skip ticker=%s: no data", ticker)
+        return None
+    return frame
 
 
 def read_symbol(path: Path) -> pl.DataFrame | None:
@@ -175,9 +177,9 @@ def save_symbol(
 ) -> pl.DataFrame | None:
     """Merge a ticker's new bars into its CSV and return the full frame.
 
-    The CSV is rewritten only when the fetch adds a date beyond the last stored
-    bar. Otherwise the existing frame is returned untouched, and None means the
-    symbol has no data anywhere.
+    The CSV is rewritten only when the merge actually changes a row, so a refetch
+    that fills a hole or revises a value writes even without a newer date. None
+    means the symbol has no data anywhere.
 
     Returns:
         The complete per-symbol frame, or None when no data exists.
@@ -186,10 +188,10 @@ def save_symbol(
     if new is None:
         return existing
     if existing is not None:
-        before_max = cast("date", existing.get_column("date").max())
-        if cast("date", new.get_column("date").max()) <= before_max:
+        merged = pl.concat([existing, new]).unique("date", keep="last").sort("date")
+        if merged.equals(existing):
             return existing
-        new = pl.concat([existing, new]).unique("date", keep="last").sort("date")
+        new = merged
 
     output_dir.mkdir(parents=True, exist_ok=True)
     new.write_csv(output_dir / f"{symbol}.csv")
@@ -249,7 +251,7 @@ def fetch_and_save(
     suffix: str,
     output_dir: Path,
     existing: dict[str, pl.DataFrame | None],
-    span: dict[str, str | None],
+    span: Mapping[str, str | None],
 ) -> list[pl.DataFrame]:
     """Download one date span for the codes and merge each into its CSV.
 
@@ -308,7 +310,9 @@ def fetch_updates(
         logger.info("up to date count=%s", len(frames))
     if stale:
         start = min(stale.values())
-        logger.info("batch downloading update count=%s from=%s", len(stale), start)
+        logger.info(
+            "batch downloading update count=%s from=%s to=%s", len(stale), start, end,
+        )
         span = {"start": start, "end": end}
         frames.extend(fetch_and_save(list(stale), suffix, output_dir, existing, span))
     return frames
@@ -338,6 +342,8 @@ def fetch_market(
     suffix: str,
     output: Path,
     window: Window,
+    *,
+    force: bool,
 ) -> tuple[list[pl.DataFrame], set[str]]:
     """Fetch one market's live symbols and collect stale ones from disk.
 
@@ -348,6 +354,18 @@ def fetch_market(
     output_dir = output / market_name
     existing = {code: read_symbol(output_dir / f"{code}.csv") for code in codes}
     market = pl.lit(market_name).cast(pl.Categorical).alias("market")
+
+    if force:
+        logger.info(
+            "force re-fetch count=%s from=%s to=%s",
+            len(codes),
+            window.start,
+            window.end,
+        )
+        span = {"start": window.start, "end": window.end}
+        frames = fetch_and_save(codes, suffix, output_dir, existing, span)
+        logger.info("done market=%s forced=%s", market_name, len(codes))
+        return frames, set()
 
     stale = find_stale(existing)
     frames: list[pl.DataFrame] = [
@@ -391,13 +409,16 @@ def run(
     symbols: list[str] | None,
     window: Window,
     output: Path,
+    *,
+    force: bool,
 ) -> pl.DataFrame | None:
     """Download OHLCV for the given symbols, creating or updating CSVs.
 
     New symbols are fetched from the window start; symbols with an existing CSV
     are fetched only from the day after their latest saved bar. Symbols far behind
     the freshest skip the network but still aggregate from disk, and symbols
-    yfinance never returns are recorded in dead.json and skipped thereafter.
+    yfinance never returns are recorded in dead.json and skipped thereafter. With
+    force, every symbol is re-fetched over the full window and overwritten.
 
     Returns:
         The combined dataset across every processed symbol, or None.
@@ -415,7 +436,7 @@ def run(
     for codes, suffix in ((tse_codes, TSE_SUFFIX), (otc_codes, OTC_SUFFIX)):
         if not codes:
             continue
-        frames, missing = fetch_market(codes, suffix, output, window)
+        frames, missing = fetch_market(codes, suffix, output, window, force=force)
         collected.extend(frames)
         new_dead.update(missing)
 
@@ -425,7 +446,10 @@ def run(
 
     if not collected:
         return None
-    return pl.concat(collected).sort(["market", "code", "date"])
+    dataset = pl.concat(collected).sort(["market", "code", "date"])
+    latest = cast("date", dataset.get_column("date").max())
+    logger.info("latest bar=%s symbols=%s", latest.isoformat(), len(collected))
+    return dataset
 
 
 # --- CLI ---
@@ -470,13 +494,18 @@ def parse_args() -> argparse.Namespace:
         dest="to_date",
         default=datetime.now().astimezone().date().isoformat(),
         metavar="YYYY-MM-DD",
-        help="End date exclusive; ignored when --period is set",
+        help="End date inclusive; ignored when --period is set",
     )
     parser.add_argument(
         "--output",
         default="data/yfinance",
         metavar="DIR",
         help="Output root directory holding tse/ and otc/",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-fetch the full --from..--to window and overwrite existing bars",
     )
     parser.add_argument(
         "--no-aggregate",
@@ -490,10 +519,13 @@ if __name__ == "__main__":
     burn_the_stock.log.setup()
 
     args = parse_args()
-    end = None if args.period else args.to_date
+    end = None
+    if not args.period:
+        to_date = date.fromisoformat(args.to_date)
+        end = (to_date + timedelta(days=1)).isoformat()
     window = Window(start=args.from_date, end=end, period=args.period)
     output = Path(args.output)
-    dataset = run(args.symbols, window, output)
+    dataset = run(args.symbols, window, output, force=args.force)
 
     if not args.no_aggregate:
         parquet = output / "stocks.parquet"
