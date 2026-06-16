@@ -143,6 +143,8 @@ pub struct BacktestReport {
     pub profit_factor: f64,
     pub avg_win_return: f64,
     pub avg_loss_return: f64,
+    /// Annualized Sharpe of the daily equity returns, the honest risk-adjusted figure.
+    pub sharpe: f64,
     pub trading_days: usize,
     pub equity_curve: Vec<EquityPoint>,
     pub trades: Vec<Trade>,
@@ -459,6 +461,8 @@ impl BacktestReport {
             0.0
         };
 
+        let sharpe = annualized_sharpe(&equity_curve);
+
         Self {
             starting_cash,
             final_equity,
@@ -469,11 +473,31 @@ impl BacktestReport {
             profit_factor,
             avg_win_return,
             avg_loss_return,
+            sharpe,
             trading_days,
             equity_curve,
             trades,
             events,
         }
+    }
+}
+
+/// Annualized Sharpe of the daily equity returns, zero when the curve is too short
+/// or flat.
+fn annualized_sharpe(curve: &[EquityPoint]) -> f64 {
+    if curve.len() < 2 {
+        return 0.0;
+    }
+    let returns: Vec<f64> = curve
+        .windows(2)
+        .map(|pair| pair[1].equity / pair[0].equity - 1.0)
+        .collect();
+    let average = mean(returns.iter().copied());
+    let deviation = mean(returns.iter().map(|value| (value - average).powi(2))).sqrt();
+    if deviation == 0.0 {
+        0.0
+    } else {
+        average / deviation * ANNUAL_TRADING_DAYS.sqrt()
     }
 }
 
@@ -591,6 +615,11 @@ pub fn summary(report: &BacktestReport, context: &RenderContext) -> String {
         &mut out,
         "annualized",
         &format!("{:+.2}%", report.annualized_return * 100.0),
+    );
+    summary_row(
+        &mut out,
+        "sharpe",
+        &format!("{:.2}  (daily returns, annualized)", report.sharpe),
     );
     summary_row(&mut out, "trades", &report.trade_count.to_string());
     summary_row(&mut out, "exits", &exits);
