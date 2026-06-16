@@ -18,7 +18,7 @@ use miette::{IntoDiagnostic, Result, WrapErr, bail};
 use crate::data::store::TickerStore;
 use crate::training::batcher::StockBatcher;
 use crate::training::dataset::WindowDataset;
-use crate::training::metric::{BuyEdgeMetric, PrecisionClassMetric};
+use crate::training::metric::{ExpectedValueMetric, PrecisionClassMetric};
 use crate::training::model::StockClassifier;
 use stock_model::model::StockModelConfig;
 
@@ -205,7 +205,7 @@ pub fn train<B: AutodiffBackend>(
     let mut training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
         .metrics((
             FBetaScoreMetric::multiclass(1.0, 1, ClassReduction::Macro),
-            BuyEdgeMetric::new(config.take_profit, config.stop_loss, config.fee),
+            ExpectedValueMetric::new(config.take_profit, config.stop_loss, config.fee),
             PrecisionClassMetric::new(2, "Buy"),
             LossMetric::new(),
         ))

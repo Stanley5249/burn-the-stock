@@ -11,7 +11,6 @@ use burn::train::metric::{
 
 /// Class indices, matching `crate::data::label::Label::class`.
 const SELL: i64 = 0;
-const HOLD: i64 = 1;
 const BUY: i64 = 2;
 
 /// Input shared by the trade-aware metrics: logits and true class per row.
@@ -26,12 +25,13 @@ impl<B: Backend> StockEvalInput<B> {
     }
 }
 
-/// Average net edge per trade the model would take. Over the rows predicted Buy
-/// (`argmax == BUY`), each scores by its true label using the barrier magnitudes:
-/// a true Buy earns `+take_profit`, a true Sell `-stop_loss`, a true Hold `-fee`.
-/// The mean over those rows is the per-trade edge of the Buy action.
+/// Empirical expected value of the Buy policy, per opportunity. Over the rows
+/// predicted Buy (`argmax == BUY`), each pays the round-trip `fee` and earns by its
+/// true label: a true Buy `+take_profit`, a true Sell `-stop_loss`, a true Hold `0`.
+/// Non-Buy rows score `0`. The batch mean is the per-name EV net of cost, so it
+/// rises as the model both buys more and buys correctly.
 #[derive(Clone)]
-pub struct BuyEdgeMetric<B: Backend> {
+pub struct ExpectedValueMetric<B: Backend> {
     name: MetricName,
     state: NumericMetricState,
     take_profit: f64,
@@ -40,10 +40,10 @@ pub struct BuyEdgeMetric<B: Backend> {
     _b: PhantomData<B>,
 }
 
-impl<B: Backend> BuyEdgeMetric<B> {
+impl<B: Backend> ExpectedValueMetric<B> {
     pub fn new(take_profit: f32, stop_loss: f32, fee: f32) -> Self {
         Self {
-            name: Arc::new("Buy edge".to_string()),
+            name: Arc::new("Expected value".to_string()),
             state: NumericMetricState::default(),
             take_profit: f64::from(take_profit),
             stop_loss: f64::from(stop_loss),
@@ -53,44 +53,30 @@ impl<B: Backend> BuyEdgeMetric<B> {
     }
 }
 
-impl<B: Backend> Metric for BuyEdgeMetric<B> {
+impl<B: Backend> Metric for ExpectedValueMetric<B> {
     type Input = StockEvalInput<B>;
 
     fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
         let [batch_size, _] = input.logits.dims();
         let predictions = input.logits.clone().argmax(1).reshape([batch_size]);
-        let predicted_buy = predictions.equal_elem(BUY);
+        let predicted_buy = predictions.equal_elem(BUY).float();
 
-        let count = usize::try_from(
-            predicted_buy
-                .clone()
-                .int()
-                .sum()
-                .into_scalar()
-                .elem::<i64>(),
-        )
-        .unwrap_or(0);
-
-        let predicted_buy = predicted_buy.float();
         let is_buy = input.targets.clone().equal_elem(BUY).float();
         let is_sell = input.targets.clone().equal_elem(SELL).float();
-        let is_hold = input.targets.clone().equal_elem(HOLD).float();
 
-        // Barrier payoff keyed on the true label, summed over predicted buys.
-        let payoff = is_buy.mul_scalar(self.take_profit)
-            - is_sell.mul_scalar(self.stop_loss)
-            - is_hold.mul_scalar(self.fee);
-        let predicted_count = predicted_buy.clone().sum().into_scalar().elem::<f64>();
+        // Round-trip fee on every taken position, plus the barrier payoff keyed on
+        // the true label. Averaged across the whole batch, so the score scales with
+        // how often Buy fires, not just per-trade quality.
+        let payoff =
+            is_buy.mul_scalar(self.take_profit) - is_sell.mul_scalar(self.stop_loss) - self.fee;
         let total = (payoff * predicted_buy).sum().into_scalar().elem::<f64>();
+        let value = total / f64::from(u32::try_from(batch_size).expect("batch size fits in u32"));
 
-        let value = if count > 0 {
-            total / predicted_count
-        } else {
-            0.0
-        };
-
-        self.state
-            .update(value, count, FormatOptions::new(self.name()).precision(4))
+        self.state.update(
+            value,
+            batch_size,
+            FormatOptions::new(self.name()).precision(4),
+        )
     }
 
     fn clear(&mut self) {
@@ -110,7 +96,7 @@ impl<B: Backend> Metric for BuyEdgeMetric<B> {
     }
 }
 
-impl<B: Backend> Numeric for BuyEdgeMetric<B> {
+impl<B: Backend> Numeric for ExpectedValueMetric<B> {
     fn value(&self) -> NumericEntry {
         self.state.current_value()
     }
@@ -221,10 +207,10 @@ mod tests {
     }
 
     #[test]
-    fn buy_edge_averages_barrier_payoff_over_predicted_buys() {
+    fn expected_value_averages_net_payoff_over_batch() {
         let device = FlexDevice;
-        // Rows 0-2 predict Buy, row 3 predicts Hold and is excluded. Of the predicted
-        // buys, true labels are Buy, Sell, Hold, paying +tp, -sl, -fee.
+        // Rows 0-2 predict Buy, row 3 predicts Hold and is excluded. Each predicted
+        // buy pays the fee; true labels Buy, Sell, Hold pay +tp, -sl, 0 on top.
         let logits = Tensor::<Flex, 2>::from_data(
             [
                 [0.0, 0.0, 1.0],
@@ -236,11 +222,11 @@ mod tests {
         );
         let targets = Tensor::<Flex, 1, Int>::from_data([2, 0, 1, 2], &device);
 
-        let mut metric = BuyEdgeMetric::<Flex>::new(0.10, 0.04, 0.01);
+        let mut metric = ExpectedValueMetric::<Flex>::new(0.10, 0.04, 0.01);
         metric.update(&StockEvalInput::new(logits, targets), &meta());
 
-        // (0.10 - 0.04 - 0.01) / 3 predicted buys.
-        assert!((metric.value().current() - 0.05 / 3.0).abs() < 1e-6);
+        // Payoffs 0.09, -0.05, -0.01 summed over 3 predicted buys, over the batch of 4.
+        assert!((metric.value().current() - 0.03 / 4.0).abs() < 1e-6);
     }
 
     #[test]
