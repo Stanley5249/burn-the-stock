@@ -239,7 +239,7 @@ pub struct BacktestArgs {
     #[arg(long, default_value_t = 180)]
     pub valid_days: i64,
 
-    /// Minimum net-bullish score `clamp(P(Buy) - P(Sell), 0)` to buy, so weak signals
+    /// Minimum expected edge `clamp(P(Buy)*tp - P(Sell)*sl, 0)` to buy, so weak signals
     /// stay in cash.
     #[arg(long, default_value_t = 0.0)]
     pub threshold: f32,

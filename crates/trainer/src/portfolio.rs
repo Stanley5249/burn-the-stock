@@ -6,7 +6,7 @@
 //! 1,000-share lots, buys at the day's low and sells at the high (snapped to a legal
 //! tick in range), 0.1425% commission per side, 0.3% sell-only tax.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::NaiveDate;
 use stock_model::inference::Action;
@@ -156,6 +156,12 @@ fn commission(amount: f64) -> f64 {
     (amount * COMMISSION_RATE).max(MIN_COMMISSION)
 }
 
+/// Round-trip cost as a fraction: commission on both legs plus the sell tax. The edge
+/// gain a rotation must clear to be worth the churn.
+fn round_trip_cost() -> f64 {
+    2.0 * COMMISSION_RATE + SELL_TAX_RATE
+}
+
 /// Tick size in NT$ for a price, by the platform's price bands.
 fn tick_size(price: f64) -> f64 {
     if price < 10.0 {
@@ -235,8 +241,8 @@ fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
 }
 
 /// Run the simulation over `days` (ascending). Each day: run the exit ladder (barriers,
-/// the time stop, a model Sell, then a rotation out of the daily top-k), buy the
-/// strongest above-threshold names into open slots, then mark to the closes.
+/// the time stop, a model Sell, the final-day liquidation), rotate the weakest holdings
+/// out for clearly stronger names, buy into open slots, then mark to the closes.
 pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     let mut ledger = Ledger {
         cash: config.starting_cash,
@@ -254,6 +260,7 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
         sell_phase(day, index, is_last, config, &mut ledger);
 
         if !is_last {
+            rotate_phase(day, config, &mut ledger);
             buy_phase(day, index, config, &mut ledger);
         }
 
@@ -283,32 +290,14 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     )
 }
 
-/// The day's target book: the strongest above-threshold tickers, capped at
-/// `max_holdings`, ranked exactly as [`buy_phase`] ranks its candidates.
-fn target_tickers<'a>(day: &'a TradingDay, config: &BacktestConfig) -> HashSet<&'a str> {
-    let mut ranked: Vec<(&String, f32)> = day
-        .bars
-        .iter()
-        .filter(|(_, bar)| bar.score > config.threshold)
-        .map(|(ticker, bar)| (ticker, bar.score))
-        .collect();
-    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(right.0)));
-    ranked
-        .into_iter()
-        .take(config.max_holdings)
-        .map(|(ticker, _)| ticker.as_str())
-        .collect()
-}
-
 /// Exit price and reason for a holding today, or `None` to keep holding. Take-profit
-/// wins a both-touch bar; then stop-loss, the time barrier, a model Sell, the forced
-/// liquidation on the last day, and finally a rotation out of the daily top-k.
+/// wins a both-touch bar; then stop-loss, the time barrier, a model Sell, and finally
+/// the forced liquidation on the last day. Rotation is handled in [`rotate_phase`].
 fn exit_decision(
     holding: &Holding,
     bar: Option<&DayBar>,
     index: usize,
     is_last: bool,
-    in_target: bool,
     config: &BacktestConfig,
 ) -> Option<(f64, &'static str)> {
     let Some(bar) = bar else {
@@ -329,9 +318,6 @@ fn exit_decision(
         Some((sell_price(bar, config.fill), "signal"))
     } else if is_last {
         Some((sell_price(bar, config.fill), "final"))
-    } else if !in_target {
-        // Outranked by stronger names today, so free the slot for them.
-        Some((sell_price(bar, config.fill), "rotate"))
     } else {
         None
     }
@@ -345,53 +331,96 @@ fn sell_phase(
     config: &BacktestConfig,
     ledger: &mut Ledger,
 ) {
-    let target = target_tickers(day, config);
     let exits: Vec<(String, f64, &'static str)> = ledger
         .holdings
         .iter()
         .filter_map(|(ticker, holding)| {
-            let in_target = target.contains(ticker.as_str());
-            exit_decision(
-                holding,
-                day.bars.get(ticker),
-                index,
-                is_last,
-                in_target,
-                config,
-            )
-            .map(|(price, reason)| (ticker.clone(), price, reason))
+            exit_decision(holding, day.bars.get(ticker), index, is_last, config)
+                .map(|(price, reason)| (ticker.clone(), price, reason))
         })
         .collect();
 
     for (ticker, price, reason) in exits {
-        let holding = ledger.holdings.remove(&ticker).expect("ticker is held");
-        let amount = price * holding.shares;
-        let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
-        ledger.cash += proceeds;
-        let pnl = proceeds - holding.cost;
-        ledger.events.push(TradeEvent {
-            date: day.date,
-            ticker: ticker.clone(),
-            side: "Sell",
-            reason,
-            price,
-            shares: holding.shares,
-            amount,
-            cash_after: ledger.cash,
-        });
-        ledger.trades.push(Trade {
-            ticker,
-            entry_date: holding.entry_date,
-            exit_date: day.date,
-            entry_price: holding.entry_price,
-            exit_price: price,
-            shares: holding.shares,
-            cost: holding.cost,
-            proceeds,
-            pnl,
-            return_pct: pnl / holding.cost,
-            exit_reason: reason,
-        });
+        book_sale(ledger, day.date, &ticker, price, reason);
+    }
+}
+
+/// Book one sell: realize proceeds net of commission and tax, log the event and the
+/// closed trade.
+fn book_sale(ledger: &mut Ledger, date: NaiveDate, ticker: &str, price: f64, reason: &'static str) {
+    let holding = ledger.holdings.remove(ticker).expect("ticker is held");
+    let amount = price * holding.shares;
+    let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
+    ledger.cash += proceeds;
+    let pnl = proceeds - holding.cost;
+    ledger.events.push(TradeEvent {
+        date,
+        ticker: ticker.to_string(),
+        side: "Sell",
+        reason,
+        price,
+        shares: holding.shares,
+        amount,
+        cash_after: ledger.cash,
+    });
+    ledger.trades.push(Trade {
+        ticker: ticker.to_string(),
+        entry_date: holding.entry_date,
+        exit_date: date,
+        entry_price: holding.entry_price,
+        exit_price: price,
+        shares: holding.shares,
+        cost: holding.cost,
+        proceeds,
+        pnl,
+        return_pct: pnl / holding.cost,
+        exit_reason: reason,
+    });
+}
+
+/// Rotate the weakest holdings out for clearly stronger challengers when the book is
+/// full, pairing each eviction to a distinct above-threshold name whose edge beats it
+/// by more than one round-trip cost. The freed slots are refilled by [`buy_phase`].
+fn rotate_phase(day: &TradingDay, config: &BacktestConfig, ledger: &mut Ledger) {
+    if ledger.holdings.len() < config.max_holdings {
+        // Open slots already, so buy_phase can take challengers without evicting.
+        return;
+    }
+
+    // Strongest above-threshold names we do not hold, best first.
+    let mut challengers: Vec<f32> = day
+        .bars
+        .iter()
+        .filter(|(ticker, bar)| {
+            !ledger.holdings.contains_key(*ticker) && bar.score > config.threshold
+        })
+        .map(|(_, bar)| bar.score)
+        .collect();
+    challengers.sort_by(|left, right| right.total_cmp(left));
+
+    // Holdings priced today, weakest first, the ones a challenger could displace.
+    let mut weakest: Vec<(String, f32)> = ledger
+        .holdings
+        .keys()
+        .filter_map(|ticker| day.bars.get(ticker).map(|bar| (ticker.clone(), bar.score)))
+        .collect();
+    weakest.sort_by(|left, right| left.1.total_cmp(&right.1));
+
+    let hurdle = round_trip_cost();
+    let mut rotated = Vec::new();
+    for ((ticker, held_edge), challenger) in weakest.into_iter().zip(challengers) {
+        // Weakest holding vs best remaining challenger: once this fails, no stronger
+        // holding clears the hurdle against a weaker challenger either.
+        if f64::from(challenger) - f64::from(held_edge) > hurdle {
+            rotated.push(ticker);
+        } else {
+            break;
+        }
+    }
+
+    for ticker in rotated {
+        let price = sell_price(&day.bars[&ticker], config.fill);
+        book_sale(ledger, day.date, &ticker, price, "rotate");
     }
 }
 
@@ -633,6 +662,14 @@ pub fn summary(report: &BacktestReport, context: &RenderContext) -> String {
         "buy gate",
         &format!("score > {:.2}", context.threshold),
     );
+    summary_row(
+        &mut out,
+        "rotate hurdle",
+        &format!(
+            "{:.3}% edge gain (one round trip)",
+            round_trip_cost() * 100.0
+        ),
+    );
     summary_row(&mut out, "fills", fill);
     let _ = writeln!(out, "  Performance");
     summary_row(&mut out, "starting cash", &format_ntd(report.starting_cash));
@@ -849,6 +886,34 @@ mod tests {
             .expect("A should rotate out");
         assert_eq!(rotated.ticker, "A");
         assert!((rotated.exit_price - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn marginal_challenger_does_not_rotate() {
+        // Challenger B (0.505) beats A (0.500) by less than the round-trip cost, so the
+        // full book holds A rather than churning into B for no net gain.
+        let mut day1 = TradingDay {
+            date: date(1),
+            bars: HashMap::new(),
+        };
+        day1.bars
+            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 10.0, 10.0));
+        let mut day2 = TradingDay {
+            date: date(2),
+            bars: HashMap::new(),
+        };
+        day2.bars
+            .insert("A".to_string(), bar(0.500, Action::Hold, 11.0, 12.0, 11.0));
+        day2.bars
+            .insert("B".to_string(), bar(0.505, Action::Buy, 50.0, 51.0, 50.0));
+        let day3 = TradingDay {
+            date: date(3),
+            bars: HashMap::new(),
+        };
+
+        let report = run(&[day1, day2, day3], &config(1_000_000.0, 1));
+
+        assert!(report.trades.iter().all(|t| t.exit_reason != "rotate"));
     }
 
     fn barrier_config(take_profit: f64, stop_loss: f64, max_hold_days: usize) -> BacktestConfig {
