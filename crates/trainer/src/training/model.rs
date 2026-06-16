@@ -103,11 +103,7 @@ impl<B: Backend> Adaptor<ConfusionStatsInput<B>> for StockOutput<B> {
 
 impl<B: Backend> Adaptor<StockEvalInput<B>> for StockOutput<B> {
     fn adapt(&self) -> StockEvalInput<B> {
-        StockEvalInput::new(
-            self.output.clone(),
-            self.targets.clone(),
-            self.reward.clone(),
-        )
+        StockEvalInput::new(self.output.clone(), self.targets.clone())
     }
 }
 

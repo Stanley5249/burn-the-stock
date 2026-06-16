@@ -3,95 +3,94 @@ use std::sync::Arc;
 
 use burn::prelude::*;
 use burn::tensor::ElementConversion;
-use burn::tensor::activation::softmax;
 use burn::train::metric::state::{FormatOptions, NumericMetricState};
 use burn::train::metric::{
     Metric, MetricAttributes, MetricMetadata, MetricName, Numeric, NumericAttributes, NumericEntry,
     SerializedEntry,
 };
 
-/// Sell and Buy class indices, matching `crate::data::label::Label::class`.
-const SELL: usize = 0;
-const BUY: usize = 2;
+/// Class indices, matching `crate::data::label::Label::class`.
+const SELL: i64 = 0;
+const HOLD: i64 = 1;
+const BUY: i64 = 2;
 
-/// Floor on the Sharpe denominator, guarding a near-constant-return batch from a
-/// blown-up ratio.
-const EPS: f32 = 1e-8;
-
-/// Input shared by the trade-aware metrics: logits, true class, and signed forward
-/// return per row.
+/// Input shared by the trade-aware metrics: logits and true class per row.
 pub struct StockEvalInput<B: Backend> {
     pub logits: Tensor<B, 2>,
     pub targets: Tensor<B, 1, Int>,
-    pub reward: Tensor<B, 1>,
 }
 
 impl<B: Backend> StockEvalInput<B> {
-    pub fn new(logits: Tensor<B, 2>, targets: Tensor<B, 1, Int>, reward: Tensor<B, 1>) -> Self {
-        Self {
-            logits,
-            targets,
-            reward,
-        }
+    pub fn new(logits: Tensor<B, 2>, targets: Tensor<B, 1, Int>) -> Self {
+        Self { logits, targets }
     }
 }
 
-/// Per-trade Sharpe of the long-only soft policy. The softmax becomes a position
-/// `clamp(P(Buy) - P(Sell), 0, 1)`; each row earns its forward `reward` scaled by it,
-/// less the round-trip `fee`, and the batch of net returns gives `mean / std`.
-///
-/// Two caveats: this is a per-batch Sharpe averaged over the epoch (burn averages
-/// per-batch values, and Sharpe is non-linear), so its scale rides on `batch_size`;
-/// and the reward is a per-trade return over the holding horizon, not annualized.
+/// Average net edge per trade the model would take. Over the rows predicted Buy
+/// (`argmax == BUY`), each scores by its true label using the barrier magnitudes:
+/// a true Buy earns `+take_profit`, a true Sell `-stop_loss`, a true Hold `-fee`.
+/// The mean over those rows is the per-trade edge of the Buy action.
 #[derive(Clone)]
-pub struct SharpeMetric<B: Backend> {
+pub struct BuyEdgeMetric<B: Backend> {
     name: MetricName,
     state: NumericMetricState,
-    fee: f32,
+    take_profit: f64,
+    stop_loss: f64,
+    fee: f64,
     _b: PhantomData<B>,
 }
 
-impl<B: Backend> SharpeMetric<B> {
-    pub fn new(fee: f32) -> Self {
+impl<B: Backend> BuyEdgeMetric<B> {
+    pub fn new(take_profit: f32, stop_loss: f32, fee: f32) -> Self {
         Self {
-            name: Arc::new("Sharpe".to_string()),
+            name: Arc::new("Buy edge".to_string()),
             state: NumericMetricState::default(),
-            fee,
+            take_profit: f64::from(take_profit),
+            stop_loss: f64::from(stop_loss),
+            fee: f64::from(fee),
             _b: PhantomData,
         }
     }
 }
 
-impl<B: Backend> Metric for SharpeMetric<B> {
+impl<B: Backend> Metric for BuyEdgeMetric<B> {
     type Input = StockEvalInput<B>;
 
     fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
         let [batch_size, _] = input.logits.dims();
+        let predictions = input.logits.clone().argmax(1).reshape([batch_size]);
+        let predicted_buy = predictions.equal_elem(BUY);
 
-        let probabilities = softmax(input.logits.clone(), 1);
-        let probability_sell = probabilities
-            .clone()
-            .slice([0..batch_size, SELL..SELL + 1])
-            .reshape([batch_size]);
-        let probability_buy = probabilities
-            .slice([0..batch_size, BUY..BUY + 1])
-            .reshape([batch_size]);
-
-        // Clamp away negatives: a Sell only vetoes a Buy, it never shorts.
-        let position = (probability_buy - probability_sell).clamp_min(0.0);
-
-        let net = position * input.reward.clone().sub_scalar(self.fee);
-
-        let mean = net.clone().mean();
-        let deviation = net.var(0).sqrt().add_scalar(EPS);
-        let sharpe = (mean / deviation).into_scalar().elem::<f64>();
-
-        // Weighting by batch size makes the epoch value the mean of per-batch Sharpes.
-        self.state.update(
-            sharpe,
-            batch_size,
-            FormatOptions::new(self.name()).precision(4),
+        let count = usize::try_from(
+            predicted_buy
+                .clone()
+                .int()
+                .sum()
+                .into_scalar()
+                .elem::<i64>(),
         )
+        .unwrap_or(0);
+
+        let predicted_buy = predicted_buy.float();
+        let is_buy = input.targets.clone().equal_elem(BUY).float();
+        let is_sell = input.targets.clone().equal_elem(SELL).float();
+        let is_hold = input.targets.clone().equal_elem(HOLD).float();
+
+        // Barrier payoff keyed on the true label, summed over predicted buys.
+        let payoff = is_buy.mul_scalar(self.take_profit)
+            - is_sell.mul_scalar(self.stop_loss)
+            - is_hold.mul_scalar(self.fee);
+        let predicted_count = predicted_buy.clone().sum().into_scalar().elem::<f64>();
+        let total = (payoff * predicted_buy).sum().into_scalar().elem::<f64>();
+
+        let value = if count > 0 {
+            total / predicted_count
+        } else {
+            0.0
+        };
+
+        self.state
+            .update(value, count, FormatOptions::new(self.name()).precision(4))
     }
 
     fn clear(&mut self) {
@@ -111,7 +110,7 @@ impl<B: Backend> Metric for SharpeMetric<B> {
     }
 }
 
-impl<B: Backend> Numeric for SharpeMetric<B> {
+impl<B: Backend> Numeric for BuyEdgeMetric<B> {
     fn value(&self) -> NumericEntry {
         self.state.current_value()
     }
@@ -222,22 +221,26 @@ mod tests {
     }
 
     #[test]
-    fn sharpe_rewards_confident_profitable_buys() {
+    fn buy_edge_averages_barrier_payoff_over_predicted_buys() {
         let device = FlexDevice;
-        // All three rows lean hard toward Buy, so the position is ~1, and the
-        // rewards are positive with a finite spread, so the net return series has a
-        // clearly positive Sharpe.
+        // Rows 0-2 predict Buy, row 3 predicts Hold and is excluded. Of the predicted
+        // buys, true labels are Buy, Sell, Hold, paying +tp, -sl, -fee.
         let logits = Tensor::<Flex, 2>::from_data(
-            [[0.0, 0.0, 6.0], [0.0, 0.0, 6.0], [0.0, 0.0, 6.0]],
+            [
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ],
             &device,
         );
-        let targets = Tensor::<Flex, 1, Int>::from_data([2, 2, 2], &device);
-        let reward = Tensor::<Flex, 1>::from_data([0.08f32, 0.10, 0.12], &device);
+        let targets = Tensor::<Flex, 1, Int>::from_data([2, 0, 1, 2], &device);
 
-        let mut metric = SharpeMetric::<Flex>::new(0.0);
-        metric.update(&StockEvalInput::new(logits, targets, reward), &meta());
+        let mut metric = BuyEdgeMetric::<Flex>::new(0.10, 0.04, 0.01);
+        metric.update(&StockEvalInput::new(logits, targets), &meta());
 
-        assert!(metric.value().current() > 0.0);
+        // (0.10 - 0.04 - 0.01) / 3 predicted buys.
+        assert!((metric.value().current() - 0.05 / 3.0).abs() < 1e-6);
     }
 
     #[test]
@@ -249,10 +252,9 @@ mod tests {
             &device,
         );
         let targets = Tensor::<Flex, 1, Int>::from_data([2, 0, 1], &device);
-        let reward = Tensor::<Flex, 1>::zeros([3], &device);
 
         let mut metric = PrecisionClassMetric::<Flex>::new(2, "Buy");
-        metric.update(&StockEvalInput::new(logits, targets, reward), &meta());
+        metric.update(&StockEvalInput::new(logits, targets), &meta());
 
         // Two rows predicted Buy, only the first is truly Buy, so 50%.
         assert!((metric.value().current() - 50.0).abs() < 1e-4);

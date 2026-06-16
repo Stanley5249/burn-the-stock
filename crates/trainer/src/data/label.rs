@@ -2,8 +2,8 @@ use polars::prelude::*;
 
 /// Trade action paired with the signed realized return of its triple-barrier
 /// outcome: Buy carries `+take_profit`, Sell `-stop_loss`, Hold the close-to-close
-/// move at the vertical barrier. The reward is what the Sharpe metric weights by.
-/// [`Label::class`] defines the 0/1/2 order the model output relies on.
+/// move at the vertical barrier. The Buy-edge metric scores predicted buys by these
+/// barrier magnitudes. [`Label::class`] defines the 0/1/2 order the model relies on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Label {
     Sell(f32),
