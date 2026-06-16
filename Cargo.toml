@@ -30,4 +30,8 @@ assertions_on_result_states = "warn"
 pedantic = "warn"
 
 [profile.dev.package."*"]
-opt-level = 3
+debug = 0
+
+[profile.release]
+strip = "debuginfo"
+panic = "abort"
