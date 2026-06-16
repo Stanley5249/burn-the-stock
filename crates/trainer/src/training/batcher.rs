@@ -10,8 +10,6 @@ pub struct StockBatch<B: Backend> {
     pub technical: Tensor<B, 3>,
     /// Shape `[batch_size]` -- class index 0/1/2.
     pub label: Tensor<B, 1, Int>,
-    /// Shape `[batch_size]` -- signed realized return of the barrier outcome.
-    pub reward: Tensor<B, 1>,
 }
 
 /// Builds a [`StockBatch`] by gathering windows from device-resident tensors.
@@ -27,8 +25,6 @@ pub struct StockBatcher<B: Backend> {
     features: Tensor<B, 2>,
     /// Resident `[rows]` label per row.
     labels: Tensor<B, 1, Int>,
-    /// Resident `[rows]` barrier return per row.
-    rewards: Tensor<B, 1>,
 }
 
 impl<B: Backend> StockBatcher<B> {
@@ -42,13 +38,11 @@ impl<B: Backend> StockBatcher<B> {
             device,
         );
         let labels = Tensor::from_data(TensorData::new(buffers.labels, [rows]), device);
-        let rewards = Tensor::from_data(TensorData::new(buffers.rewards, [rows]), device);
 
         Self {
             steps,
             features,
             labels,
-            rewards,
         }
     }
 }
@@ -83,20 +77,15 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
             .select(0, index.reshape([count * steps]))
             .reshape([count, steps, FEATURE_NAMES.len()]);
 
-        // Label and reward come from the window's last day.
+        // The label comes from the window's last day.
         let last = starts.add_scalar(
             i32::try_from(steps)
                 .expect("steps exceeds i32; window length far larger than supported")
                 - 1,
         );
-        let label = self.labels.clone().select(0, last.clone());
-        let reward = self.rewards.clone().select(0, last);
+        let label = self.labels.clone().select(0, last);
 
-        StockBatch {
-            technical,
-            label,
-            reward,
-        }
+        StockBatch { technical, label }
     }
 }
 

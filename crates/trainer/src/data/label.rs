@@ -1,39 +1,33 @@
 use polars::prelude::*;
 
-/// Trade action paired with the signed realized return of its triple-barrier
-/// outcome: Buy carries `+take_profit`, Sell `-stop_loss`, Hold the close-to-close
-/// move at the vertical barrier. The Buy-edge metric scores predicted buys by these
-/// barrier magnitudes. [`Label::class`] defines the 0/1/2 order the model relies on.
+/// Trade action produced by the triple-barrier labeler.
+///
+/// `Buy` means the take-profit barrier hit first, `Sell` means the stop-loss
+/// barrier hit first, and `Hold` means the position stayed unresolved until the
+/// vertical barrier.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Label {
-    Sell(f32),
-    Hold(f32),
-    Buy(f32),
+    Sell,
+    Hold,
+    Buy,
 }
 
 impl Label {
     /// Class index in the model's output order: Sell 0, Hold 1, Buy 2.
     pub fn class(self) -> u8 {
         match self {
-            Label::Sell(_) => 0,
-            Label::Hold(_) => 1,
-            Label::Buy(_) => 2,
-        }
-    }
-
-    /// Signed realized return of the labeled barrier outcome.
-    pub fn reward(self) -> f32 {
-        match self {
-            Label::Sell(reward) | Label::Hold(reward) | Label::Buy(reward) => reward,
+            Label::Sell => 0,
+            Label::Hold => 1,
+            Label::Buy => 2,
         }
     }
 }
 
 /// Label each row with the triple-barrier outcome of opening a long at its close.
 /// For entry `close[t]`, scan the next `horizon` bars: the first high crossing
-/// `entry * (1 + take_profit)` is a [`Label::Buy`], the first low crossing
-/// `entry * (1 - stop_loss)` a [`Label::Sell`]. A bar touching both, or no touch
-/// through the horizon, is a [`Label::Hold`] closed at the vertical barrier.
+/// `entry * (1 + take_profit)` is [`Label::Buy`], the first low crossing
+/// `entry * (1 - stop_loss)` is [`Label::Sell`]. A bar touching both, or no touch
+/// through the horizon, is [`Label::Hold`].
 ///
 /// The result is `horizon` rows shorter than the input, empty when
 /// `close.len() <= horizon`.
@@ -72,33 +66,32 @@ pub fn triple_barrier_labels(
 
                 // Both touched in one bar: order unknown, default to Hold.
                 if hit_take_profit && hit_stop_loss {
-                    return Label::Hold((close[k] - entry) / entry);
+                    return Label::Hold;
                 }
                 if hit_take_profit {
-                    return Label::Buy(take_profit);
+                    return Label::Buy;
                 }
                 if hit_stop_loss {
-                    return Label::Sell(-stop_loss);
+                    return Label::Sell;
                 }
             }
 
             // Untouched: close at the vertical barrier.
-            Label::Hold((close[t + horizon] - entry) / entry)
+            Label::Hold
         })
         .collect()
 }
 
-/// Aligned `u8` class and `f32` reward vectors from the price columns, both
-/// `horizon` rows shorter than the input. Errors if a column is not `f32` or has
-/// nulls.
-pub fn compute_labels_rewards(
+/// Aligned `u8` label classes from the price columns, `horizon` rows shorter than
+/// the input. Errors if a column is not `f32` or has nulls.
+pub fn compute_labels(
     high: &Column,
     low: &Column,
     close: &Column,
     take_profit: f32,
     stop_loss: f32,
     horizon: usize,
-) -> PolarsResult<(Vec<u8>, Vec<f32>)> {
+) -> PolarsResult<Vec<u8>> {
     let high = high.f32()?;
     let low = low.f32()?;
     let close = close.f32()?;
@@ -114,10 +107,7 @@ pub fn compute_labels_rewards(
 
     let labels = triple_barrier_labels(&high, &low, &close, take_profit, stop_loss, horizon);
 
-    Ok(labels
-        .iter()
-        .map(|label| (label.class(), label.reward()))
-        .unzip())
+    Ok(labels.iter().map(|label| label.class()).collect())
 }
 
 #[cfg(test)]
@@ -244,42 +234,5 @@ mod tests {
             1,
         );
         assert_eq!(labels[0].class(), HOLD);
-    }
-
-    #[test]
-    fn buy_and_sell_rewards_are_the_barriers() {
-        let buy = triple_barrier_labels(
-            &[100.0, 106.0, 100.0],
-            &[100.0, 101.0, 99.0],
-            &[100.0, 105.0, 100.0],
-            0.05,
-            0.05,
-            2,
-        );
-        assert!((buy[0].reward() - 0.05).abs() < 1e-6);
-
-        let sell = triple_barrier_labels(
-            &[100.0, 101.0, 100.0],
-            &[100.0, 94.0, 95.0],
-            &[100.0, 95.0, 100.0],
-            0.05,
-            0.05,
-            2,
-        );
-        assert!((sell[0].reward() + 0.05).abs() < 1e-6);
-    }
-
-    #[test]
-    fn hold_reward_is_the_vertical_move() {
-        // Untouched row closes at the vertical barrier: close 102 from entry 100.
-        let labels = triple_barrier_labels(
-            &[100.0, 102.0, 103.0],
-            &[100.0, 98.0, 97.0],
-            &[100.0, 101.0, 102.0],
-            0.05,
-            0.05,
-            2,
-        );
-        assert!((labels[0].reward() - 0.02).abs() < 1e-6);
     }
 }

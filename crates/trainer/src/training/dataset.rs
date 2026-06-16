@@ -3,8 +3,8 @@ use burn::data::dataset::Dataset;
 use fastrand::Rng;
 
 /// One training sample, reduced to the absolute store row where its window starts.
-/// The batcher gathers the window, label, and reward from this index, so the item
-/// carries no feature data and stays backend-free.
+/// The batcher gathers the window and label from this index, so the item carries
+/// no feature data and stays backend-free.
 #[derive(Clone, Copy, Debug)]
 pub struct StockItem {
     /// Absolute row of the window's first day; it spans `steps` rows from here.

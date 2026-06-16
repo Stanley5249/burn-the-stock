@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::data::label::compute_labels_rewards;
+use crate::data::label::compute_labels;
 use chrono::NaiveDate;
 use fastrand::Rng;
 use polars::prelude::*;
@@ -92,8 +92,6 @@ struct Ticker {
     /// Row-major features, length `dates.len() * 5`.
     features: Vec<f32>,
     labels: Vec<u8>,
-    /// Signed realized return of each row's barrier outcome.
-    rewards: Vec<f32>,
     /// Raw daily prices, untouched by the feature pipeline. The backtest fills buys
     /// at `low`, sells at `high`, marks at `close`, and uses `open` for pessimistic
     /// fills.
@@ -113,7 +111,6 @@ impl Ticker {
         let (dates_left, dates_right) = self.dates.split_at(at);
         let (features_left, features_right) = self.features.split_at(at * FEATURE_NAMES.len());
         let (labels_left, labels_right) = self.labels.split_at(at);
-        let (rewards_left, rewards_right) = self.rewards.split_at(at);
         let (open_left, open_right) = self.open.split_at(at);
         let (high_left, high_right) = self.high.split_at(at);
         let (low_left, low_right) = self.low.split_at(at);
@@ -124,7 +121,6 @@ impl Ticker {
             dates: dates_left.to_vec(),
             features: features_left.to_vec(),
             labels: labels_left.to_vec(),
-            rewards: rewards_left.to_vec(),
             open: open_left.to_vec(),
             high: high_left.to_vec(),
             low: low_left.to_vec(),
@@ -135,7 +131,6 @@ impl Ticker {
             dates: dates_right.to_vec(),
             features: features_right.to_vec(),
             labels: labels_right.to_vec(),
-            rewards: rewards_right.to_vec(),
             open: open_right.to_vec(),
             high: high_right.to_vec(),
             low: low_right.to_vec(),
@@ -157,7 +152,7 @@ impl TickerStore {
     /// Load the parquet into one flat [`Ticker`] per stock, standardized features and
     /// triple-barrier labels included. Each ticker's null first row and its trailing
     /// `horizon` label-less rows are dropped. `take_profit`, `stop_loss`, and
-    /// `horizon` set the barriers for [`compute_labels_rewards`]. Non-positive closes
+    /// `horizon` set the barriers for [`compute_labels`]. Non-positive closes
     /// are dropped as corrupt, since yfinance back-adjustment can drive a delisted
     /// history negative and poison the features.
     #[instrument(level = "info", skip_all, fields(path = %path.display()))]
@@ -182,7 +177,7 @@ impl TickerStore {
             let name: PlSmallStr = group.column(&TICKER)?.str()?.get(0).unwrap().into();
 
             // Already aligned to the kept rows after dropping the trailing horizon.
-            let (labels, rewards) = compute_labels_rewards(
+            let labels = compute_labels(
                 group.column(&HIGH)?,
                 group.column(&LOW)?,
                 group.column(&CLOSE)?,
@@ -199,7 +194,6 @@ impl TickerStore {
                 dates,
                 features,
                 labels,
-                rewards,
                 open,
                 high,
                 low,
@@ -211,8 +205,8 @@ impl TickerStore {
     }
 
     /// Load every row of every ticker for the backtest, no trailing-horizon chop and
-    /// no labels, so the most recent bars stay tradeable. `labels`/`rewards` are zeroed
-    /// since inference never reads them.
+    /// no labels, so the most recent bars stay tradeable. `labels` are zeroed since
+    /// inference never reads them.
     ///
     /// # Errors
     /// If the parquet cannot be scanned or a column has the wrong dtype.
@@ -235,7 +229,6 @@ impl TickerStore {
                 dates,
                 features,
                 labels: vec![0; rows],
-                rewards: vec![0.0; rows],
                 open,
                 high,
                 low,
@@ -415,19 +408,16 @@ impl TickerStore {
 
         let mut features = Vec::with_capacity(total * stride);
         let mut labels = Vec::with_capacity(total);
-        let mut rewards = Vec::with_capacity(total);
 
         for ticker in &self.tickers {
             features.extend_from_slice(&ticker.features);
             labels.extend(ticker.labels.iter().map(|&label| i32::from(label)));
-            rewards.extend_from_slice(&ticker.rewards);
         }
 
         ResidentBuffers {
             rows: total,
             features,
             labels,
-            rewards,
         }
     }
 }
@@ -438,7 +428,6 @@ pub(crate) struct ResidentBuffers {
     pub(crate) rows: usize,
     pub(crate) features: Vec<f32>,
     pub(crate) labels: Vec<i32>,
-    pub(crate) rewards: Vec<f32>,
 }
 
 /// One ticker's raw daily prices for the backtest. The price vectors share `dates`'
@@ -484,7 +473,6 @@ fn make_ticker(name: &str, base: f32, rows: i16) -> Ticker {
     }
 
     let labels = (0..rows).map(|i| u8::try_from(i % 3).unwrap()).collect();
-    let rewards = (0..rows).map(|i| f32::from(i) * 0.01).collect();
 
     // Prices rise with the row, one-unit intraday range.
     let close: Vec<f32> = (0..rows).map(|i| base + f32::from(i)).collect();
@@ -497,7 +485,6 @@ fn make_ticker(name: &str, base: f32, rows: i16) -> Ticker {
         dates,
         features,
         labels,
-        rewards,
         open,
         high,
         low,

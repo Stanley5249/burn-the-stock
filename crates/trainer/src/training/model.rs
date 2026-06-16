@@ -45,20 +45,18 @@ impl<B: Backend> StockClassifier<B> {
             loss,
             output: logits,
             targets: batch.label.clone(),
-            reward: batch.reward.clone(),
         }
     }
 }
 
-/// Model output carrying the reward alongside the classification fields. A local
-/// stand-in for burn's `ClassificationOutput`, which the orphan rule blocks us from
-/// adapting to the trade-aware metrics. Shapes: `output` `[batch, NUM_CLASSES]`,
-/// `targets` and `reward` `[batch]`.
+/// Model output carrying the classification fields. A local stand-in for burn's
+/// `ClassificationOutput`, which the orphan rule blocks us from adapting to the
+/// trade-aware metrics. Shapes: `output` `[batch, NUM_CLASSES]` and `targets`
+/// `[batch]`.
 pub struct StockOutput<B: Backend> {
     pub loss: Tensor<B, 1>,
     pub output: Tensor<B, 2>,
     pub targets: Tensor<B, 1, Int>,
-    pub reward: Tensor<B, 1>,
 }
 
 impl<B: Backend> ItemLazy for StockOutput<B> {
@@ -66,11 +64,10 @@ impl<B: Backend> ItemLazy for StockOutput<B> {
     type ItemSync = StockOutput<Flex>;
 
     fn sync(self) -> Self::ItemSync {
-        let [output, loss, targets, reward] = Transaction::default()
+        let [output, loss, targets] = Transaction::default()
             .register(self.output)
             .register(self.loss)
             .register(self.targets)
-            .register(self.reward)
             .execute()
             .try_into()
             .expect("Correct amount of tensor data");
@@ -81,7 +78,6 @@ impl<B: Backend> ItemLazy for StockOutput<B> {
             output: Tensor::from_data(output, device),
             loss: Tensor::from_data(loss, device),
             targets: Tensor::from_data(targets, device),
-            reward: Tensor::from_data(reward, device),
         }
     }
 }
