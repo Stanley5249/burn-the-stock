@@ -195,7 +195,10 @@ fn write_actions_csv(report: &BacktestReport, path: &Path) -> Result<()> {
         "date" => events.iter().map(|e| e.date).collect::<Vec<_>>(),
         "ticker" => events.iter().map(|e| e.ticker.clone()).collect::<Vec<_>>(),
         "side" => events.iter().map(|e| e.side.to_string()).collect::<Vec<_>>(),
-        "reason" => events.iter().map(|e| e.reason.to_string()).collect::<Vec<_>>(),
+        "reason" => events
+            .iter()
+            .map(|e| e.reason.map_or(String::new(), |r| r.to_string()))
+            .collect::<Vec<_>>(),
         "price" => events.iter().map(|e| e.price).collect::<Vec<_>>(),
         "shares" => events.iter().map(|e| e.shares).collect::<Vec<_>>(),
         "amount" => events.iter().map(|e| e.amount).collect::<Vec<_>>(),

@@ -1,5 +1,5 @@
 use super::pricing::round_trip_cost;
-use super::types::{BacktestReport, Fill, Trade};
+use super::types::{BacktestReport, ExitReason, Fill, Trade};
 
 /// Window-level context for the summary, the parts the report itself does not carry.
 pub struct RenderContext {
@@ -34,12 +34,12 @@ fn exit_tally(trades: &[Trade]) -> String {
     let count = |reason| trades.iter().filter(|t| t.exit_reason == reason).count();
     format!(
         "take-profit {} / stop-loss {} / time {} / signal {} / rotate {} / final {}",
-        count("take_profit"),
-        count("stop_loss"),
-        count("time"),
-        count("signal"),
-        count("rotate"),
-        count("final"),
+        count(ExitReason::TakeProfit),
+        count(ExitReason::StopLoss),
+        count(ExitReason::Time),
+        count(ExitReason::Signal),
+        count(ExitReason::Rotate),
+        count(ExitReason::Final),
     )
 }
 

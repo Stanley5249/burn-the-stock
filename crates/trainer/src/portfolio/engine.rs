@@ -8,8 +8,8 @@ use super::pricing::{
     LOT, SELL_TAX_RATE, buy_price, commission, round_trip_cost, sell_price, tick_floor,
 };
 use super::types::{
-    BacktestConfig, BacktestReport, DayBar, EquityPoint, Holding, Ledger, Trade, TradeEvent,
-    TradingDay,
+    BacktestConfig, BacktestReport, DayBar, EquityPoint, ExitReason, Holding, Ledger, Side, Trade,
+    TradeEvent, TradingDay,
 };
 
 /// Run the simulation over `days` (ascending). Each day: run the exit ladder (barriers,
@@ -71,25 +71,25 @@ fn exit_decision(
     index: usize,
     is_last: bool,
     config: &BacktestConfig,
-) -> Option<(f64, &'static str)> {
+) -> Option<(f64, ExitReason)> {
     let Some(bar) = bar else {
         // No bar today: only the final day can liquidate, at the last mark.
-        return is_last.then_some((holding.mark, "final"));
+        return is_last.then_some((holding.mark, ExitReason::Final));
     };
 
     let upper = holding.entry_price * (1.0 + config.take_profit);
     let lower = holding.entry_price * (1.0 - config.stop_loss);
 
     if f64::from(bar.high) >= upper {
-        Some((tick_floor(upper), "take_profit"))
+        Some((tick_floor(upper), ExitReason::TakeProfit))
     } else if f64::from(bar.low) <= lower {
-        Some((tick_floor(lower), "stop_loss"))
+        Some((tick_floor(lower), ExitReason::StopLoss))
     } else if index - holding.entry_index >= config.max_hold_days {
-        Some((tick_floor(f64::from(bar.close)), "time"))
+        Some((tick_floor(f64::from(bar.close)), ExitReason::Time))
     } else if bar.action == Action::Sell {
-        Some((sell_price(bar, config.fill), "signal"))
+        Some((sell_price(bar, config.fill), ExitReason::Signal))
     } else if is_last {
-        Some((sell_price(bar, config.fill), "final"))
+        Some((sell_price(bar, config.fill), ExitReason::Final))
     } else {
         None
     }
@@ -103,7 +103,7 @@ fn sell_phase(
     config: &BacktestConfig,
     ledger: &mut Ledger,
 ) {
-    let exits: Vec<(String, f64, &'static str)> = ledger
+    let exits: Vec<(String, f64, ExitReason)> = ledger
         .holdings
         .iter()
         .filter_map(|(ticker, holding)| {
@@ -119,7 +119,7 @@ fn sell_phase(
 
 /// Book one sell: realize proceeds net of commission and tax, log the event and the
 /// closed trade.
-fn book_sale(ledger: &mut Ledger, date: NaiveDate, ticker: &str, price: f64, reason: &'static str) {
+fn book_sale(ledger: &mut Ledger, date: NaiveDate, ticker: &str, price: f64, reason: ExitReason) {
     let holding = ledger.holdings.remove(ticker).expect("ticker is held");
     let amount = price * holding.shares;
     let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
@@ -128,8 +128,8 @@ fn book_sale(ledger: &mut Ledger, date: NaiveDate, ticker: &str, price: f64, rea
     ledger.events.push(TradeEvent {
         date,
         ticker: ticker.to_string(),
-        side: "Sell",
-        reason,
+        side: Side::Sell,
+        reason: Some(reason),
         price,
         shares: holding.shares,
         amount,
@@ -192,7 +192,7 @@ fn rotate_phase(day: &TradingDay, config: &BacktestConfig, ledger: &mut Ledger) 
 
     for ticker in rotated {
         let price = sell_price(&day.bars[&ticker], config.fill);
-        book_sale(ledger, day.date, &ticker, price, "rotate");
+        book_sale(ledger, day.date, &ticker, price, ExitReason::Rotate);
     }
 }
 
@@ -262,8 +262,8 @@ fn buy_phase(day: &TradingDay, index: usize, config: &BacktestConfig, ledger: &m
         ledger.events.push(TradeEvent {
             date: day.date,
             ticker: ticker.clone(),
-            side: "Buy",
-            reason: "",
+            side: Side::Buy,
+            reason: None,
             price,
             shares,
             amount,
@@ -429,7 +429,7 @@ mod tests {
         let rotated = report
             .trades
             .iter()
-            .find(|trade| trade.exit_reason == "rotate")
+            .find(|trade| trade.exit_reason == ExitReason::Rotate)
             .expect("A should rotate out");
         assert_eq!(rotated.ticker, "A");
         assert!((rotated.exit_price - 12.0).abs() < 1e-9);
@@ -460,7 +460,12 @@ mod tests {
 
         let report = run(&[day1, day2, day3], &config(1_000_000.0, 1));
 
-        assert!(report.trades.iter().all(|t| t.exit_reason != "rotate"));
+        assert!(
+            report
+                .trades
+                .iter()
+                .all(|t| t.exit_reason != ExitReason::Rotate)
+        );
     }
 
     fn barrier_config(take_profit: f64, stop_loss: f64, max_hold_days: usize) -> BacktestConfig {
@@ -506,7 +511,7 @@ mod tests {
         );
 
         assert_eq!(report.trade_count, 1);
-        assert_eq!(report.trades[0].exit_reason, "take_profit");
+        assert_eq!(report.trades[0].exit_reason, ExitReason::TakeProfit);
         assert!((report.trades[0].exit_price - 11.0).abs() < 1e-9);
         assert!(report.trades[0].pnl > 0.0);
     }
@@ -520,7 +525,7 @@ mod tests {
         );
 
         assert_eq!(report.trade_count, 1);
-        assert_eq!(report.trades[0].exit_reason, "stop_loss");
+        assert_eq!(report.trades[0].exit_reason, ExitReason::StopLoss);
         assert!((report.trades[0].exit_price - 9.0).abs() < 1e-9);
         assert!(report.trades[0].pnl < 0.0);
     }
@@ -534,7 +539,7 @@ mod tests {
         );
 
         assert_eq!(report.trade_count, 1);
-        assert_eq!(report.trades[0].exit_reason, "time");
+        assert_eq!(report.trades[0].exit_reason, ExitReason::Time);
         assert!((report.trades[0].exit_price - 10.5).abs() < 1e-9);
     }
 
@@ -547,7 +552,7 @@ mod tests {
         );
 
         assert_eq!(report.trade_count, 1);
-        assert_eq!(report.trades[0].exit_reason, "take_profit");
+        assert_eq!(report.trades[0].exit_reason, ExitReason::TakeProfit);
         assert!((report.trades[0].exit_price - 11.0).abs() < 1e-9);
     }
 }

@@ -1,7 +1,50 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use chrono::NaiveDate;
 use stock_model::inference::Action;
+
+/// Why a holding was closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitReason {
+    TakeProfit,
+    StopLoss,
+    Time,
+    Signal,
+    Rotate,
+    Final,
+}
+
+impl fmt::Display for ExitReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            ExitReason::TakeProfit => "take_profit",
+            ExitReason::StopLoss => "stop_loss",
+            ExitReason::Time => "time",
+            ExitReason::Signal => "signal",
+            ExitReason::Rotate => "rotate",
+            ExitReason::Final => "final",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Which side of the book an order executed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Buy,
+    Sell,
+}
+
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Side::Buy => "Buy",
+            Side::Sell => "Sell",
+        };
+        f.write_str(s)
+    }
+}
 
 /// Which intraday prices the simulated orders fill at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,16 +130,16 @@ pub struct Trade {
     /// Net return on cost, `pnl / cost`.
     pub return_pct: f64,
     /// Exit rule that closed the trade.
-    pub exit_reason: &'static str,
+    pub exit_reason: ExitReason,
 }
 
 /// One executed buy or sell, for the action log.
 pub struct TradeEvent {
     pub date: NaiveDate,
     pub ticker: String,
-    pub side: &'static str,
-    /// Exit rule for a sell, empty for a buy.
-    pub reason: &'static str,
+    pub side: Side,
+    /// Exit rule for a sell, `None` for a buy.
+    pub reason: Option<ExitReason>,
     pub price: f64,
     pub shares: f64,
     /// Gross fill value, `price * shares`, before fees.
