@@ -25,10 +25,10 @@ struct Args {
     #[arg(long, default_value = "artifacts/latest")]
     artifact_dir: PathBuf,
 
-    /// Skip orders whose position `clamp(P(Buy) - P(Sell), 0)` is weaker than this,
-    /// so the trader stays flat rather than churning fees.
-    #[arg(long, default_value_t = 0.05)]
-    min_position: f32,
+    /// Skip orders whose expected edge `clamp(P(Buy)*tp - P(Sell)*sl, 0)` is weaker
+    /// than this, so the trader stays flat rather than churning fees.
+    #[arg(long, default_value_t = 0.0)]
+    min_edge: f32,
 }
 
 fn main() -> Result<()> {
@@ -49,7 +49,7 @@ fn main() -> Result<()> {
 
     let predictions = predictor.predict(&windows);
 
-    place_orders(&predictions, args.min_position);
+    place_orders(&predictions, args.min_edge);
 
     Ok(())
 }
@@ -126,7 +126,7 @@ fn mock_fetch(steps: usize) -> Vec<OhlcvRow> {
 
 /// Place the orders the predictions imply, strongest signal first. Mocked: prints
 /// the buys a real trader would size against cash and submit to `sim_stock`.
-fn place_orders(predictions: &[Prediction], min_position: f32) {
+fn place_orders(predictions: &[Prediction], min_edge: f32) {
     let Some(as_of) = predictions.iter().map(|prediction| prediction.date).max() else {
         println!("No tickers had enough history to fill the model's window.");
         return;
@@ -134,12 +134,12 @@ fn place_orders(predictions: &[Prediction], min_position: f32) {
 
     let mut buys: Vec<&Prediction> = predictions
         .iter()
-        .filter(|prediction| prediction.position > min_position)
+        .filter(|prediction| prediction.expected_edge > min_edge)
         .collect();
-    buys.sort_by(|left, right| right.position.total_cmp(&left.position));
+    buys.sort_by(|left, right| right.expected_edge.total_cmp(&left.expected_edge));
 
     println!(
-        "As of {as_of}: {} tickers, {} actionable buys (position > {min_position:.2}).",
+        "As of {as_of}: {} tickers, {} actionable buys (edge > {min_edge:.3}).",
         predictions.len(),
         buys.len(),
     );
@@ -148,8 +148,8 @@ fn place_orders(predictions: &[Prediction], min_position: f32) {
         let [_, _, probability_buy] = buy.probabilities;
         // Real placement: SimStockClient::buy(&buy.ticker, shares, price).await
         println!(
-            "  [mock] BUY {:<8} P(Buy) {probability_buy:.3}  position {:.3}",
-            buy.ticker, buy.position,
+            "  [mock] BUY {:<8} P(Buy) {probability_buy:.3}  edge {:.3}",
+            buy.ticker, buy.expected_edge,
         );
     }
 }

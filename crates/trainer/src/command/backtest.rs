@@ -47,7 +47,10 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         signals
             .entry(prediction.ticker.clone())
             .or_default()
-            .insert(prediction.date, (prediction.position, prediction.action));
+            .insert(
+                prediction.date,
+                (prediction.expected_edge, prediction.action),
+            );
     }
 
     let fill = match args.fill {

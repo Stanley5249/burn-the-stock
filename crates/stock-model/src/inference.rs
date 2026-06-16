@@ -24,6 +24,8 @@ const BATCH_SIZE: usize = 1024;
 pub struct InferenceConfig {
     pub model: StockModelConfig,
     pub steps: usize,
+    pub take_profit: f32,
+    pub stop_loss: f32,
 }
 
 /// Predicted action for one ticker, the argmax of the model's class probabilities.
@@ -61,15 +63,17 @@ pub struct Prediction {
     /// Class probabilities in model order: Sell, Hold, Buy.
     pub probabilities: [f32; NUM_CLASSES],
     pub action: Action,
-    /// Long-only soft position, `clamp(P(Buy) - P(Sell), 0)`. Zero stays flat, since
-    /// a Sell only vetoes a Buy in a market that cannot short.
-    pub position: f32,
+    /// Long-only expected edge, `clamp(P(Buy)*take_profit - P(Sell)*stop_loss, 0)`.
+    /// Zero stays flat, since a Sell only vetoes a Buy in a market that cannot short.
+    pub expected_edge: f32,
 }
 
-/// A trained model bound to a device, carrying the `steps` it was trained with.
+/// A trained model bound to a device, carrying the `steps` and barriers it trained with.
 pub struct Predictor<B: Backend> {
     model: StockModel<B>,
     steps: usize,
+    take_profit: f32,
+    stop_loss: f32,
     device: B::Device,
 }
 
@@ -91,6 +95,8 @@ impl<B: Backend> Predictor<B> {
         Ok(Self {
             model,
             steps: config.steps,
+            take_profit: config.take_profit,
+            stop_loss: config.stop_loss,
             device,
         })
     }
@@ -146,7 +152,9 @@ impl<B: Backend> Predictor<B> {
                     date: window.date,
                     probabilities,
                     action: Action::from_class(argmax(&probabilities)),
-                    position: (probabilities[BUY] - probabilities[SELL]).max(0.0),
+                    expected_edge: (probabilities[BUY] * self.take_profit
+                        - probabilities[SELL] * self.stop_loss)
+                        .max(0.0),
                 });
             }
         }
