@@ -18,7 +18,6 @@ miette = { workspace = true, features = ["fancy"] }
 polars = {
   workspace = true,
   features = [
-    "concat_str",
     "csv",
     "dtype-array",
     "dtype-date",
@@ -27,7 +26,6 @@ polars = {
     "parquet",
     "partition_by",
     "performant",
-    "rolling_window",
     "strings"
   ]
 }

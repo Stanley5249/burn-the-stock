@@ -42,8 +42,14 @@ const fn col(name: PlSmallStr) -> Expr {
 /// per-ticker `shift` runs `over` the ticker, so the caller must sort by
 /// `[ticker, date]` first.
 fn stationary_features() -> [Expr; 5] {
-    let prev_close = col(CLOSE).shift(lit(1)).over([col(TICKER)]);
-    let prev_volume = col(VOLUME).shift(lit(1)).over([col(TICKER)]);
+    let prev_close = col(CLOSE)
+        .shift(lit(1))
+        .over([col(TICKER)])
+        .expect("partition_by is non-empty");
+    let prev_volume = col(VOLUME)
+        .shift(lit(1))
+        .over([col(TICKER)])
+        .expect("partition_by is non-empty");
 
     let natural_log = || lit(std::f64::consts::E);
 
@@ -71,8 +77,16 @@ fn stationary_features() -> [Expr; 5] {
 /// [`stationary_features`] and before `drop_nulls`.
 fn cross_sectional_zscore() -> [Expr; 5] {
     FEATURE_NAMES.map(|name| {
-        let centered = col(name.clone()) - col(name.clone()).mean().over([col(DATE)]);
-        let spread = col(name.clone()).std(1).over([col(DATE)]) + lit(1e-8);
+        let mean_over_date = col(name.clone())
+            .mean()
+            .over([col(DATE)])
+            .expect("partition_by is non-empty");
+        let std_over_date = col(name.clone())
+            .std(1)
+            .over([col(DATE)])
+            .expect("partition_by is non-empty");
+        let centered = col(name.clone()) - mean_over_date;
+        let spread = std_over_date + lit(1e-8);
         (centered / spread).alias(name)
     })
 }

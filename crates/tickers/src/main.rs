@@ -62,8 +62,8 @@ fn load_universe(input: &Path) -> miette::Result<Vec<(String, String)>> {
         .into_diagnostic()?;
 
     let universe = markets
-        .into_iter()
-        .zip(codes)
+        .iter()
+        .zip(codes.iter())
         .filter_map(|pair| match pair {
             (Some(market), Some(code)) => Some((market.to_owned(), code.to_owned())),
             _ => None,

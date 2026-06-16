@@ -71,15 +71,13 @@ fn ticker_buffers(frame: &DataFrame) -> PolarsResult<TickerBuffers> {
     Ok((dates, features, open, high, low, close))
 }
 
-/// Pull a raw price column as `f32`, null mapped to `NaN` to stay aligned with
-/// `dates`. A `NaN` open leaves that bar untraded in the backtest.
+/// Pull a raw price column as `f32`, aligned with `dates`. `load_groups` already
+/// ran the frame through `standardized_features`, whose `drop_nulls` removes any
+/// row with a null in this column, so none survive to here.
 fn price_column(frame: &DataFrame, name: &PlSmallStr) -> PolarsResult<Vec<f32>> {
-    Ok(frame
-        .column(name)?
-        .f32()?
-        .into_iter()
-        .map(|value| value.unwrap_or(f32::NAN))
-        .collect())
+    let column = frame.column(name)?.f32()?;
+    polars_ensure!(!column.has_nulls(), InvalidOperation: "price column must not contain nulls");
+    Ok(column.into_no_null_iter().collect())
 }
 
 /// One ticker's history flattened out of polars into plain buffers for fast window
