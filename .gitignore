@@ -11,5 +11,5 @@ __pycache__/
 .env
 
 # runtime artifacts
-data/
-artifacts/
+/data/
+/artifacts/
