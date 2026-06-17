@@ -8,7 +8,7 @@ use burn::tensor::activation::softmax;
 use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 
-use crate::class::{Action, BUY, NUM_CLASSES, SELL};
+use crate::class::{Action, NUM_CLASSES};
 use crate::features::{FEATURE_NAMES, InferenceWindow};
 use crate::model::{StockModel, StockModelConfig};
 
@@ -21,29 +21,23 @@ const BATCH_SIZE: usize = 1024;
 pub struct InferenceConfig {
     pub model: StockModelConfig,
     pub steps: usize,
-    pub take_profit: f32,
-    pub stop_loss: f32,
 }
 
-/// One ticker's inference result.
+/// One ticker's inference result: the model output, with no trading policy applied.
 pub struct Prediction {
     pub ticker: String,
     /// The bar this prediction was made from.
     pub date: NaiveDate,
     /// Class probabilities in model order: Sell, Hold, Buy.
     pub probabilities: [f32; NUM_CLASSES],
+    /// The argmax class.
     pub action: Action,
-    /// Long-only expected edge, `clamp(P(Buy)*take_profit - P(Sell)*stop_loss, 0)`.
-    /// Zero stays flat, since a Sell only vetoes a Buy in a market that cannot short.
-    pub expected_edge: f32,
 }
 
-/// A trained model bound to a device, carrying the `steps` and barriers it trained with.
+/// A trained model bound to a device, carrying the `steps` it trained with.
 pub struct Predictor<B: Backend> {
     model: StockModel<B>,
     steps: usize,
-    take_profit: f32,
-    stop_loss: f32,
     device: B::Device,
 }
 
@@ -65,8 +59,6 @@ impl<B: Backend> Predictor<B> {
         Ok(Self {
             model,
             steps: config.steps,
-            take_profit: config.take_profit,
-            stop_loss: config.stop_loss,
             device,
         })
     }
@@ -123,9 +115,6 @@ impl<B: Backend> Predictor<B> {
                     date: window.date,
                     probabilities,
                     action: Action::from_class(class).expect("argmax is below NUM_CLASSES"),
-                    expected_edge: (probabilities[BUY] * self.take_profit
-                        - probabilities[SELL] * self.stop_loss)
-                        .max(0.0),
                 });
             }
         }

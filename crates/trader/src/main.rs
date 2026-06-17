@@ -6,15 +6,18 @@ use std::path::PathBuf;
 
 use burn::backend::Wgpu;
 use burn::backend::wgpu::WgpuDevice;
+use burn::config::Config;
 use chrono::{Duration, NaiveDate};
 use clap::Parser;
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_client::types::OhlcvRow;
+use stock_model::class::BUY;
 use stock_model::features::{
     CLOSE, CODE, DATE, HIGH, LOW, OPEN, VOLUME, latest_windows, standardized_features,
 };
 use stock_model::inference::{Prediction, Predictor};
+use stock_model::strategy::{StrategyConfig, expected_edge};
 
 type Backend = Wgpu;
 
@@ -37,6 +40,9 @@ fn main() -> Result<()> {
     let device = WgpuDevice::default();
     let predictor = Predictor::<Backend>::load(&args.artifact_dir, device)?;
 
+    // The edge barriers live in the same run config the predictor loaded from.
+    let strategy = StrategyConfig::load(args.artifact_dir.join("config.json")).into_diagnostic()?;
+
     // Mock feed: synthesize rows of the same `OhlcvRow` shape the HTTP client
     // returns, so only this call changes once the real fetch lands.
     let rows = mock_fetch(predictor.steps());
@@ -49,7 +55,7 @@ fn main() -> Result<()> {
 
     let predictions = predictor.predict(&windows);
 
-    place_orders(&predictions, args.min_edge);
+    place_orders(&predictions, &strategy, args.min_edge);
 
     Ok(())
 }
@@ -126,17 +132,27 @@ fn mock_fetch(steps: usize) -> Vec<OhlcvRow> {
 
 /// Place the orders the predictions imply, strongest signal first. Mocked: prints
 /// the buys a real trader would size against cash and submit to `sim_stock`.
-fn place_orders(predictions: &[Prediction], min_edge: f32) {
+fn place_orders(predictions: &[Prediction], strategy: &StrategyConfig, min_edge: f32) {
     let Some(as_of) = predictions.iter().map(|prediction| prediction.date).max() else {
         println!("No tickers had enough history to fill the model's window.");
         return;
     };
 
-    let mut buys: Vec<&Prediction> = predictions
+    let mut buys: Vec<(&Prediction, f32)> = predictions
         .iter()
-        .filter(|prediction| prediction.expected_edge > min_edge)
+        .map(|prediction| {
+            (
+                prediction,
+                expected_edge(
+                    &prediction.probabilities,
+                    strategy.take_profit,
+                    strategy.stop_loss,
+                ),
+            )
+        })
+        .filter(|(_, edge)| *edge > min_edge)
         .collect();
-    buys.sort_by(|left, right| right.expected_edge.total_cmp(&left.expected_edge));
+    buys.sort_by(|left, right| right.1.total_cmp(&left.1));
 
     println!(
         "As of {as_of}: {} tickers, {} actionable buys (edge > {min_edge:.3}).",
@@ -144,12 +160,12 @@ fn place_orders(predictions: &[Prediction], min_edge: f32) {
         buys.len(),
     );
 
-    for buy in buys {
-        let [_, _, probability_buy] = buy.probabilities;
+    for (buy, edge) in buys {
+        let probability_buy = buy.probabilities[BUY];
         // Real placement: SimStockClient::buy(&buy.ticker, shares, price).await
         println!(
-            "  [mock] BUY {:<8} P(Buy) {probability_buy:.3}  edge {:.3}",
-            buy.ticker, buy.expected_edge,
+            "  [mock] BUY {:<8} P(Buy) {probability_buy:.3}  edge {edge:.3}",
+            buy.ticker
         );
     }
 }

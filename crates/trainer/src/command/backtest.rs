@@ -9,6 +9,7 @@ use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_model::class::Action;
 use stock_model::inference::Predictor;
+use stock_model::strategy::expected_edge;
 
 use crate::cli::{BacktestArgs, FillArg};
 use crate::data::store::TickerStore;
@@ -45,13 +46,15 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
 
     let mut signals: HashMap<String, HashMap<NaiveDate, (f32, Action)>> = HashMap::new();
     for prediction in &predictions {
+        let edge = expected_edge(
+            &prediction.probabilities,
+            config.take_profit,
+            config.stop_loss,
+        );
         signals
             .entry(prediction.ticker.clone())
             .or_default()
-            .insert(
-                prediction.date,
-                (prediction.expected_edge, prediction.action),
-            );
+            .insert(prediction.date, (edge, prediction.action));
     }
 
     let fill = match args.fill {
