@@ -2,7 +2,7 @@ use crate::data::store::TickerStore;
 use crate::training::dataset::StockItem;
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
-use stock_model::features::FEATURE_NAMES;
+use stock_model::model::NUM_FEATURES;
 
 #[derive(Clone, Debug)]
 pub struct StockBatch<B: Backend> {
@@ -34,7 +34,7 @@ impl<B: Backend> StockBatcher<B> {
         let rows = buffers.rows;
 
         let features = Tensor::from_data(
-            TensorData::new(buffers.features, [rows, FEATURE_NAMES.len()]),
+            TensorData::new(buffers.features, [rows, NUM_FEATURES]),
             device,
         );
         let labels = Tensor::from_data(TensorData::new(buffers.labels, [rows]), device);
@@ -75,7 +75,7 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
             .features
             .clone()
             .select(0, index.reshape([count * steps]))
-            .reshape([count, steps, FEATURE_NAMES.len()]);
+            .reshape([count, steps, NUM_FEATURES]);
 
         // The label comes from the window's last day.
         let last = starts.add_scalar(
@@ -107,12 +107,12 @@ mod tests {
         let items = vec![StockItem { start: 0 }, StockItem { start: 10 }];
         let batch = batcher.batch(items, &FlexDevice);
 
-        assert_eq!(batch.technical.dims(), [2, 4, FEATURE_NAMES.len()]);
+        assert_eq!(batch.technical.dims(), [2, 4, NUM_FEATURES]);
         assert_eq!(batch.label.dims(), [2]);
 
         // First window gathers ticker 0 rows 0..4, second ticker 1 rows 0..4.
         let values = batch.technical.into_data().to_vec::<f32>().unwrap();
-        let stride = FEATURE_NAMES.len();
+        let stride = NUM_FEATURES;
         let expected_first = [0.0f32, 1.0, 2.0, 3.0];
         let expected_second = [1000.0f32, 1001.0, 1002.0, 1003.0];
         for step in 0..4 {

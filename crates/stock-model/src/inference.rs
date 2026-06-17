@@ -9,8 +9,8 @@ use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 
 use crate::class::{Action, NUM_CLASSES};
-use crate::features::{FEATURE_NAMES, InferenceWindow};
-use crate::model::{StockModel, StockModelConfig};
+use crate::features::InferenceWindow;
+use crate::model::{NUM_FEATURES, StockModel, StockModelConfig};
 
 /// Windows per forward pass, capping GPU memory on a universe-wide backtest.
 const BATCH_SIZE: usize = 1024;
@@ -76,7 +76,7 @@ impl<B: Backend> Predictor<B> {
     /// If a window's feature length does not match `steps * 5`.
     #[must_use]
     pub fn predict(&self, windows: &[InferenceWindow]) -> Vec<Prediction> {
-        let width = FEATURE_NAMES.len();
+        let width = NUM_FEATURES;
         let mut predictions = Vec::with_capacity(windows.len());
 
         for chunk in windows.chunks(BATCH_SIZE) {

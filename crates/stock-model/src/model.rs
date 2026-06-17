@@ -5,7 +5,9 @@ use burn::prelude::*;
 use crate::class::NUM_CLASSES;
 
 /// Standardized feature width of the technical input, matching the feature column.
-const NUM_FEATURES: usize = 5;
+/// The single source of the tensor's feature dimension; the polars `FEATURE_NAMES`
+/// list is checked against it.
+pub const NUM_FEATURES: usize = 5;
 
 /// GRU classifier over the standardized feature window. A two-layer GRU summarizes
 /// the window into its last hidden state, which an MLP head turns into action

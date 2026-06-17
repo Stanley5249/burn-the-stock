@@ -7,9 +7,10 @@ use polars::prelude::*;
 use tracing::instrument;
 
 use stock_model::features::{
-    CLOSE, DATE, FEATURE, FEATURE_NAMES, HIGH, InferenceWindow, LOW, OPEN, TICKER, feature_array,
+    CLOSE, DATE, FEATURE, HIGH, InferenceWindow, LOW, OPEN, TICKER, feature_array,
     standardized_features,
 };
+use stock_model::model::NUM_FEATURES;
 
 /// Scan the OHLCV parquet and run the shared feature transform.
 fn scan_standardized(path: &Path) -> PolarsResult<LazyFrame> {
@@ -107,7 +108,7 @@ impl Ticker {
     /// Split into rows `[0, at)` and `[at, rows)`, keeping every buffer aligned.
     fn split_at(&self, at: usize) -> (Ticker, Ticker) {
         let (dates_left, dates_right) = self.dates.split_at(at);
-        let (features_left, features_right) = self.features.split_at(at * FEATURE_NAMES.len());
+        let (features_left, features_right) = self.features.split_at(at * NUM_FEATURES);
         let (labels_left, labels_right) = self.labels.split_at(at);
         let (open_left, open_right) = self.open.split_at(at);
         let (high_left, high_right) = self.high.split_at(at);
@@ -241,7 +242,7 @@ impl TickerStore {
     /// [`InferenceWindow`] dated at that last bar. The window start may precede the
     /// cutoff, so a held-out day draws its `steps - 1` lookback from earlier bars.
     pub fn backtest_windows_since(&self, steps: usize, cutoff: NaiveDate) -> Vec<InferenceWindow> {
-        let stride = FEATURE_NAMES.len();
+        let stride = NUM_FEATURES;
         let mut windows = Vec::new();
 
         for ticker in &self.tickers {
@@ -401,7 +402,7 @@ impl TickerStore {
     /// order, so the batcher uploads once and gathers each batch on-device by absolute
     /// row. The buffers share row order.
     pub(crate) fn resident_buffers(&self) -> ResidentBuffers {
-        let stride = FEATURE_NAMES.len();
+        let stride = NUM_FEATURES;
         let total: usize = self.tickers.iter().map(Ticker::rows).sum();
 
         let mut features = Vec::with_capacity(total * stride);
@@ -458,7 +459,7 @@ impl TickerStore {
 #[cfg(test)]
 fn make_ticker(name: &str, base: f32, rows: i16) -> Ticker {
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-    let stride = FEATURE_NAMES.len();
+    let stride = NUM_FEATURES;
 
     let dates = (0..i64::from(rows))
         .map(|i| epoch + chrono::Duration::days(i))
