@@ -14,7 +14,8 @@ use polars::prelude::*;
 use stock_client::types::OhlcvRow;
 use stock_model::class::BUY;
 use stock_model::features::{
-    CLOSE, CODE, DATE, HIGH, LOW, OPEN, VOLUME, latest_windows, standardized_features,
+    CLOSE, CODE, DATE, HIGH, InferenceWindow, LOW, OPEN, VOLUME, latest_windows,
+    standardized_features,
 };
 use stock_model::inference::{Prediction, Predictor};
 use stock_model::strategy::{StrategyConfig, expected_edge};
@@ -55,7 +56,7 @@ fn main() -> Result<()> {
 
     let predictions = predictor.predict(&windows);
 
-    place_orders(&predictions, &strategy, args.min_edge);
+    place_orders(&windows, &predictions, &strategy, args.min_edge);
 
     Ok(())
 }
@@ -130,42 +131,47 @@ fn mock_fetch(steps: usize) -> Vec<OhlcvRow> {
     rows
 }
 
-/// Place the orders the predictions imply, strongest signal first. Mocked: prints
-/// the buys a real trader would size against cash and submit to `sim_stock`.
-fn place_orders(predictions: &[Prediction], strategy: &StrategyConfig, min_edge: f32) {
-    let Some(as_of) = predictions.iter().map(|prediction| prediction.date).max() else {
+/// Place the orders the predictions imply, strongest signal first. `predictions` aligns
+/// by index with `windows`, which carry the ticker and date. Mocked: prints the buys a
+/// real trader would size against cash and submit to `sim_stock`.
+fn place_orders(
+    windows: &[InferenceWindow],
+    predictions: &[Prediction],
+    strategy: &StrategyConfig,
+    min_edge: f32,
+) {
+    let Some(as_of) = windows.iter().map(|window| window.date).max() else {
         println!("No tickers had enough history to fill the model's window.");
         return;
     };
 
-    let mut buys: Vec<(&Prediction, f32)> = predictions
+    let mut buys: Vec<(&InferenceWindow, &Prediction, f32)> = windows
         .iter()
-        .map(|prediction| {
-            (
-                prediction,
-                expected_edge(
-                    &prediction.probabilities,
-                    strategy.take_profit,
-                    strategy.stop_loss,
-                ),
-            )
+        .zip(predictions)
+        .map(|(window, prediction)| {
+            let edge = expected_edge(
+                &prediction.probabilities,
+                strategy.take_profit,
+                strategy.stop_loss,
+            );
+            (window, prediction, edge)
         })
-        .filter(|(_, edge)| *edge > min_edge)
+        .filter(|(_, _, edge)| *edge > min_edge)
         .collect();
-    buys.sort_by(|left, right| right.1.total_cmp(&left.1));
+    buys.sort_by(|left, right| right.2.total_cmp(&left.2));
 
     println!(
         "As of {as_of}: {} tickers, {} actionable buys (edge > {min_edge:.3}).",
-        predictions.len(),
+        windows.len(),
         buys.len(),
     );
 
-    for (buy, edge) in buys {
-        let probability_buy = buy.probabilities[BUY];
-        // Real placement: SimStockClient::buy(&buy.ticker, shares, price).await
+    for (window, prediction, edge) in buys {
+        let probability_buy = prediction.probabilities[BUY];
+        // Real placement: SimStockClient::buy(&window.ticker, shares, price).await
         println!(
             "  [mock] BUY {:<8} P(Buy) {probability_buy:.3}  edge {edge:.3}",
-            buy.ticker
+            window.ticker
         );
     }
 }

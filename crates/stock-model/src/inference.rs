@@ -5,7 +5,6 @@ use burn::module::Module;
 use burn::prelude::*;
 use burn::record::CompactRecorder;
 use burn::tensor::activation::softmax;
-use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 
 use crate::class::{Action, NUM_CLASSES};
@@ -23,11 +22,9 @@ pub struct InferenceConfig {
     pub steps: usize,
 }
 
-/// One ticker's inference result: the model output, with no trading policy applied.
+/// One row's model output, with no trading policy applied. Aligned by index to the
+/// windows passed to [`Predictor::predict`], so the caller recovers ticker and date.
 pub struct Prediction {
-    pub ticker: String,
-    /// The bar this prediction was made from.
-    pub date: NaiveDate,
     /// Class probabilities in model order: Sell, Hold, Buy.
     pub probabilities: [f32; NUM_CLASSES],
     /// The argmax class.
@@ -69,11 +66,12 @@ impl<B: Backend> Predictor<B> {
         self.steps
     }
 
-    /// Score every window, in [`BATCH_SIZE`] chunks. Each window holds `steps * 5`
-    /// features, as produced by [`crate::features::latest_windows`].
+    /// Score every window, in [`BATCH_SIZE`] chunks. Each window holds `steps *
+    /// NUM_FEATURES` features, as produced by [`crate::features::latest_windows`]. The
+    /// returned rows align by index with `windows`.
     ///
     /// # Panics
-    /// If a window's feature length does not match `steps * 5`.
+    /// If a window's feature length does not match `steps * NUM_FEATURES`.
     #[must_use]
     pub fn predict(&self, windows: &[InferenceWindow]) -> Vec<Prediction> {
         let width = NUM_FEATURES;
@@ -95,24 +93,25 @@ impl<B: Backend> Predictor<B> {
                 &self.device,
             );
 
-            let probabilities = softmax(self.model.forward(technical), 1);
+            let logits = self.model.forward(technical);
+            let probabilities = softmax(logits.clone(), 1);
+            let classes = logits.argmax(1).reshape([chunk.len()]);
 
-            // One host transfer per chunk.
+            // One host transfer per chunk for the probabilities and the argmax classes.
             let flat = probabilities
                 .into_data()
                 .to_vec::<f32>()
                 .expect("softmax output is f32");
+            let classes: Vec<i64> = classes.into_data().iter::<i64>().collect();
 
-            for (row, window) in chunk.iter().enumerate() {
+            for (row, class) in classes.into_iter().enumerate() {
                 let offset = row * NUM_CLASSES;
                 let probabilities: [f32; NUM_CLASSES] = flat[offset..offset + NUM_CLASSES]
                     .try_into()
                     .expect("one row holds NUM_CLASSES probabilities");
 
-                let class = argmax(&probabilities);
+                let class = usize::try_from(class).expect("argmax index is non-negative");
                 predictions.push(Prediction {
-                    ticker: window.ticker.clone(),
-                    date: window.date,
                     probabilities,
                     action: Action::from_class(class).expect("argmax is below NUM_CLASSES"),
                 });
@@ -121,13 +120,4 @@ impl<B: Backend> Predictor<B> {
 
         predictions
     }
-}
-
-/// Index of the largest probability; ties resolve to the lower index.
-fn argmax(probabilities: &[f32]) -> usize {
-    probabilities
-        .iter()
-        .enumerate()
-        .max_by(|left, right| left.1.total_cmp(right.1))
-        .map_or(0, |(index, _)| index)
 }

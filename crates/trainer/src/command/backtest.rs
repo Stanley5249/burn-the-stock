@@ -45,16 +45,16 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     let predictions = predictor.predict(&windows);
 
     let mut signals: HashMap<String, HashMap<NaiveDate, (f32, Action)>> = HashMap::new();
-    for prediction in &predictions {
+    for (window, prediction) in windows.iter().zip(&predictions) {
         let edge = expected_edge(
             &prediction.probabilities,
             config.take_profit,
             config.stop_loss,
         );
         signals
-            .entry(prediction.ticker.clone())
+            .entry(window.ticker.clone())
             .or_default()
-            .insert(prediction.date, (edge, prediction.action));
+            .insert(window.date, (edge, prediction.action));
     }
 
     let fill = match args.fill {
