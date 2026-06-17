@@ -20,6 +20,7 @@ use crate::training::batcher::StockBatcher;
 use crate::training::dataset::WindowDataset;
 use crate::training::metric::{ExpectedValueMetric, PrecisionClassMetric};
 use crate::training::model::StockClassifier;
+use stock_model::class::Action;
 use stock_model::model::StockModelConfig;
 
 /// Top-level training configuration.
@@ -206,7 +207,7 @@ pub fn train<B: AutodiffBackend>(
         .metrics((
             FBetaScoreMetric::multiclass(1.0, 1, ClassReduction::Macro),
             ExpectedValueMetric::new(config.take_profit, config.stop_loss, config.fee),
-            PrecisionClassMetric::new(2, "Buy"),
+            PrecisionClassMetric::new(Action::Buy),
             LossMetric::new(),
         ))
         .with_file_checkpointer(CompactRecorder::new())

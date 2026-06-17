@@ -5,7 +5,8 @@ use burn::tensor::Transaction;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::{Adaptor, ConfusionStatsInput, ItemLazy, LossInput};
 use burn::train::{InferenceStep, TrainOutput, TrainStep};
-use stock_model::model::{NUM_CLASSES, StockModel, StockModelConfig};
+use stock_model::class::NUM_CLASSES;
+use stock_model::model::{StockModel, StockModelConfig};
 
 use crate::training::batcher::StockBatch;
 use crate::training::metric::StockEvalInput;

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::NaiveDate;
-use stock_model::inference::Action;
+use stock_model::class::Action;
 
 /// Why a holding was closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

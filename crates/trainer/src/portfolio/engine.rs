@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
-use stock_model::inference::Action;
+use stock_model::class::Action;
 
 use super::count_f64;
 use super::pricing::{

@@ -8,12 +8,9 @@ use burn::tensor::activation::softmax;
 use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 
+use crate::class::{Action, BUY, NUM_CLASSES, SELL};
 use crate::features::{FEATURE_NAMES, InferenceWindow};
-use crate::model::{NUM_CLASSES, StockModel, StockModelConfig};
-
-/// Class indices in the model's output order, matching the labeler's Sell/Hold/Buy.
-const SELL: usize = 0;
-const BUY: usize = 2;
+use crate::model::{StockModel, StockModelConfig};
 
 /// Windows per forward pass, capping GPU memory on a universe-wide backtest.
 const BATCH_SIZE: usize = 1024;
@@ -26,33 +23,6 @@ pub struct InferenceConfig {
     pub steps: usize,
     pub take_profit: f32,
     pub stop_loss: f32,
-}
-
-/// Predicted action for one ticker, the argmax of the model's class probabilities.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    Sell,
-    Hold,
-    Buy,
-}
-
-impl Action {
-    fn from_class(class: usize) -> Self {
-        match class {
-            SELL => Action::Sell,
-            BUY => Action::Buy,
-            _ => Action::Hold,
-        }
-    }
-
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Action::Sell => "Sell",
-            Action::Hold => "Hold",
-            Action::Buy => "Buy",
-        }
-    }
 }
 
 /// One ticker's inference result.
@@ -147,11 +117,12 @@ impl<B: Backend> Predictor<B> {
                     .try_into()
                     .expect("one row holds NUM_CLASSES probabilities");
 
+                let class = argmax(&probabilities);
                 predictions.push(Prediction {
                     ticker: window.ticker.clone(),
                     date: window.date,
                     probabilities,
-                    action: Action::from_class(argmax(&probabilities)),
+                    action: Action::from_class(class).expect("argmax is below NUM_CLASSES"),
                     expected_edge: (probabilities[BUY] * self.take_profit
                         - probabilities[SELL] * self.stop_loss)
                         .max(0.0),

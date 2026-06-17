@@ -7,7 +7,8 @@ use burn::config::Config;
 use chrono::{Duration, NaiveDate};
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
-use stock_model::inference::{Action, Predictor};
+use stock_model::class::Action;
+use stock_model::inference::Predictor;
 
 use crate::cli::{BacktestArgs, FillArg};
 use crate::data::store::TickerStore;

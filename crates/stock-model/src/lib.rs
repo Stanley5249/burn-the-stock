@@ -2,6 +2,7 @@
 //! inference path. Both binaries depend on it so training and live trading turn
 //! prices into the same model inputs.
 
+pub mod class;
 pub mod features;
 pub mod inference;
 pub mod model;

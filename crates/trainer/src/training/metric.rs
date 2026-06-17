@@ -8,10 +8,7 @@ use burn::train::metric::{
     Metric, MetricAttributes, MetricMetadata, MetricName, Numeric, NumericAttributes, NumericEntry,
     SerializedEntry,
 };
-
-/// Class indices, matching `crate::data::label::Label::class`.
-const SELL: i64 = 0;
-const BUY: i64 = 2;
+use stock_model::class::Action;
 
 /// Input shared by the trade-aware metrics: logits and true class per row.
 pub struct StockEvalInput<B: Backend> {
@@ -57,12 +54,15 @@ impl<B: Backend> Metric for ExpectedValueMetric<B> {
     type Input = StockEvalInput<B>;
 
     fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
+        let buy_class = i64::from(Action::Buy.class());
+        let sell_class = i64::from(Action::Sell.class());
+
         let [batch_size, _] = input.logits.dims();
         let predictions = input.logits.clone().argmax(1).reshape([batch_size]);
-        let predicted_buy = predictions.equal_elem(BUY).float();
+        let predicted_buy = predictions.equal_elem(buy_class).float();
 
-        let is_buy = input.targets.clone().equal_elem(BUY).float();
-        let is_sell = input.targets.clone().equal_elem(SELL).float();
+        let is_buy = input.targets.clone().equal_elem(buy_class).float();
+        let is_sell = input.targets.clone().equal_elem(sell_class).float();
 
         // Round-trip fee on every taken position, plus the barrier payoff keyed on
         // the true label. Averaged across the whole batch, so the score scales with
@@ -118,10 +118,10 @@ pub struct PrecisionClassMetric<B: Backend> {
 }
 
 impl<B: Backend> PrecisionClassMetric<B> {
-    pub fn new(class: i64, class_name: &str) -> Self {
+    pub fn new(action: Action) -> Self {
         Self {
-            name: Arc::new(format!("Precision {class_name}")),
-            class,
+            name: Arc::new(format!("Precision {}", action.as_str())),
+            class: i64::from(action.class()),
             state: NumericMetricState::default(),
             _b: PhantomData,
         }
@@ -239,7 +239,7 @@ mod tests {
         );
         let targets = Tensor::<Flex, 1, Int>::from_data([2, 0, 1], &device);
 
-        let mut metric = PrecisionClassMetric::<Flex>::new(2, "Buy");
+        let mut metric = PrecisionClassMetric::<Flex>::new(Action::Buy);
         metric.update(&StockEvalInput::new(logits, targets), &meta());
 
         // Two rows predicted Buy, only the first is truly Buy, so 50%.

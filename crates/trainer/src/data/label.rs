@@ -1,33 +1,11 @@
 use polars::prelude::*;
-
-/// Trade action produced by the triple-barrier labeler.
-///
-/// `Buy` means the take-profit barrier hit first, `Sell` means the stop-loss
-/// barrier hit first, and `Hold` means the position stayed unresolved until the
-/// vertical barrier.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Label {
-    Sell,
-    Hold,
-    Buy,
-}
-
-impl Label {
-    /// Class index in the model's output order: Sell 0, Hold 1, Buy 2.
-    pub fn class(self) -> u8 {
-        match self {
-            Label::Sell => 0,
-            Label::Hold => 1,
-            Label::Buy => 2,
-        }
-    }
-}
+use stock_model::class::Action;
 
 /// Label each row with the triple-barrier outcome of opening a long at its close.
 /// For entry `close[t]`, scan the next `horizon` bars: the first high crossing
-/// `entry * (1 + take_profit)` is [`Label::Buy`], the first low crossing
-/// `entry * (1 - stop_loss)` is [`Label::Sell`]. A bar touching both, or no touch
-/// through the horizon, is [`Label::Hold`].
+/// `entry * (1 + take_profit)` is [`Action::Buy`], the first low crossing
+/// `entry * (1 - stop_loss)` is [`Action::Sell`]. A bar touching both, or no touch
+/// through the horizon, is [`Action::Hold`].
 ///
 /// The result is `horizon` rows shorter than the input, empty when
 /// `close.len() <= horizon`.
@@ -38,7 +16,7 @@ pub fn triple_barrier_labels(
     take_profit: f32,
     stop_loss: f32,
     horizon: usize,
-) -> Vec<Label> {
+) -> Vec<Action> {
     assert!(
         take_profit.is_sign_positive() && take_profit.is_finite(),
         "take profit must be a positive fraction"
@@ -66,18 +44,18 @@ pub fn triple_barrier_labels(
 
                 // Both touched in one bar: order unknown, default to Hold.
                 if hit_take_profit && hit_stop_loss {
-                    return Label::Hold;
+                    return Action::Hold;
                 }
                 if hit_take_profit {
-                    return Label::Buy;
+                    return Action::Buy;
                 }
                 if hit_stop_loss {
-                    return Label::Sell;
+                    return Action::Sell;
                 }
             }
 
             // Untouched: close at the vertical barrier.
-            Label::Hold
+            Action::Hold
         })
         .collect()
 }
@@ -114,10 +92,7 @@ pub fn compute_labels(
 mod tests {
     use super::*;
 
-    // Class indices, matching `Label::class`.
-    const SELL: u8 = 0;
-    const HOLD: u8 = 1;
-    const BUY: u8 = 2;
+    use Action::{Buy, Hold, Sell};
 
     #[track_caller]
     fn assert_classes(
@@ -127,13 +102,9 @@ mod tests {
         take_profit: f32,
         stop_loss: f32,
         horizon: usize,
-        expected: &[u8],
+        expected: &[Action],
     ) {
-        let classes: Vec<u8> =
-            triple_barrier_labels(high, low, close, take_profit, stop_loss, horizon)
-                .iter()
-                .map(|label| label.class())
-                .collect();
+        let classes = triple_barrier_labels(high, low, close, take_profit, stop_loss, horizon);
 
         assert_eq!(classes, expected);
     }
@@ -161,7 +132,7 @@ mod tests {
             0.05,
             0.05,
             2,
-            &[BUY],
+            &[Buy],
         );
     }
 
@@ -175,7 +146,7 @@ mod tests {
             0.05,
             0.05,
             2,
-            &[SELL],
+            &[Sell],
         );
     }
 
@@ -189,7 +160,7 @@ mod tests {
             0.05,
             0.05,
             2,
-            &[HOLD],
+            &[Hold],
         );
     }
 
@@ -203,7 +174,7 @@ mod tests {
             0.05,
             0.05,
             2,
-            &[HOLD],
+            &[Hold],
         );
     }
 
@@ -217,7 +188,7 @@ mod tests {
             0.05,
             0.05,
             2,
-            &[BUY],
+            &[Buy],
         );
     }
 
@@ -233,6 +204,6 @@ mod tests {
             0.05,
             1,
         );
-        assert_eq!(labels[0].class(), HOLD);
+        assert_eq!(labels[0], Hold);
     }
 }

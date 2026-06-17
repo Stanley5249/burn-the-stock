@@ -2,8 +2,7 @@ use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig, RmsNorm, RmsNormConfig};
 use burn::prelude::*;
 
-/// Action classes the model scores: Sell, Hold, Buy.
-pub const NUM_CLASSES: usize = 3;
+use crate::class::NUM_CLASSES;
 
 /// Standardized feature width of the technical input, matching the feature column.
 const NUM_FEATURES: usize = 5;
