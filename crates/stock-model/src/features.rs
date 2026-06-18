@@ -4,6 +4,8 @@
 
 use polars::prelude::*;
 
+use crate::model::NUM_FEATURES;
+
 /// Raw source columns the transform reads.
 pub const CODE: PlSmallStr = PlSmallStr::from_static("code");
 pub const DATE: PlSmallStr = PlSmallStr::from_static("date");
@@ -23,8 +25,10 @@ const LOW_RETURN: PlSmallStr = PlSmallStr::from_static("low_return");
 const CLOSE_RETURN: PlSmallStr = PlSmallStr::from_static("close_return");
 const VOLUME_RETURN: PlSmallStr = PlSmallStr::from_static("volume_return");
 
-/// The five standardized features in column order; width is fixed at five.
-pub const FEATURE_NAMES: [PlSmallStr; 5] = [
+/// The standardized features in column order. The length is the model's
+/// `NUM_FEATURES`, so the polars feature list and the burn tensor width are one number:
+/// changing `NUM_FEATURES` without matching this list is a compile error.
+pub const FEATURE_NAMES: [PlSmallStr; NUM_FEATURES] = [
     OPEN_RETURN,
     HIGH_RETURN,
     LOW_RETURN,
@@ -36,8 +40,9 @@ const fn col(name: PlSmallStr) -> Expr {
     Expr::Column(name)
 }
 
-/// Build the five stationary feature expressions: the natural log of each channel's
-/// ratio to the prior bar. The four prices share one anchor, the previous close. The
+/// Build the stationary feature expressions, one per [`FEATURE_NAMES`]: the natural log
+/// of each channel's ratio to the prior bar. The four prices share one anchor, the
+/// previous close. The
 /// per-ticker `shift` runs `over` the ticker, so the caller must sort by
 /// `[ticker, date]` first.
 fn stationary_features() -> [Expr; 5] {
@@ -113,7 +118,8 @@ pub fn standardized_features(frame: LazyFrame) -> LazyFrame {
         .drop_nulls(None)
 }
 
-/// Pack the five feature columns into one row-major `Array<f32, 5>`.
+/// Pack the [`FEATURE_NAMES`] columns into one row-major fixed-size `Array` of
+/// `NUM_FEATURES` floats.
 ///
 /// # Panics
 /// If the feature column list is empty, which [`FEATURE_NAMES`] never is.
