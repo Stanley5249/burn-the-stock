@@ -1,24 +1,21 @@
-//! Live trading loop: fetch prices, predict an action per ticker, place orders. The
-//! data fetch and order placement are mocked, so this runs the real inference path
-//! end to end without the network.
+//! Live trading loop: load recent prices, predict an action per ticker, place orders.
+//! The data load reads the parquet tail and order placement is still a stub, so this
+//! runs the real inference path end to end without the network.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use burn::backend::Wgpu;
 use burn::backend::wgpu::WgpuDevice;
 use burn::config::Config;
-use chrono::{Duration, NaiveDate};
+use burn::module::Module;
+use burn::record::CompactRecorder;
+use chrono::Duration;
 use clap::Parser;
-use miette::{IntoDiagnostic, Result};
+use miette::{Context, IntoDiagnostic, Result};
 use polars::prelude::*;
-use stock_client::types::OhlcvRow;
-use stock_model::class::BUY;
-use stock_model::features::{
-    CLOSE, CODE, DATE, HIGH, InferenceWindow, LOW, OPEN, VOLUME, latest_windows,
-    standardized_features,
-};
-use stock_model::inference::{Prediction, Predictor};
-use stock_model::strategy::{StrategyConfig, expected_edge};
+use stock_model::class::Action;
+use stock_model::features::{DATE, latest_windows, standardized_features};
+use stock_model::inference::InferenceConfig;
 
 type Backend = Wgpu;
 
@@ -29,149 +26,77 @@ struct Args {
     #[arg(long, default_value = "artifacts/latest")]
     artifact_dir: PathBuf,
 
-    /// Skip orders whose expected edge `clamp(P(Buy)*tp - P(Sell)*sl, 0)` is weaker
-    /// than this, so the trader stays flat rather than churning fees.
-    #[arg(long, default_value_t = 0.0)]
-    min_edge: f32,
+    /// OHLCV parquet to score; only its recent tail is read.
+    #[arg(long, default_value = "data/yfinance/stocks.parquet")]
+    data: PathBuf,
+}
+
+/// Scan only the recent tail of the OHLCV parquet, enough rows that each ticker keeps
+/// `steps` standardized days after the per-ticker log-return drops its first bar. The
+/// per-date z-score is unaffected since each retained date still holds the full
+/// universe.
+fn recent_frame(path: &Path, steps: usize) -> PolarsResult<LazyFrame> {
+    let frame =
+        LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?
+            .with_column(col(DATE).cast(DataType::Date));
+
+    let max_date = frame
+        .clone()
+        .select([col(DATE).max()])
+        .collect()?
+        .column(&DATE)?
+        .date()?
+        .as_date_iter()
+        .flatten()
+        .next()
+        .expect("parquet has at least one dated row");
+
+    // Trading days are sparser than calendar days, so over-reach the lookback and let
+    // `latest_windows` trim each ticker to exactly `steps`.
+    let lookback = i64::try_from(steps * 2 + 10).expect("steps far smaller than i64");
+    let cutoff = max_date - Duration::days(lookback);
+
+    Ok(frame.filter(col(DATE).gt_eq(lit(cutoff))))
+}
+
+/// Submit the day's per-ticker actions as orders to `sim_stock`.
+fn place_orders(decisions: &[(String, Action)]) -> Result<()> {
+    todo!("submit orders to sim_stock: {decisions:?}")
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
     let device = WgpuDevice::default();
-    let predictor = Predictor::<Backend>::load(&args.artifact_dir, device)?;
 
-    // The edge barriers live in the same run config the predictor loaded from.
-    let strategy = StrategyConfig::load(args.artifact_dir.join("config.json")).into_diagnostic()?;
+    let config = InferenceConfig::load(args.artifact_dir.join("config.json")).into_diagnostic()?;
 
-    // Mock feed: synthesize rows of the same `OhlcvRow` shape the HTTP client
-    // returns, so only this call changes once the real fetch lands.
-    let rows = mock_fetch(predictor.steps());
+    let model = config
+        .model
+        .init::<Backend>(&device)
+        .load_file(
+            args.artifact_dir.join("model"),
+            &CompactRecorder::new(),
+            &device,
+        )
+        .into_diagnostic()
+        .wrap_err("fail to init model from artifact")?;
 
-    // Real pipeline from here: build a frame, apply the shared feature transform,
-    // take each ticker's most recent window.
-    let market = market_frame(&rows).into_diagnostic()?;
-    let windows =
-        latest_windows(standardized_features(market), predictor.steps()).into_diagnostic()?;
+    let frame = recent_frame(&args.data, config.steps).into_diagnostic()?;
 
-    let predictions = predictor.predict(&windows);
+    let latest = latest_windows::<Backend>(standardized_features(frame), config.steps, &device)
+        .into_diagnostic()?;
 
-    place_orders(&windows, &predictions, &strategy, args.min_edge);
+    // One forward over every ticker; the model is tiny and there is one window each.
+    let logits = model.forward(latest.features);
+    let classes: Vec<i64> = logits.argmax(1).into_data().iter::<i64>().collect();
 
-    Ok(())
-}
-
-/// Lazy frame with the raw OHLCV schema the feature transform reads. Volume is each
-/// row's traded capacity.
-fn market_frame(rows: &[OhlcvRow]) -> PolarsResult<LazyFrame> {
-    let codes: Vec<&str> = rows.iter().map(|row| row.stock_code_id.as_str()).collect();
-    let dates: Vec<NaiveDate> = rows.iter().map(|row| row.date).collect();
-    let opens: Vec<Option<f64>> = rows.iter().map(|row| row.open).collect();
-    let highs: Vec<Option<f64>> = rows.iter().map(|row| row.high).collect();
-    let lows: Vec<Option<f64>> = rows.iter().map(|row| row.low).collect();
-    let closes: Vec<Option<f64>> = rows.iter().map(|row| row.close).collect();
-    let volumes: Vec<u64> = rows.iter().map(|row| row.capacity).collect();
-
-    let frame = df!(
-        CODE => codes,
-        DATE => dates,
-        OPEN => opens,
-        HIGH => highs,
-        LOW => lows,
-        CLOSE => closes,
-        VOLUME => volumes,
-    )?;
-
-    Ok(frame.lazy())
-}
-
-/// Stand-in for the live feed. Each ticker drifts at its own pace so the per-date
-/// cross-section has the variance the z-score needs. Synthetic, so actions are only
-/// meaningful once swapped for the real HTTP fetch.
-fn mock_fetch(steps: usize) -> Vec<OhlcvRow> {
-    // One extra day so the first log-return row is not dropped.
-    let days = steps + 1;
-    let start = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
-
-    // (code, starting close); start seeds each ticker's drift rate.
-    let universe = [
-        ("2330", 1000.0_f64),
-        ("2317", 100.0),
-        ("2454", 1300.0),
-        ("2308", 480.0),
-        ("2412", 120.0),
-        ("3008", 2600.0),
-    ];
-
-    let mut rows = Vec::with_capacity(universe.len() * days);
-    for (code, start_close) in universe {
-        let mut close = start_close;
-        for offset in 0..days {
-            // Drift proportional to price level, so the cross-section is not
-            // degenerate.
-            close += start_close * 0.003;
-            let date = start + Duration::days(i64::try_from(offset).expect("small horizon"));
-            let row = OhlcvRow::new(
-                date,
-                (*code).to_owned(),
-                Some(close - 0.5),
-                Some(close + 1.0),
-                Some(close - 1.0),
-                Some(close),
-                None,
-                1_000_000,
-                0,
-                0,
-            )
-            .expect("mock rows are valid");
-            rows.push(row);
-        }
+    let mut decisions = Vec::with_capacity(latest.keys.len());
+    for ((ticker, _date), class) in latest.keys.into_iter().zip(classes) {
+        let index = usize::try_from(class).expect("argmax index is non-negative");
+        let action = Action::from_class(index).expect("argmax is below NUM_CLASSES");
+        decisions.push((ticker, action));
     }
 
-    rows
-}
-
-/// Place the orders the predictions imply, strongest signal first. `predictions` aligns
-/// by index with `windows`, which carry the ticker and date. Mocked: prints the buys a
-/// real trader would size against cash and submit to `sim_stock`.
-fn place_orders(
-    windows: &[InferenceWindow],
-    predictions: &[Prediction],
-    strategy: &StrategyConfig,
-    min_edge: f32,
-) {
-    let Some(as_of) = windows.iter().map(|window| window.date).max() else {
-        println!("No tickers had enough history to fill the model's window.");
-        return;
-    };
-
-    let mut buys: Vec<(&InferenceWindow, &Prediction, f32)> = windows
-        .iter()
-        .zip(predictions)
-        .map(|(window, prediction)| {
-            let edge = expected_edge(
-                &prediction.probabilities,
-                strategy.take_profit,
-                strategy.stop_loss,
-            );
-            (window, prediction, edge)
-        })
-        .filter(|(_, _, edge)| *edge > min_edge)
-        .collect();
-    buys.sort_by(|left, right| right.2.total_cmp(&left.2));
-
-    println!(
-        "As of {as_of}: {} tickers, {} actionable buys (edge > {min_edge:.3}).",
-        windows.len(),
-        buys.len(),
-    );
-
-    for (window, prediction, edge) in buys {
-        let probability_buy = prediction.probabilities[BUY];
-        // Real placement: SimStockClient::buy(&window.ticker, shares, price).await
-        println!(
-            "  [mock] BUY {:<8} P(Buy) {probability_buy:.3}  edge {edge:.3}",
-            window.ticker
-        );
-    }
+    place_orders(&decisions)
 }

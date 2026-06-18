@@ -4,11 +4,13 @@ use std::path::Path;
 use burn::backend::Wgpu;
 use burn::backend::wgpu::WgpuDevice;
 use burn::config::Config;
+use burn::tensor::{Int, Tensor, TensorData};
 use chrono::{Duration, NaiveDate};
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_model::class::Action;
 use stock_model::inference::Predictor;
+use stock_model::model::NUM_FEATURES;
 use stock_model::strategy::expected_edge;
 
 use crate::cli::{BacktestArgs, FillArg};
@@ -39,10 +41,23 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         .expect("loaded data should have at least one dated row");
     let cutoff = max_date - Duration::days(args.valid_days);
 
+    // Upload every row once; the predictor gathers each window on-device by start row.
+    let buffers = store.resident_buffers();
+    let features = Tensor::<InferenceBackend, 2>::from_data(
+        TensorData::new(buffers.features, [buffers.rows, NUM_FEATURES]),
+        &predictor.device,
+    );
+
     // Windows ending on or after the cutoff, lookback drawn from earlier bars. Index
     // each signal by (ticker, signal date).
     let windows = store.backtest_windows_since(config.steps, cutoff);
-    let predictions = predictor.predict(&windows);
+    // Date-filtered, so the start rows are inherently host-built; upload them once.
+    let start_rows: Vec<u32> = windows.iter().map(|window| window.start).collect();
+    let starts = Tensor::<InferenceBackend, 1, Int>::from_data(
+        TensorData::new(start_rows, [windows.len()]),
+        &predictor.device,
+    );
+    let predictions = predictor.predict(&features, &starts);
 
     let mut signals: HashMap<String, HashMap<NaiveDate, (f32, Action)>> = HashMap::new();
     for (window, prediction) in windows.iter().zip(&predictions) {

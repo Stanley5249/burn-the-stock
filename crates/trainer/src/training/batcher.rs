@@ -2,6 +2,7 @@ use crate::data::store::TickerStore;
 use crate::training::dataset::StockItem;
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
+use stock_model::inference::gather_windows;
 use stock_model::model::NUM_FEATURES;
 
 #[derive(Clone, Debug)]
@@ -52,37 +53,16 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
         let count = items.len();
         let steps = self.steps;
 
-        let start_values: Vec<i32> = items
-            .iter()
-            .map(|item| {
-                i32::try_from(item.start)
-                    .expect("row index exceeds i32; dataset far larger than supported")
-            })
-            .collect();
+        let start_values: Vec<u32> = items.iter().map(|item| item.start).collect();
         let starts = Tensor::<B, 1, Int>::from_data(TensorData::new(start_values, [count]), device);
 
-        // `[count, steps]` row indices: each window start broadcast over `0..steps`.
-        let offsets = Tensor::<B, 1, Int>::arange(
-            0..i64::try_from(steps)
-                .expect("steps exceeds i64; window length far larger than supported"),
-            device,
-        );
-        let index = starts.clone().reshape([count, 1]).expand([count, steps])
-            + offsets.reshape([1, steps]).expand([count, steps]);
-
-        // One indexed read, then fold the flat rows into `[count, steps, features]`.
-        let technical = self
-            .features
-            .clone()
-            .select(0, index.reshape([count * steps]))
-            .reshape([count, steps, NUM_FEATURES]);
+        // Same on-device gather the live predictor runs, so the index math has one source.
+        let technical = gather_windows(&self.features, &starts, steps);
 
         // The label comes from the window's last day.
-        let last = starts.add_scalar(
-            i32::try_from(steps)
-                .expect("steps exceeds i32; window length far larger than supported")
-                - 1,
-        );
+        let steps = u32::try_from(steps)
+            .expect("steps exceeds u32; window length far larger than supported");
+        let last = starts.add_scalar(steps - 1);
         let label = self.labels.clone().select(0, last);
 
         StockBatch { technical, label }
@@ -103,21 +83,26 @@ mod tests {
         let store = TickerStore::synthetic(2, 10);
         let batcher = StockBatcher::<TestBackend>::new(4, &store, &FlexDevice);
 
-        // First ticker's row 0, and second ticker's row 0 at offset 10.
-        let items = vec![StockItem { start: 0 }, StockItem { start: 10 }];
+        // First ticker's row 0, and second ticker's row 1 at offset 10.
+        let items = vec![StockItem { start: 0 }, StockItem { start: 11 }];
         let batch = batcher.batch(items, &FlexDevice);
 
         assert_eq!(batch.technical.dims(), [2, 4, NUM_FEATURES]);
         assert_eq!(batch.label.dims(), [2]);
 
-        // First window gathers ticker 0 rows 0..4, second ticker 1 rows 0..4.
+        // First window gathers ticker 0 rows 0..4, second ticker 1 rows 1..5.
         let values = batch.technical.into_data().to_vec::<f32>().unwrap();
         let stride = NUM_FEATURES;
         let expected_first = [0.0f32, 1.0, 2.0, 3.0];
-        let expected_second = [1000.0f32, 1001.0, 1002.0, 1003.0];
+        let expected_second = [1001.0f32, 1002.0, 1003.0, 1004.0];
         for step in 0..4 {
             assert!((values[step * stride] - expected_first[step]).abs() < 1e-6);
             assert!((values[(4 + step) * stride] - expected_second[step]).abs() < 1e-6);
         }
+
+        // Labels come from each window's last row: ticker 0 row 3 (3 % 3 = 0) and
+        // ticker 1 row 4 (4 % 3 = 1), so the u8 store labels convert by value.
+        let labels: Vec<i64> = batch.label.into_data().iter::<i64>().collect();
+        assert_eq!(labels, vec![0, 1]);
     }
 }

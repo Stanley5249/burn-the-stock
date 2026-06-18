@@ -7,8 +7,7 @@ use polars::prelude::*;
 use tracing::instrument;
 
 use stock_model::features::{
-    CLOSE, DATE, FEATURE, HIGH, InferenceWindow, LOW, OPEN, TICKER, feature_array,
-    standardized_features,
+    CLOSE, DATE, FEATURE, HIGH, LOW, OPEN, TICKER, feature_array, standardized_features,
 };
 use stock_model::model::NUM_FEATURES;
 
@@ -238,27 +237,32 @@ impl TickerStore {
         Ok(Self { tickers })
     }
 
-    /// Every `steps`-length window whose last bar is on or after `cutoff`, as an
-    /// [`InferenceWindow`] dated at that last bar. The window start may precede the
-    /// cutoff, so a held-out day draws its `steps - 1` lookback from earlier bars.
-    pub fn backtest_windows_since(&self, steps: usize, cutoff: NaiveDate) -> Vec<InferenceWindow> {
-        let stride = NUM_FEATURES;
+    /// Every `steps`-length window whose last bar is on or after `cutoff`, as a
+    /// [`BacktestWindow`] dated at that last bar. `start` is the absolute row into the
+    /// flat layout `resident_buffers` produces, so the predictor gathers it directly. The
+    /// window start may precede the cutoff, so a held-out day draws its `steps - 1`
+    /// lookback from earlier bars.
+    pub fn backtest_windows_since(&self, steps: usize, cutoff: NaiveDate) -> Vec<BacktestWindow> {
+        let offsets = self.row_offsets();
         let mut windows = Vec::new();
 
-        for ticker in &self.tickers {
+        for (ticker_index, ticker) in self.tickers.iter().enumerate() {
             if ticker.rows() < steps {
                 continue;
             }
             let last_start = ticker.rows() - steps;
-            for start in 0..=last_start {
-                let last = start + steps - 1;
+            for window_start in 0..=last_start {
+                let last = window_start + steps - 1;
                 if ticker.dates[last] < cutoff {
                     continue;
                 }
-                windows.push(InferenceWindow {
+                let start = offsets[ticker_index]
+                    + u32::try_from(window_start)
+                        .expect("row index exceeds u32; ticker far larger than supported");
+                windows.push(BacktestWindow {
+                    start,
                     ticker: ticker.name.to_string(),
                     date: ticker.dates[last],
-                    features: ticker.features[start * stride..(last + 1) * stride].to_vec(),
                 });
             }
         }
@@ -410,7 +414,7 @@ impl TickerStore {
 
         for ticker in &self.tickers {
             features.extend_from_slice(&ticker.features);
-            labels.extend(ticker.labels.iter().map(|&label| i32::from(label)));
+            labels.extend_from_slice(&ticker.labels);
         }
 
         ResidentBuffers {
@@ -426,7 +430,15 @@ impl TickerStore {
 pub(crate) struct ResidentBuffers {
     pub(crate) rows: usize,
     pub(crate) features: Vec<f32>,
-    pub(crate) labels: Vec<i32>,
+    pub(crate) labels: Vec<u8>,
+}
+
+/// One scored backtest window: its absolute start row in the resident feature layout,
+/// plus the ticker and last-bar date that key the signal.
+pub struct BacktestWindow {
+    pub start: u32,
+    pub ticker: String,
+    pub date: NaiveDate,
 }
 
 /// One ticker's raw daily prices for the backtest. The price vectors share `dates`'

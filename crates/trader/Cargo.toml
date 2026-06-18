@@ -11,7 +11,7 @@ burn = { workspace = true, features = ["std"] }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 miette = { workspace = true, features = ["fancy"] }
-polars = { workspace = true, features = ["dtype-date", "lazy"] }
+polars = { workspace = true, features = ["dtype-date", "lazy", "parquet"] }
 
 [features]
 default = ["wgpu"]

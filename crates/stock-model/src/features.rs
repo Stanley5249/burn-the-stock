@@ -2,8 +2,11 @@
 //! per-date cross-sectional z-score over the whole universe. One implementation
 //! keeps the training distribution and the live inputs identical.
 
+use burn::prelude::*;
 use chrono::NaiveDate;
 use polars::prelude::*;
+
+use crate::model::NUM_FEATURES;
 
 /// Raw source columns the transform reads.
 pub const CODE: PlSmallStr = PlSmallStr::from_static("code");
@@ -127,31 +130,40 @@ pub fn feature_array() -> Expr {
     .expect("feature columns are non-empty and uniformly f32")
 }
 
-/// One ticker's most recent `steps`-day feature window, the model input as of
-/// [`InferenceWindow::date`].
-pub struct InferenceWindow {
-    pub ticker: String,
-    /// The bar the prediction is made from.
-    pub date: NaiveDate,
-    /// Row-major standardized features, length `steps * 5`.
-    pub features: Vec<f32>,
+/// Each kept ticker's most recent `steps`-day window, ready for the predictor. Every
+/// window's rows are concatenated in `keys` order, so the predictor gathers window `i`
+/// from start row `i * steps`.
+pub struct LatestWindows<B: Backend> {
+    /// One `(ticker, last-bar date)` per window, in `features` order.
+    pub keys: Vec<(String, NaiveDate)>,
+    /// Row-major `[NUM_TICKERS, steps, NUM_FEATURES]`, ready to upload to a device.
+    pub features: Tensor<B, 3>,
 }
 
-/// Each ticker's most recent `steps`-day window from a frame already run through
-/// [`standardized_features`]. Tickers with fewer than `steps` rows are skipped.
+/// Each ticker's most recent `steps`-day window from a frame already run
+/// through [`standardized_features`], built on `device`. Tickers with fewer than
+/// `steps` rows are skipped.
 ///
 /// # Errors
 /// If the frame cannot be collected or its columns are malformed.
 ///
 /// # Panics
-/// If a partitioned group is empty, which `partition_by_stable` never yields.
-pub fn latest_windows(features: LazyFrame, steps: usize) -> PolarsResult<Vec<InferenceWindow>> {
+/// If a partitioned group is empty, which `partition_by_stable` never
+/// yields.
+pub fn latest_windows<B: Backend>(
+    features: LazyFrame,
+    steps: usize,
+    device: &B::Device,
+) -> PolarsResult<LatestWindows<B>> {
     let long = features
         .select([col(TICKER), col(DATE), feature_array().alias(FEATURE)])
         .collect()?;
 
     let groups = long.partition_by_stable([TICKER], true)?;
-    let mut windows = Vec::with_capacity(groups.len());
+
+    let mut flat = Vec::with_capacity(groups.len() * steps * NUM_FEATURES);
+
+    let mut keys = Vec::with_capacity(groups.len());
 
     for group in groups {
         // Too short to fill the window.
@@ -162,13 +174,14 @@ pub fn latest_windows(features: LazyFrame, steps: usize) -> PolarsResult<Vec<Inf
 
         let ticker = tail.column(&TICKER)?.str()?.get(0).unwrap().to_owned();
 
-        let features: Vec<f32> = tail
-            .column(&FEATURE)?
-            .array()?
-            .get_inner()
-            .f32()?
-            .into_no_null_iter()
-            .collect();
+        // The tail's feature column is already `steps * NUM_FEATURES` row-major values.
+        flat.extend(
+            tail.column(&FEATURE)?
+                .array()?
+                .get_inner()
+                .f32()?
+                .into_no_null_iter(),
+        );
 
         // Last row is the bar to predict from.
         let date = tail
@@ -179,14 +192,15 @@ pub fn latest_windows(features: LazyFrame, steps: usize) -> PolarsResult<Vec<Inf
             .last()
             .expect("tail holds steps rows");
 
-        windows.push(InferenceWindow {
-            ticker,
-            date,
-            features,
-        });
+        keys.push((ticker, date));
     }
 
-    Ok(windows)
+    let features = Tensor::from_data(
+        TensorData::new(flat, [keys.len(), steps, NUM_FEATURES]),
+        device,
+    );
+
+    Ok(LatestWindows { keys, features })
 }
 
 #[cfg(test)]
