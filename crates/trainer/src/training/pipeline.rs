@@ -15,12 +15,14 @@ use burn::train::{
 };
 use miette::{IntoDiagnostic, Result, WrapErr, bail};
 
-use crate::data::store::TickerStore;
+use crate::data::label::{into_labeled, label_counts};
 use crate::training::batcher::StockBatcher;
 use crate::training::dataset::WindowDataset;
 use crate::training::metric::{ExpectedValueMetric, PrecisionClassMetric};
 use crate::training::model::StockClassifier;
+use fastrand::Rng;
 use stock_model::class::Action;
+use stock_model::data::TickerFrames;
 use stock_model::model::StockModelConfig;
 
 /// Top-level training configuration.
@@ -109,10 +111,11 @@ pub fn train<B: AutodiffBackend>(
 
     B::seed(device, config.seed);
 
-    // Load the backend-free store once; the batchers produce tensors later, so the
-    // data is not copied per backend.
-    let store = TickerStore::load(
-        data_path,
+    // Load the standardized store once, then label it; the batchers produce tensors
+    // later, so the data is not copied per backend.
+    let store = TickerFrames::load(data_path).into_diagnostic()?;
+    let store = into_labeled(
+        &store,
         config.take_profit,
         config.stop_loss,
         config.label_horizon,
@@ -121,13 +124,14 @@ pub fn train<B: AutodiffBackend>(
 
     // Trim before the split so both sides shrink together.
     let store = match max_tickers {
-        Some(count) => store.sample_tickers(count, config.seed),
+        Some(count) => sample_tickers(store, count, config.seed),
         None => store,
     };
 
     // One global cutoff `valid_days` before the latest date, aligned across tickers.
     let max_date = store
         .max_date()
+        .into_diagnostic()?
         .expect("loaded data should have at least one dated row");
     let cutoff = max_date - chrono::Duration::days(valid_days);
 
@@ -136,8 +140,8 @@ pub fn train<B: AutodiffBackend>(
         .into_diagnostic()?;
 
     // Class balance per split, to tune the barriers toward an even mix.
-    let train_counts = train_store.label_counts();
-    let valid_counts = valid_store.label_counts();
+    let train_counts = label_counts(&train_store).into_diagnostic()?;
+    let valid_counts = label_counts(&valid_store).into_diagnostic()?;
     tracing::info!(
         train_sell = train_counts[0],
         train_hold = train_counts[1],
@@ -255,6 +259,21 @@ pub fn train<B: AutodiffBackend>(
         .wrap_err_with(|| format!("saving model to {}", model_path.display()))?;
 
     Ok(())
+}
+
+/// Randomly keep `count` tickers, reproducible by `seed`, for overfit diagnostics. A
+/// no-op when `count` is at least the ticker count.
+fn sample_tickers(store: TickerFrames, count: usize, seed: u64) -> TickerFrames {
+    if count >= store.frames.len() {
+        return store;
+    }
+    let mut rng = Rng::with_seed(seed);
+    let indices = rng.choose_multiple(0..store.frames.len(), count);
+    let frames = indices
+        .into_iter()
+        .map(|index| store.frames[index].clone())
+        .collect();
+    TickerFrames { frames }
 }
 
 /// Epoch (1-based) of the lowest-valid-loss checkpoint still on disk. burn has no

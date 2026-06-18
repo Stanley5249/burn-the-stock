@@ -4,17 +4,17 @@ use std::path::Path;
 use burn::backend::Wgpu;
 use burn::backend::wgpu::WgpuDevice;
 use burn::config::Config;
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::module::Module;
+use burn::record::CompactRecorder;
 use chrono::{Duration, NaiveDate};
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_model::class::Action;
-use stock_model::inference::Predictor;
-use stock_model::model::NUM_FEATURES;
+use stock_model::data::{TickerFrames, TickerQuotes, stack_windows};
+use stock_model::inference::predict;
 use stock_model::strategy::expected_edge;
 
 use crate::cli::{BacktestArgs, FillArg};
-use crate::data::store::TickerStore;
 use crate::portfolio::{
     self, BacktestConfig, BacktestReport, DayBar, Fill, RenderContext, STARTING_CASH, TradingDay,
 };
@@ -22,43 +22,57 @@ use crate::training::TrainingConfig;
 
 type InferenceBackend = Wgpu;
 
+/// Windows per forward pass, capping GPU memory on a universe-wide backtest.
+const SCORE_CHUNK: usize = 1024;
+
 /// Run the portfolio backtest over the held-out split, reporting metrics and a CSV of
 /// the daily account value.
 pub fn run(args: &BacktestArgs) -> Result<()> {
     let device = WgpuDevice::default();
 
-    // Only the window length is needed from the run's config; barriers and labels do
-    // not apply to inference.
+    // The window length and barriers come from the run's config; labels do not apply
+    // to inference.
     let config = TrainingConfig::load(args.artifact_dir.join("config.json")).into_diagnostic()?;
 
-    let predictor = Predictor::<InferenceBackend>::load(&args.artifact_dir, device)?;
+    let model = config
+        .model
+        .init::<InferenceBackend>(&device)
+        .load_file(
+            args.artifact_dir.join("model"),
+            &CompactRecorder::new(),
+            &device,
+        )
+        .into_diagnostic()?;
 
-    // Price-only load keeps every row, so the most recent bars stay tradeable.
-    let store = TickerStore::load_prices(&args.data).into_diagnostic()?;
+    // Every row is loaded, so the most recent bars stay tradeable.
+    let store = TickerFrames::load(&args.data).into_diagnostic()?;
 
     let max_date = store
         .max_date()
+        .into_diagnostic()?
         .expect("loaded data should have at least one dated row");
     let cutoff = max_date - Duration::days(args.valid_days);
 
-    // Upload every row once; the predictor gathers each window on-device by start row.
-    let buffers = store.resident_buffers();
-    let features = Tensor::<InferenceBackend, 2>::from_data(
-        TensorData::new(buffers.features, [buffers.rows, NUM_FEATURES]),
-        &predictor.device,
-    );
+    // Windows ending on or after the cutoff, lookback drawn from earlier bars.
+    let features = store
+        .feature_tensors::<InferenceBackend>(&device)
+        .into_diagnostic()?;
+    let windows = store
+        .windows_since(config.steps, cutoff)
+        .into_diagnostic()?;
 
-    // Windows ending on or after the cutoff, lookback drawn from earlier bars. Index
-    // each signal by (ticker, signal date).
-    let windows = store.backtest_windows_since(config.steps, cutoff);
-    // Date-filtered, so the start rows are inherently host-built; upload them once.
-    let start_rows: Vec<u32> = windows.iter().map(|window| window.start).collect();
-    let starts = Tensor::<InferenceBackend, 1, Int>::from_data(
-        TensorData::new(start_rows, [windows.len()]),
-        &predictor.device,
-    );
-    let predictions = predictor.predict(&features, &starts);
+    // Score in chunks so the GPU holds one chunk of windows at a time.
+    let mut predictions = Vec::with_capacity(windows.len());
+    for chunk in windows.chunks(SCORE_CHUNK) {
+        let pairs: Vec<(u32, u32)> = chunk
+            .iter()
+            .map(|window| (window.ticker_index, window.start))
+            .collect();
+        let technical = stack_windows(&features, &pairs, config.steps, &device);
+        predictions.extend(predict(&model, technical));
+    }
 
+    // Index each signal by (ticker, signal date).
     let mut signals: HashMap<String, HashMap<NaiveDate, (f32, Action)>> = HashMap::new();
     for (window, prediction) in windows.iter().zip(&predictions) {
         let edge = expected_edge(
@@ -77,7 +91,8 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         FillArg::Open => Fill::Open,
     };
 
-    let days = build_days(&store, &signals);
+    let quotes = store.quotes().into_diagnostic()?;
+    let days = build_days(&quotes, &signals);
 
     let backtest_config = BacktestConfig {
         threshold: args.threshold,
@@ -91,7 +106,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     let report = portfolio::run(&days, &backtest_config);
 
     let context = RenderContext {
-        tickers: store.ticker_count(),
+        tickers: store.frames.len(),
         windows_scored: windows.len(),
         threshold: args.threshold,
         fill,
@@ -123,12 +138,12 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
 /// order (the no-look-ahead lag), priced from today's bar; missing-price bars are
 /// skipped.
 fn build_days(
-    data: &TickerStore,
+    quotes: &[TickerQuotes],
     signals: &HashMap<String, HashMap<NaiveDate, (f32, Action)>>,
 ) -> Vec<TradingDay> {
     let mut by_date: BTreeMap<NaiveDate, HashMap<String, DayBar>> = BTreeMap::new();
 
-    for quotes in data.quotes() {
+    for quotes in quotes {
         let ticker_signals = signals.get(&quotes.ticker);
         for index in 1..quotes.dates.len() {
             let signal_date = quotes.dates[index - 1];

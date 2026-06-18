@@ -3,6 +3,7 @@
 //! prices into the same model inputs.
 
 pub mod class;
+pub mod data;
 pub mod features;
 pub mod inference;
 pub mod model;

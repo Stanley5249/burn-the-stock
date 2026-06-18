@@ -1,5 +1,61 @@
 use polars::prelude::*;
 use stock_model::class::Action;
+use stock_model::data::{LABEL, TickerFrames};
+use stock_model::features::{CLOSE, HIGH, LOW};
+
+/// Label every ticker frame with the triple-barrier class of opening a long at each
+/// close, then drop the trailing `horizon` rows that have no forward outcome. The
+/// barriers come from [`compute_labels`]; tickers too short for one labeled row are
+/// dropped. The labeled store is `horizon` rows per ticker shorter than the input.
+///
+/// # Errors
+/// If a frame's price columns are malformed or the label column cannot be attached.
+pub fn into_labeled(
+    frames: &TickerFrames,
+    take_profit: f32,
+    stop_loss: f32,
+    horizon: usize,
+) -> PolarsResult<TickerFrames> {
+    let mut labeled = Vec::with_capacity(frames.frames.len());
+
+    for frame in &frames.frames {
+        let height = frame.height();
+        // Too short for even one labeled row.
+        if height <= horizon {
+            continue;
+        }
+
+        let labels = compute_labels(
+            frame.column(&HIGH)?,
+            frame.column(&LOW)?,
+            frame.column(&CLOSE)?,
+            take_profit,
+            stop_loss,
+            horizon,
+        )?;
+
+        // `compute_labels` already drops the trailing horizon, so the head aligns.
+        let mut head = frame.head(Some(height - horizon));
+        head.with_column(Column::new(LABEL, labels))?;
+        labeled.push(head);
+    }
+
+    Ok(TickerFrames { frames: labeled })
+}
+
+/// Per-class label counts across the store, indexed Sell 0, Hold 1, Buy 2.
+///
+/// # Errors
+/// If a frame lacks a `u8` label column.
+pub fn label_counts(frames: &TickerFrames) -> PolarsResult<[usize; 3]> {
+    let mut counts = [0usize; 3];
+    for frame in &frames.frames {
+        for label in frame.column(&LABEL)?.u8()?.into_no_null_iter() {
+            counts[usize::from(label)] += 1;
+        }
+    }
+    Ok(counts)
+}
 
 /// Label each row with the triple-barrier outcome of opening a long at its close.
 /// For entry `close[t]`, scan the next `horizon` bars: the first high crossing
