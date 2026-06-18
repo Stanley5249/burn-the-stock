@@ -6,7 +6,7 @@ use burn::backend::wgpu::WgpuDevice;
 use burn::config::Config;
 use burn::module::Module;
 use burn::record::CompactRecorder;
-use chrono::{Duration, NaiveDate};
+use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_model::class::Action;
@@ -47,11 +47,13 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     // Every row is loaded, so the most recent bars stay tradeable.
     let store = TickerFrames::load(&args.data).into_diagnostic()?;
 
-    let max_date = store
-        .max_date()
-        .into_diagnostic()?
-        .expect("loaded data should have at least one dated row");
-    let cutoff = max_date - Duration::days(args.valid_days);
+    // The split boundary is the run's stored `valid_from`, so the held-out window matches
+    // training exactly even if the parquet grew since. An explicit flag still overrides.
+    let split = config
+        .split
+        .as_ref()
+        .expect("config predates the stored split; retrain to add valid_from");
+    let cutoff = args.valid_from.unwrap_or(split.valid_from);
 
     // Windows ending on or after the cutoff, lookback drawn from earlier bars.
     let features = store

@@ -20,6 +20,7 @@ use crate::training::batcher::StockBatcher;
 use crate::training::dataset::WindowDataset;
 use crate::training::metric::{ExpectedValueMetric, PrecisionClassMetric};
 use crate::training::model::StockClassifier;
+use chrono::NaiveDate;
 use fastrand::Rng;
 use stock_model::class::{Action, NUM_CLASSES};
 use stock_model::data::TickerFrames;
@@ -63,6 +64,24 @@ pub struct TrainingConfig {
     pub epoch_size: usize,
     #[config(default = 42)]
     pub seed: u64,
+    /// Resolved dataset provenance, written once the data loads. `None` until `train`
+    /// fills it; the trader's partial load ignores it.
+    pub split: Option<DataSplit>,
+}
+
+/// Resolved dataset provenance for a run, written after the data loads so the backtest
+/// reloads the exact split and universe. The train window is `[data_start, valid_from)`
+/// and the valid window is `[valid_from, valid_to]`.
+#[derive(Config, Debug)]
+pub struct DataSplit {
+    /// First dated row in the run's data, the train window start.
+    pub data_start: NaiveDate,
+    /// Train/valid boundary; valid holds windows whose last bar is on or after it.
+    pub valid_from: NaiveDate,
+    /// Last dated row at training time, the valid window end.
+    pub valid_to: NaiveDate,
+    /// Ticker universe the run trained on, in frame order.
+    pub tickers: Vec<String>,
 }
 
 /// Runtime knobs that shape one run without touching the model or optimizer config.
@@ -137,6 +156,17 @@ pub fn train<B: AutodiffBackend>(
         .into_diagnostic()?
         .expect("loaded data should have at least one dated row");
     let cutoff = max_date - chrono::Duration::days(valid_days);
+
+    // Resolve the split to concrete dates and pin the universe, so the backtest reloads
+    // this exact window regardless of newer bars.
+    let data_start = store
+        .min_date()
+        .into_diagnostic()?
+        .expect("loaded data should have at least one dated row");
+    let tickers = store.tickers().into_diagnostic()?;
+    let config = config
+        .clone()
+        .with_split(Some(DataSplit::new(data_start, cutoff, max_date, tickers)));
 
     let (train_store, valid_store) = store
         .train_valid_split(cutoff, config.steps)

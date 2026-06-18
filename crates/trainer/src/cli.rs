@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use burn::optim::AdamWConfig;
+use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
 use stock_model::class::NUM_CLASSES;
 use stock_model::model::StockModelConfig;
@@ -252,11 +253,11 @@ pub struct BacktestArgs {
     #[arg(long, default_value = "data/yfinance/stocks.parquet")]
     pub data: PathBuf,
 
-    /// Calendar days of the recent window to backtest. The lookback reaches before the
-    /// cutoff, so tradeable days are roughly the trading days within this window. Match
-    /// train's `--valid-days`.
-    #[arg(long, default_value_t = 180)]
-    pub valid_days: i64,
+    /// Train/valid boundary to score from; the lookback reaches before it, so tradeable
+    /// days are roughly the trading days after it. Defaults to the run's stored
+    /// `valid_from`.
+    #[arg(long)]
+    pub valid_from: Option<NaiveDate>,
 
     /// Minimum expected edge `clamp(P(Buy)*tp - P(Sell)*sl, 0)` to buy, so weak signals
     /// stay in cash.

@@ -227,6 +227,30 @@ impl TickerFrames {
         Ok(max)
     }
 
+    /// The earliest date across every ticker, the train window's start. `None` when no
+    /// ticker has a dated row.
+    ///
+    /// # Errors
+    /// If a frame's date column is malformed.
+    pub fn min_date(&self) -> PolarsResult<Option<NaiveDate>> {
+        let mut min: Option<NaiveDate> = None;
+        for frame in &self.frames {
+            // Dates ascend, so the first row is the ticker's earliest.
+            if let Some(&first) = date_buffer(frame)?.first() {
+                min = Some(min.map_or(first, |current| current.min(first)));
+            }
+        }
+        Ok(min)
+    }
+
+    /// Every ticker symbol in frame order, the run's universe.
+    ///
+    /// # Errors
+    /// If a frame's ticker column is malformed.
+    pub fn tickers(&self) -> PolarsResult<Vec<String>> {
+        self.frames.iter().map(ticker_name).collect()
+    }
+
     /// Split every ticker at `cutoff` into an earlier-train and a later-valid store. A
     /// side with fewer than `steps` rows is dropped. Errors if either side ends up empty.
     ///
