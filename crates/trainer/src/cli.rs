@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use burn::optim::AdamWConfig;
 use clap::{Parser, Subcommand};
+use stock_model::class::NUM_CLASSES;
 use stock_model::model::StockModelConfig;
 
 use crate::training::{RunOptions, TrainingConfig};
@@ -95,6 +96,16 @@ pub struct TrainArgs {
     /// Random seed for the split, sampling, and parameter initialization.
     #[arg(long, help_heading = "Training schedule")]
     pub seed: Option<u64>,
+
+    /// Sell Hold Buy cross-entropy weights, upweighting the rare actionable classes.
+    /// Three floats; defaults to the config's [2, 1, 2].
+    #[arg(
+        long,
+        num_args = 3,
+        value_names = ["SELL", "HOLD", "BUY"],
+        help_heading = "Training schedule"
+    )]
+    pub class_weights: Option<Vec<f32>>,
 
     /// Take-profit barrier for the triple-barrier labels, as a fraction of price.
     #[arg(long, help_heading = "Labeling (triple-barrier)")]
@@ -192,6 +203,14 @@ impl TrainArgs {
         }
         if let Some(fee) = self.fee {
             config = config.with_fee(fee);
+        }
+        if let Some(class_weights) = &self.class_weights {
+            // clap's num_args = 3 guarantees exactly NUM_CLASSES values.
+            let weights: [f32; NUM_CLASSES] = class_weights
+                .clone()
+                .try_into()
+                .expect("--class-weights takes exactly NUM_CLASSES values");
+            config = config.with_class_weights(weights);
         }
 
         config

@@ -21,7 +21,7 @@ use crate::training::dataset::WindowDataset;
 use crate::training::metric::{ExpectedValueMetric, PrecisionClassMetric};
 use crate::training::model::StockClassifier;
 use fastrand::Rng;
-use stock_model::class::Action;
+use stock_model::class::{Action, NUM_CLASSES};
 use stock_model::data::TickerFrames;
 use stock_model::model::StockModelConfig;
 
@@ -45,6 +45,9 @@ pub struct TrainingConfig {
     /// is 0.585%.
     #[config(default = 0.005_85)]
     pub fee: f32,
+    /// Sell, Hold, Buy cross-entropy weights, upweighting the rare actionable classes.
+    #[config(default = "[2.0, 1.0, 2.0]")]
+    pub class_weights: [f32; NUM_CLASSES],
     /// Full passes over the training data; `passes * windows / epoch_size` epochs run.
     #[config(default = 3)]
     pub passes: usize,
@@ -201,7 +204,7 @@ pub fn train<B: AutodiffBackend>(
         None => valid_builder().build(WindowDataset::new(&valid_store, config.steps)),
     };
 
-    let model = StockClassifier::new(&config.model, device);
+    let model = StockClassifier::new(&config.model, config.class_weights, device);
 
     let optimizer = config.optimizer.init::<B, StockClassifier<B>>();
 
@@ -242,7 +245,7 @@ pub fn train<B: AutodiffBackend>(
         let checkpoint = artifact_dir
             .join("checkpoint")
             .join(format!("model-{epoch}"));
-        StockClassifier::<B::InnerBackend>::new(&config.model, device)
+        StockClassifier::<B::InnerBackend>::new(&config.model, config.class_weights, device)
             .load_file(&checkpoint, &CompactRecorder::new(), device)
             .into_diagnostic()
             .wrap_err_with(|| format!("loading best checkpoint {}", checkpoint.display()))?

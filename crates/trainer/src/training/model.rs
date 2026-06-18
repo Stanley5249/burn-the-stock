@@ -11,9 +11,6 @@ use stock_model::model::{StockModel, StockModelConfig};
 use crate::training::batcher::StockBatch;
 use crate::training::metric::StockEvalInput;
 
-/// Sell, Hold, Buy loss weights, upweighting the rare actionable classes.
-pub const CLASS_WEIGHTS: [f32; NUM_CLASSES] = [2.0, 1.0, 2.0];
-
 /// Training wrapper around [`StockModel`], adding the loss and the train/eval steps,
 /// so the model crate stays free of training machinery.
 #[derive(Module, Debug)]
@@ -23,10 +20,16 @@ pub struct StockClassifier<B: Backend> {
 }
 
 impl<B: Backend> StockClassifier<B> {
-    pub fn new(config: &StockModelConfig, device: &B::Device) -> Self {
+    /// `class_weights` are the Sell, Hold, Buy cross-entropy weights, upweighting the
+    /// rare actionable classes.
+    pub fn new(
+        config: &StockModelConfig,
+        class_weights: [f32; NUM_CLASSES],
+        device: &B::Device,
+    ) -> Self {
         let model = config.init::<B>(device);
         let loss = CrossEntropyLossConfig::new()
-            .with_weights(Some(CLASS_WEIGHTS.to_vec()))
+            .with_weights(Some(class_weights.to_vec()))
             .init(device);
 
         Self { model, loss }
