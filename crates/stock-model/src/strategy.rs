@@ -2,8 +2,6 @@
 //! math over a probability row, so the live trader and the backtest score signals the
 //! same way without pulling in the inference machinery.
 
-use burn::config::Config;
-
 use crate::class::{BUY, NUM_CLASSES, SELL};
 
 /// Long-only expected edge for one ticker, `clamp(P(Buy)*take_profit -
@@ -12,14 +10,6 @@ use crate::class::{BUY, NUM_CLASSES, SELL};
 #[must_use]
 pub fn expected_edge(probabilities: &[f32; NUM_CLASSES], take_profit: f32, stop_loss: f32) -> f32 {
     (probabilities[BUY] * take_profit - probabilities[SELL] * stop_loss).max(0.0)
-}
-
-/// The strategy slice of a run's config. `Config` ignores the extra fields, so this
-/// loads the barriers from the same `config.json` the trainer writes.
-#[derive(Config, Debug)]
-pub struct StrategyConfig {
-    pub take_profit: f32,
-    pub stop_loss: f32,
 }
 
 #[cfg(test)]
