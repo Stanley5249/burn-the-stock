@@ -114,33 +114,32 @@ impl TickerFrames {
     /// If a frame's feature, ticker, or date column is malformed.
     ///
     /// # Panics
-    /// If a ticker index or row count exceeds `u32`, far larger than supported.
+    /// If a kept tail is empty, which the `height < steps` guard prevents.
     pub fn latest_windows<B: Backend>(
         &self,
         steps: usize,
         device: &B::Device,
     ) -> PolarsResult<LatestWindows<B>> {
-        let features = self.feature_tensors::<B>(device)?;
-
         let mut keys = Vec::new();
-        let mut windows = Vec::new();
-        for (ticker_index, frame) in self.frames.iter().enumerate() {
-            let rows = frame.height();
-            if rows < steps {
+        let mut flat = Vec::new();
+        for frame in &self.frames {
+            if frame.height() < steps {
                 continue;
             }
-            let date = date_buffer(frame)?
+            let tail = frame.tail(Some(steps));
+            let date = date_buffer(&tail)?
                 .last()
                 .copied()
-                .expect("frame is non-empty");
-            keys.push((ticker_name(frame)?, date));
-            windows.push((
-                u32::try_from(ticker_index).expect("ticker count exceeds u32"),
-                u32::try_from(rows - steps).expect("row index exceeds u32"),
-            ));
+                .expect("tail holds steps rows");
+            flat.extend(feature_buffer(&tail)?);
+            keys.push((ticker_name(&tail)?, date));
         }
 
-        Ok((keys, stack_windows(&features, &windows, steps, device)))
+        let technical = Tensor::from_data(
+            TensorData::new(flat, [keys.len(), steps, NUM_FEATURES]),
+            device,
+        );
+        Ok((keys, technical))
     }
 
     /// Every `(ticker_index, start)` window of length `steps`, in ticker-then-date
