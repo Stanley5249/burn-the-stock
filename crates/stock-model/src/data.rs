@@ -19,10 +19,6 @@ use crate::model::NUM_FEATURES;
 /// backtest, which never read labels.
 pub const LABEL: PlSmallStr = PlSmallStr::from_static("label");
 
-/// Each kept ticker's most recent window keyed by `(ticker, last-bar date)`, paired
-/// with the packed `[n, steps, NUM_FEATURES]` tensor.
-pub type LatestWindows<B> = (Vec<(String, NaiveDate)>, Tensor<B, 3>);
-
 /// One standardized frame per ticker, each sorted by date and holding `TICKER`, `DATE`,
 /// the packed `FEATURE` array, and the raw `OPEN`/`HIGH`/`LOW`/`CLOSE` prices. The
 /// trainer adds a `LABEL` column on top.
@@ -106,40 +102,36 @@ impl TickerFrames {
             .collect()
     }
 
-    /// Each ticker's most recent `steps`-day window as one `[n, steps, NUM_FEATURES]`
-    /// tensor, plus the `(ticker, last-bar date)` key per window. Tickers shorter than
-    /// `steps` are skipped. The live trader's input.
+    /// Each kept ticker's most recent `steps`-day window, keyed by ticker and its
+    /// last-bar date. Tickers shorter than `steps` are skipped. Pair with
+    /// [`feature_tensors`] and [`stack_windows`] to build the live trader's input,
+    /// the same windowing path the backtest uses.
+    ///
+    /// [`feature_tensors`]: Self::feature_tensors
     ///
     /// # Errors
-    /// If a frame's feature, ticker, or date column is malformed.
+    /// If a frame's ticker or date column is malformed.
     ///
     /// # Panics
-    /// If a kept tail is empty, which the `height < steps` guard prevents.
-    pub fn latest_windows<B: Backend>(
-        &self,
-        steps: usize,
-        device: &B::Device,
-    ) -> PolarsResult<LatestWindows<B>> {
-        let mut keys = Vec::new();
-        let mut flat = Vec::new();
-        for frame in &self.frames {
-            if frame.height() < steps {
+    /// If a ticker index or row count exceeds `u32`, far larger than supported.
+    pub fn latest_windows(&self, steps: usize) -> PolarsResult<Vec<Window>> {
+        let mut windows = Vec::new();
+        for (ticker_index, frame) in self.frames.iter().enumerate() {
+            let rows = frame.height();
+            if rows < steps {
                 continue;
             }
-            let tail = frame.tail(Some(steps));
-            let date = date_buffer(&tail)?
-                .last()
-                .copied()
-                .expect("tail holds steps rows");
-            flat.extend(feature_buffer(&tail)?);
-            keys.push((ticker_name(&tail)?, date));
+            let ticker_index = u32::try_from(ticker_index).expect("ticker count exceeds u32");
+            let start = u32::try_from(rows - steps).expect("row index exceeds u32");
+            let date = *date_buffer(frame)?.last().expect("height >= steps >= 1");
+            windows.push(Window {
+                ticker_index,
+                start,
+                ticker: ticker_name(frame)?,
+                date,
+            });
         }
-
-        let technical = Tensor::from_data(
-            TensorData::new(flat, [keys.len(), steps, NUM_FEATURES]),
-            device,
-        );
-        Ok((keys, technical))
+        Ok(windows)
     }
 
     /// Every `(ticker_index, start)` window of length `steps`, in ticker-then-date
@@ -173,11 +165,7 @@ impl TickerFrames {
     ///
     /// # Panics
     /// If a ticker index or row count exceeds `u32`, far larger than supported.
-    pub fn windows_since(
-        &self,
-        steps: usize,
-        cutoff: NaiveDate,
-    ) -> PolarsResult<Vec<BacktestWindow>> {
+    pub fn windows_since(&self, steps: usize, cutoff: NaiveDate) -> PolarsResult<Vec<Window>> {
         let mut windows = Vec::new();
         for (ticker_index, frame) in self.frames.iter().enumerate() {
             let rows = frame.height();
@@ -192,7 +180,7 @@ impl TickerFrames {
                 if dates[last] < cutoff {
                     continue;
                 }
-                windows.push(BacktestWindow {
+                windows.push(Window {
                     ticker_index,
                     start: u32::try_from(start).expect("row index exceeds u32"),
                     ticker: ticker.clone(),
@@ -314,9 +302,10 @@ pub fn stack_windows<B: Backend>(
     Tensor::stack(slices, 0)
 }
 
-/// One scored backtest window: its `(ticker_index, start)` into the resident tensors,
-/// plus the ticker and last-bar date that key the signal.
-pub struct BacktestWindow {
+/// One scored window: its `(ticker_index, start)` into the resident tensors, plus
+/// the ticker and last-bar date that key the signal. Produced by [`TickerFrames::windows_since`]
+/// for the backtest and [`TickerFrames::latest_windows`] for the trader.
+pub struct Window {
     pub ticker_index: u32,
     pub start: u32,
     pub ticker: String,
@@ -477,16 +466,15 @@ mod tests {
     #[test]
     fn latest_windows_take_each_ticker_tail() {
         let store = synthetic(3, 8);
-        let (keys, tensor) = store.latest_windows::<Flex>(4, &FlexDevice).unwrap();
+        let windows = store.latest_windows(4).unwrap();
 
-        assert_eq!(keys.len(), 3);
-        assert_eq!(tensor.dims(), [3, 4, NUM_FEATURES]);
-        // Ticker 0's tail of 8 rows ends on row 7.
+        assert_eq!(windows.len(), 3);
+        // An 8-row ticker's last 4-step window starts at row 4 and ends on row 7.
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        assert_eq!(
-            keys[0],
-            ("t0".to_owned(), epoch + chrono::Duration::days(7))
-        );
+        assert_eq!(windows[0].ticker_index, 0);
+        assert_eq!(windows[0].start, 4);
+        assert_eq!(windows[0].ticker, "t0");
+        assert_eq!(windows[0].date, epoch + chrono::Duration::days(7));
     }
 
     #[test]
