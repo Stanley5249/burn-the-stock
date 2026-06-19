@@ -31,7 +31,7 @@ pub fn refresh_latest(artifact_dir: &Path) {
             target_dir = %Path::new(name).display(),
             %error,
             "could not refresh latest link; on Windows enable Developer Mode or pass \
-             predict --artifact-dir explicitly"
+             backtest --artifact-dir explicitly"
         );
     }
 }

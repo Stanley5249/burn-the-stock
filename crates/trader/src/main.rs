@@ -16,7 +16,7 @@ use polars::prelude::*;
 use stock_model::class::Action;
 use stock_model::data::TickerFrames;
 use stock_model::features::DATE;
-use stock_model::inference::InferenceConfig;
+use stock_model::inference::{InferenceConfig, predict};
 
 type Backend = Wgpu;
 
@@ -91,15 +91,11 @@ fn main() -> Result<()> {
         .into_diagnostic()?;
 
     // One forward over every ticker; the model is tiny and there is one window each.
-    let logits = model.forward(technical);
-    let classes: Vec<i64> = logits.argmax(1).into_data().iter::<i64>().collect();
-
-    let mut decisions = Vec::with_capacity(keys.len());
-    for ((ticker, _date), class) in keys.into_iter().zip(classes) {
-        let index = usize::try_from(class).expect("argmax index is non-negative");
-        let action = Action::from_class(index).expect("argmax is below NUM_CLASSES");
-        decisions.push((ticker, action));
-    }
+    let decisions: Vec<(String, Action)> = keys
+        .into_iter()
+        .zip(predict(&model, technical))
+        .map(|((ticker, _date), prediction)| (ticker, prediction.action))
+        .collect();
 
     place_orders(&decisions)
 }

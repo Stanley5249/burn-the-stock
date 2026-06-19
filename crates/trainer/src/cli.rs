@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use stock_model::class::NUM_CLASSES;
 use stock_model::model::StockModelConfig;
 
+use crate::portfolio::Fill;
 use crate::training::{RunOptions, TrainingConfig};
 
 #[derive(Parser, Debug)]
@@ -145,66 +146,40 @@ pub struct TrainArgs {
     pub patience: usize,
 }
 
+macro_rules! apply {
+    ($target:ident, $flag:expr, $with:ident) => {
+        if let Some(value) = $flag {
+            $target = $target.$with(value);
+        }
+    };
+}
+
 impl TrainArgs {
-    /// Fold the flags into a [`TrainingConfig`], leaving each omitted flag's config
-    /// default untouched.
+    /// Fold the flags into a [`TrainingConfig`], leaving each omitted flag's
+    /// config default untouched.
     pub fn training_config(&self) -> TrainingConfig {
         let mut model = StockModelConfig::new();
-        if let Some(d_hidden) = self.d_hidden {
-            model = model.with_d_hidden(d_hidden);
-        }
-        if let Some(d_head) = self.d_head {
-            model = model.with_d_head(d_head);
-        }
-        if let Some(dropout) = self.dropout {
-            model = model.with_dropout(dropout);
-        }
+        apply!(model, self.d_hidden, with_d_hidden);
+        apply!(model, self.d_head, with_d_head);
+        apply!(model, self.dropout, with_dropout);
 
         let mut optimizer = AdamWConfig::new();
-        if let Some(weight_decay) = self.weight_decay {
-            optimizer = optimizer.with_weight_decay(weight_decay);
-        }
-        if let Some(beta_1) = self.beta_1 {
-            optimizer = optimizer.with_beta_1(beta_1);
-        }
-        if let Some(beta_2) = self.beta_2 {
-            optimizer = optimizer.with_beta_2(beta_2);
-        }
-        if let Some(epsilon) = self.epsilon {
-            optimizer = optimizer.with_epsilon(epsilon);
-        }
+        apply!(optimizer, self.weight_decay, with_weight_decay);
+        apply!(optimizer, self.beta_1, with_beta_1);
+        apply!(optimizer, self.beta_2, with_beta_2);
+        apply!(optimizer, self.epsilon, with_epsilon);
 
         let mut config = TrainingConfig::new(model, optimizer);
-        if let Some(passes) = self.passes {
-            config = config.with_passes(passes);
-        }
-        if let Some(batches_per_epoch) = self.batches_per_epoch {
-            config = config.with_epoch_size(batches_per_epoch);
-        }
-        if let Some(batch_size) = self.batch_size {
-            config = config.with_batch_size(batch_size);
-        }
-        if let Some(window_steps) = self.window_steps {
-            config = config.with_steps(window_steps);
-        }
-        if let Some(seed) = self.seed {
-            config = config.with_seed(seed);
-        }
-        if let Some(learning_rate) = self.learning_rate {
-            config = config.with_learning_rate(learning_rate);
-        }
-        if let Some(take_profit) = self.take_profit {
-            config = config.with_take_profit(take_profit);
-        }
-        if let Some(stop_loss) = self.stop_loss {
-            config = config.with_stop_loss(stop_loss);
-        }
-        if let Some(label_horizon) = self.label_horizon {
-            config = config.with_label_horizon(label_horizon);
-        }
-        if let Some(fee) = self.fee {
-            config = config.with_fee(fee);
-        }
+        apply!(config, self.passes, with_passes);
+        apply!(config, self.batches_per_epoch, with_epoch_size);
+        apply!(config, self.batch_size, with_batch_size);
+        apply!(config, self.window_steps, with_steps);
+        apply!(config, self.seed, with_seed);
+        apply!(config, self.learning_rate, with_learning_rate);
+        apply!(config, self.take_profit, with_take_profit);
+        apply!(config, self.stop_loss, with_stop_loss);
+        apply!(config, self.label_horizon, with_label_horizon);
+        apply!(config, self.fee, with_fee);
         if let Some(class_weights) = &self.class_weights {
             // clap's num_args = 3 guarantees exactly NUM_CLASSES values.
             let weights: [f32; NUM_CLASSES] = class_weights
@@ -227,15 +202,6 @@ impl TrainArgs {
             patience: (self.patience != 0).then_some(self.patience),
         }
     }
-}
-
-/// Which intraday prices the simulated orders fill at.
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-pub enum FillArg {
-    /// Optimistic best case: buy at the day's low, sell at the day's high.
-    LowHigh,
-    /// Pessimistic comparison: buy and sell at the day's open.
-    Open,
 }
 
 /// Long-only portfolio backtest over the held-out window under `sim_stock` rules.
@@ -281,8 +247,8 @@ pub struct BacktestArgs {
     pub max_holdings: usize,
 
     /// Which prices fills happen at: `low-high` optimistic, `open` pessimistic.
-    #[arg(long, value_enum, default_value_t = FillArg::LowHigh)]
-    pub fill: FillArg,
+    #[arg(long, value_enum, default_value_t = Fill::LowHigh)]
+    pub fill: Fill,
 
     /// Equity-curve CSV path. Defaults to `<artifact_dir>/backtest-equity.csv`.
     #[arg(long)]

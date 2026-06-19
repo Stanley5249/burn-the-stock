@@ -14,9 +14,9 @@ use stock_model::data::{TickerFrames, TickerQuotes, stack_windows};
 use stock_model::inference::predict;
 use stock_model::strategy::expected_edge;
 
-use crate::cli::{BacktestArgs, FillArg};
+use crate::cli::BacktestArgs;
 use crate::portfolio::{
-    self, BacktestConfig, BacktestReport, DayBar, Fill, RenderContext, STARTING_CASH, TradingDay,
+    self, BacktestConfig, BacktestReport, DayBar, RenderContext, STARTING_CASH, TradingDay,
 };
 use crate::training::TrainingConfig;
 
@@ -88,10 +88,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
             .insert(window.date, (edge, prediction.action));
     }
 
-    let fill = match args.fill {
-        FillArg::LowHigh => Fill::LowHigh,
-        FillArg::Open => Fill::Open,
-    };
+    let fill = args.fill;
 
     let quotes = store.quotes().into_diagnostic()?;
     let days = build_days(&quotes, &signals);

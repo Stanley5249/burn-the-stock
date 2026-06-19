@@ -65,7 +65,7 @@ pub fn label_counts(frames: &TickerFrames) -> PolarsResult<[usize; 3]> {
 ///
 /// The result is `horizon` rows shorter than the input, empty when
 /// `close.len() <= horizon`.
-pub fn triple_barrier_labels(
+fn triple_barrier_labels(
     high: &[f32],
     low: &[f32],
     close: &[f32],
@@ -118,7 +118,7 @@ pub fn triple_barrier_labels(
 
 /// Aligned `u8` label classes from the price columns, `horizon` rows shorter than
 /// the input. Errors if a column is not `f32` or has nulls.
-pub fn compute_labels(
+fn compute_labels(
     high: &Column,
     low: &Column,
     close: &Column,

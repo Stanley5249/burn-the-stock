@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::NaiveDate;
+use clap::ValueEnum;
 use stock_model::class::Action;
 
 /// Why a holding was closed.
@@ -47,7 +48,7 @@ impl fmt::Display for Side {
 }
 
 /// Which intraday prices the simulated orders fill at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Fill {
     /// Optimistic best case: buy at the day's low, sell at the day's high.
     LowHigh,
