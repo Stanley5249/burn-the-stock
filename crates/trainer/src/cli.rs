@@ -107,6 +107,10 @@ pub struct TrainArgs {
     )]
     pub class_weights: Option<Vec<f32>>,
 
+    /// Weight on the soft expected-value loss term added to cross-entropy; 0 disables it.
+    #[arg(long, help_heading = "Training schedule")]
+    pub ev_weight: Option<f32>,
+
     /// Take-profit barrier for the triple-barrier labels, as a fraction of price.
     #[arg(long, help_heading = "Labeling")]
     pub take_profit: Option<f32>,
@@ -177,6 +181,7 @@ impl TrainArgs {
         apply!(config, self.stop_loss, with_stop_loss);
         apply!(config, self.label_horizon, with_label_horizon);
         apply!(config, self.fee, with_fee);
+        apply!(config, self.ev_weight, with_ev_weight);
         if let Some(class_weights) = &self.class_weights {
             // clap's num_args = 3 guarantees exactly NUM_CLASSES values.
             let weights: [f32; NUM_CLASSES] = class_weights

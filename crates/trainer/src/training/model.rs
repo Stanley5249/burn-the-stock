@@ -2,14 +2,16 @@ use burn::backend::flex::{Flex, FlexDevice};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::prelude::*;
 use burn::tensor::Transaction;
+use burn::tensor::activation::softmax;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::{Adaptor, ConfusionStatsInput, ItemLazy, LossInput};
 use burn::train::{InferenceStep, TrainOutput, TrainStep};
-use stock_model::class::NUM_CLASSES;
-use stock_model::model::{StockModel, StockModelConfig};
+use stock_model::class::{Action, BUY, NUM_CLASSES};
+use stock_model::model::StockModel;
 
 use crate::training::batcher::StockBatch;
 use crate::training::metric::StockEvalInput;
+use crate::training::pipeline::TrainingConfig;
 
 /// Training wrapper around [`StockModel`], adding the loss and the train/eval steps,
 /// so the model crate stays free of training machinery.
@@ -17,22 +19,29 @@ use crate::training::metric::StockEvalInput;
 pub struct StockClassifier<B: Backend> {
     model: StockModel<B>,
     loss: CrossEntropyLoss<B>,
+    // Barrier payoffs and round-trip cost for the soft expected-value term. Primitive
+    // fields, so burn skips them in the record and the gradient.
+    take_profit: f32,
+    stop_loss: f32,
+    fee: f32,
+    ev_weight: f32,
 }
 
 impl<B: Backend> StockClassifier<B> {
-    /// `class_weights` are the Sell, Hold, Buy cross-entropy weights, upweighting the
-    /// rare actionable classes.
-    pub fn new(
-        config: &StockModelConfig,
-        class_weights: [f32; NUM_CLASSES],
-        device: &B::Device,
-    ) -> Self {
-        let model = config.init::<B>(device);
+    pub fn new(config: &TrainingConfig, device: &B::Device) -> Self {
+        let model = config.model.init::<B>(device);
         let loss = CrossEntropyLossConfig::new()
-            .with_weights(Some(class_weights.to_vec()))
+            .with_weights(Some(config.class_weights.to_vec()))
             .init(device);
 
-        Self { model, loss }
+        Self {
+            model,
+            loss,
+            take_profit: config.take_profit,
+            stop_loss: config.stop_loss,
+            fee: config.fee,
+            ev_weight: config.ev_weight,
+        }
     }
 
     /// The architecture without the loss, to save for inference.
@@ -44,7 +53,18 @@ impl<B: Backend> StockClassifier<B> {
     fn forward_classification(&self, batch: &StockBatch<B>) -> StockOutput<B> {
         let logits = self.model.forward(batch.technical.clone());
 
-        let loss = self.loss.forward(logits.clone(), batch.label.clone());
+        let mut loss = self.loss.forward(logits.clone(), batch.label.clone());
+
+        if self.ev_weight > 0.0 {
+            let ev = negative_expected_value(
+                logits.clone(),
+                batch.label.clone(),
+                self.take_profit,
+                self.stop_loss,
+                self.fee,
+            );
+            loss = loss + ev.mul_scalar(self.ev_weight);
+        }
 
         StockOutput {
             loss,
@@ -52,6 +72,30 @@ impl<B: Backend> StockClassifier<B> {
             targets: batch.label.clone(),
         }
     }
+}
+
+/// Negative soft expected value of the Buy policy, the differentiable surrogate for
+/// `ExpectedValueMetric`. It swaps that metric's hard `argmax == Buy` indicator for the
+/// softmax Buy probability, so each row contributes `buy_probability * reward`, where the
+/// reward is the barrier payoff net of fee keyed on the true label. Minimizing it raises
+/// expected value. Returned negated so it adds to the cross-entropy loss.
+fn negative_expected_value<B: Backend>(
+    logits: Tensor<B, 2>,
+    targets: Tensor<B, 1, Int>,
+    take_profit: f32,
+    stop_loss: f32,
+    fee: f32,
+) -> Tensor<B, 1> {
+    let buy_probability = softmax(logits, 1).narrow(1, BUY, 1).squeeze_dim(1);
+
+    let is_buy = targets
+        .clone()
+        .equal_elem(i64::from(Action::Buy.class()))
+        .float();
+    let is_sell = targets.equal_elem(i64::from(Action::Sell.class())).float();
+    let reward = (is_buy.mul_scalar(take_profit) - is_sell.mul_scalar(stop_loss)).sub_scalar(fee);
+
+    (reward * buy_probability).mean().neg()
 }
 
 /// Model output carrying the classification fields. A local stand-in for burn's
@@ -126,5 +170,25 @@ impl<B: Backend> InferenceStep for StockClassifier<B> {
 
     fn step(&self, batch: StockBatch<B>) -> StockOutput<B> {
         self.forward_classification(&batch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::tensor::ElementConversion;
+
+    #[test]
+    fn negative_ev_matches_reward_under_certain_buy() {
+        let device = FlexDevice;
+        // A saturated Buy logit drives buy_probability to ~1, so the loss approaches the
+        // negated reward for a true Buy: -(take_profit - fee).
+        let logits = Tensor::<Flex, 2>::from_data([[0.0, 0.0, 10.0]], &device);
+        let targets = Tensor::<Flex, 1, Int>::from_data([2], &device);
+
+        let loss = negative_expected_value(logits, targets, 0.09, 0.04, 0.01);
+        let value = loss.into_scalar().elem::<f64>();
+
+        assert!((value + 0.08).abs() < 1e-3);
     }
 }

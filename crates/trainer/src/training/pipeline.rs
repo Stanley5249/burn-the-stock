@@ -48,6 +48,11 @@ pub struct TrainingConfig {
     /// Sell, Hold, Buy cross-entropy weights, upweighting the rare actionable classes.
     #[config(default = "[2.0, 1.0, 2.0]")]
     pub class_weights: [f32; NUM_CLASSES],
+    /// Weight on the soft expected-value loss term added to cross-entropy. 0 disables it,
+    /// leaving pure weighted cross-entropy. EV sits on a ~0.01-0.1 scale, so useful
+    /// values run well above 1.
+    #[config(default = 0.0)]
+    pub ev_weight: f32,
     /// Full passes over the training data; `passes * windows / epoch_size` epochs run.
     #[config(default = 3)]
     pub passes: usize,
@@ -227,7 +232,7 @@ pub fn train<B: AutodiffBackend>(
         )),
     };
 
-    let model = StockClassifier::new(&config.model, config.class_weights, device);
+    let model = StockClassifier::new(&config, device);
 
     let optimizer = config.optimizer.init::<B, StockClassifier<B>>();
 
@@ -268,7 +273,7 @@ pub fn train<B: AutodiffBackend>(
         let checkpoint = artifact_dir
             .join("checkpoint")
             .join(format!("model-{epoch}"));
-        StockClassifier::<B::InnerBackend>::new(&config.model, config.class_weights, device)
+        StockClassifier::<B::InnerBackend>::new(&config, device)
             .load_file(&checkpoint, &CompactRecorder::new(), device)
             .into_diagnostic()
             .wrap_err_with(|| format!("loading best checkpoint {}", checkpoint.display()))?
