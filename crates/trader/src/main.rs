@@ -32,11 +32,12 @@ struct Args {
     data: PathBuf,
 }
 
-/// Scan only the recent tail of the OHLCV parquet, enough rows that each ticker keeps
-/// `steps` standardized days after the per-ticker log-return drops its first bar. The
-/// per-date z-score is unaffected since each retained date still holds the full
-/// universe.
-fn recent_frame(path: &Path, steps: usize) -> PolarsResult<LazyFrame> {
+/// Scan only the recent tail of the OHLCV parquet, keeping the last `lookback`
+/// calendar days. That over-reaches the `steps` trading days the caller needs,
+/// since trading days are sparser, and `latest_windows` trims each ticker down
+/// afterward. The per-date z-score is unaffected since each retained date still
+/// holds the full universe.
+fn recent_frame(path: &Path, lookback: i64) -> PolarsResult<LazyFrame> {
     let frame =
         LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?
             .with_column(col(DATE).cast(DataType::Date));
@@ -52,9 +53,6 @@ fn recent_frame(path: &Path, steps: usize) -> PolarsResult<LazyFrame> {
         .next()
         .expect("parquet has at least one dated row");
 
-    // Trading days are sparser than calendar days, so over-reach the lookback and let
-    // `latest_windows` trim each ticker to exactly `steps`.
-    let lookback = i64::try_from(steps * 2 + 10).expect("steps far smaller than i64");
     let cutoff = max_date - Duration::days(lookback);
 
     Ok(frame.filter(col(DATE).gt_eq(lit(cutoff))))
@@ -83,7 +81,12 @@ fn main() -> Result<()> {
         .into_diagnostic()
         .wrap_err("fail to init model from artifact")?;
 
-    let frame = recent_frame(&args.data, config.steps).into_diagnostic()?;
+    // Trading days are sparser than calendar days, so over-reach the lookback and let
+    // `latest_windows` trim each ticker to exactly `config.steps`.
+    let lookback = i64::try_from(config.steps * 2 + 10)
+        .into_diagnostic()
+        .wrap_err("steps too large for the lookback window")?;
+    let frame = recent_frame(&args.data, lookback).into_diagnostic()?;
     let store = TickerFrames::from_lazy(frame).into_diagnostic()?;
 
     // Same windowing path as the backtest: slice each ticker's tail out of the

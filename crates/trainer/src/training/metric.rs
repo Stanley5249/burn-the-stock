@@ -70,7 +70,8 @@ impl<B: Backend> Metric for ExpectedValueMetric<B> {
         let payoff =
             is_buy.mul_scalar(self.take_profit) - is_sell.mul_scalar(self.stop_loss) - self.fee;
         let total = (payoff * predicted_buy).sum().into_scalar().elem::<f64>();
-        let value = total / f64::from(u32::try_from(batch_size).expect("batch size fits in u32"));
+        #[allow(clippy::cast_precision_loss)]
+        let value = total / batch_size as f64;
 
         self.state.update(
             value,

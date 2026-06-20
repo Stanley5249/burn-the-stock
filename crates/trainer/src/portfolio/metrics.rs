@@ -1,4 +1,3 @@
-use super::count_f64;
 use super::types::{BacktestReport, EquityPoint, Trade, TradeEvent};
 
 /// Trading days per year, for the platform's linear annualization.
@@ -35,8 +34,9 @@ impl BacktestReport {
         let avg_loss_return = mean(trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.return_pct));
 
         let trading_days = equity_curve.len();
+        #[allow(clippy::cast_precision_loss)]
         let annualized_return = if trading_days > 0 {
-            cumulative_return / count_f64(trading_days) * ANNUAL_TRADING_DAYS
+            cumulative_return / trading_days as f64 * ANNUAL_TRADING_DAYS
         } else {
             0.0
         };
@@ -97,10 +97,11 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
 }
 
 /// `numerator / denominator` as a fraction, zero when the denominator is zero.
+#[allow(clippy::cast_precision_loss)]
 fn ratio(numerator: usize, denominator: usize) -> f64 {
     if denominator == 0 {
         0.0
     } else {
-        count_f64(numerator) / count_f64(denominator)
+        numerator as f64 / denominator as f64
     }
 }

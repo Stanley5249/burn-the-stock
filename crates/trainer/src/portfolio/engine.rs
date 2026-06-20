@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use stock_model::class::Action;
 
-use super::count_f64;
 use super::pricing::{
     LOT, SELL_TAX_RATE, buy_price, commission, round_trip_cost, sell_price, tick_floor,
 };
@@ -229,7 +228,8 @@ fn buy_phase(day: &TradingDay, index: usize, config: &BacktestConfig, ledger: &m
     // Equal-weight target from equity at the buy phase start, so all of the day's
     // buys size against the same value.
     let equity = ledger.cash + holdings_value(&ledger.holdings, &day.bars);
-    let target = equity / count_f64(config.max_holdings.max(1));
+    #[allow(clippy::cast_precision_loss)]
+    let target = equity / config.max_holdings.max(1) as f64;
 
     let mut candidates: Vec<(&String, &DayBar)> = day
         .bars
