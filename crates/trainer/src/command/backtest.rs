@@ -21,6 +21,7 @@ use crate::portfolio::{
 use crate::training::TrainingConfig;
 
 type InferenceBackend = Wgpu;
+type ReportWriter = fn(&BacktestReport, &Path) -> Result<()>;
 
 /// Run the portfolio backtest over the held-out split, reporting metrics and a CSV of
 /// the daily account value.
@@ -93,10 +94,11 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     let context = RenderContext {
         tickers: store.frames.len(),
         windows_scored: windows.len(),
-        threshold: args.threshold,
-        fill,
     };
-    print!("{}", portfolio::summary(&report, &context));
+    print!(
+        "{}",
+        portfolio::summary(&report, &backtest_config, &context)
+    );
 
     let equity_path = args
         .out
@@ -106,15 +108,18 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     let trades_path = log_dir.join("backtest-trades.csv");
     let actions_path = log_dir.join("backtest-actions.csv");
 
-    write_equity_csv(&report, &equity_path)?;
-    write_trades_csv(&report, &trades_path)?;
-    write_actions_csv(&report, &actions_path)?;
-    println!(
-        "\nWrote equity curve to {}\nWrote trades to {}\nWrote actions to {}",
-        equity_path.display(),
-        trades_path.display(),
-        actions_path.display(),
-    );
+    let outputs: [(&str, &Path, ReportWriter); 3] = [
+        ("equity curve", &equity_path, write_equity_csv),
+        ("trades", &trades_path, write_trades_csv),
+        ("actions", &actions_path, write_actions_csv),
+    ];
+
+    println!();
+
+    for (label, path, write) in outputs {
+        write(&report, path)?;
+        println!("Wrote {label} to {}", path.display());
+    }
 
     Ok(())
 }

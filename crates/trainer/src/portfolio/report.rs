@@ -1,12 +1,10 @@
 use super::pricing::round_trip_cost;
-use super::types::{BacktestReport, ExitReason, Fill, Trade};
+use super::types::{BacktestConfig, BacktestReport, ExitReason, Fill, Trade};
 
-/// Window-level context for the summary, the parts the report itself does not carry.
+/// Window-level context for the summary, the parts neither the report nor config carry.
 pub struct RenderContext {
     pub tickers: usize,
     pub windows_scored: usize,
-    pub threshold: f32,
-    pub fill: Fill,
 }
 
 /// NT$ with thousands separators, no decimals, e.g. `NT$100,000,000`.
@@ -45,10 +43,14 @@ fn exit_tally(trades: &[Trade]) -> String {
 
 /// Build the grouped summary as one string, so the caller prints it in a single write.
 #[must_use]
-pub fn summary(report: &BacktestReport, context: &RenderContext) -> String {
+pub fn summary(
+    report: &BacktestReport,
+    config: &BacktestConfig,
+    context: &RenderContext,
+) -> String {
     use std::fmt::Write as _;
 
-    let fill = match context.fill {
+    let fill = match config.fill {
         Fill::LowHigh => "low/high (optimistic)",
         Fill::Open => "open (pessimistic)",
     };
@@ -77,7 +79,7 @@ pub fn summary(report: &BacktestReport, context: &RenderContext) -> String {
     summary_row(
         &mut out,
         "buy gate",
-        &format!("score > {:.2}", context.threshold),
+        &format!("score > {:.2}", config.threshold),
     );
     summary_row(
         &mut out,

@@ -10,7 +10,7 @@ use crate::portfolio::Fill;
 use crate::training::{RunOptions, TrainingConfig};
 
 #[derive(Parser, Debug)]
-#[command(about = "Stock action classifier: train a model or predict today's actions")]
+#[command(about = "Stock action classifier: train a model or backtest a run")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -41,8 +41,8 @@ pub struct TrainArgs {
     )]
     pub data: PathBuf,
 
-    /// Directory for this run's checkpoints, config, and model. Required, so each run
-    /// is its own directory; `<parent>/latest` is pointed here afterward.
+    /// Output dir for this run's checkpoints, config, and model; `<parent>/latest`
+    /// links here.
     #[arg(long, help_heading = "Data")]
     pub artifact_dir: PathBuf,
 
@@ -50,7 +50,7 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Model")]
     pub d_hidden: Option<usize>,
 
-    /// Hidden width of the MLP head that maps the summary to action logits.
+    /// MLP head hidden width.
     #[arg(long, help_heading = "Model")]
     pub d_head: Option<usize>,
 
@@ -62,7 +62,7 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Optimizer")]
     pub learning_rate: Option<f64>,
 
-    /// L2 weight decay for the `AdamW` optimizer.
+    /// `AdamW` L2 weight decay.
     #[arg(long, help_heading = "Optimizer")]
     pub weight_decay: Option<f32>,
 
@@ -74,7 +74,7 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Optimizer")]
     pub beta_2: Option<f32>,
 
-    /// `AdamW` numerical-stability term added to the denominator (epsilon).
+    /// `AdamW` epsilon (denominator stability).
     #[arg(long, help_heading = "Optimizer")]
     pub epsilon: Option<f32>,
 
@@ -82,8 +82,7 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Training schedule")]
     pub passes: Option<usize>,
 
-    /// Training batches per epoch, setting the validation cadence. Sampled without
-    /// replacement; the valid-side counterpart is `--valid-batches`.
+    /// Training batches per epoch (validation cadence); counterpart of `--valid-batches`.
     #[arg(long, help_heading = "Training schedule")]
     pub batches_per_epoch: Option<usize>,
 
@@ -91,16 +90,15 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Training schedule")]
     pub batch_size: Option<usize>,
 
-    /// GRU input window length in trading days (the sequence length).
+    /// Input window length in trading days.
     #[arg(long, help_heading = "Training schedule")]
     pub window_steps: Option<usize>,
 
-    /// Random seed for the split, sampling, and parameter initialization.
+    /// Seed for split, sampling, and init.
     #[arg(long, help_heading = "Training schedule")]
     pub seed: Option<u64>,
 
-    /// Sell Hold Buy cross-entropy weights, upweighting the rare actionable classes.
-    /// Three floats; defaults to the config's [2, 1, 2].
+    /// Sell/Hold/Buy cross-entropy weights; default [2, 1, 2].
     #[arg(
         long,
         num_args = 3,
@@ -110,24 +108,23 @@ pub struct TrainArgs {
     pub class_weights: Option<Vec<f32>>,
 
     /// Take-profit barrier for the triple-barrier labels, as a fraction of price.
-    #[arg(long, help_heading = "Labeling (triple-barrier)")]
+    #[arg(long, help_heading = "Labeling")]
     pub take_profit: Option<f32>,
 
     /// Stop-loss barrier for the triple-barrier labels, as a fraction of price.
-    #[arg(long, help_heading = "Labeling (triple-barrier)")]
+    #[arg(long, help_heading = "Labeling")]
     pub stop_loss: Option<f32>,
 
     /// Vertical-barrier horizon in trading days for the triple-barrier labels.
-    #[arg(long, help_heading = "Labeling (triple-barrier)")]
+    #[arg(long, help_heading = "Labeling")]
     pub label_horizon: Option<usize>,
 
-    /// Round-trip transaction cost the Sharpe metric charges per position. Taiwan is
-    /// 0.1425% per leg plus 0.3% sell tax, so 0.585% round trip.
-    #[arg(long, help_heading = "Labeling (triple-barrier)")]
+    /// Round-trip cost charged per position by the Sharpe metric (Taiwan: 0.585%).
+    #[arg(long, help_heading = "Labeling")]
     pub fee: Option<f32>,
 
-    /// Validation batches per epoch, a fixed-seed subsample stable across epochs. Set
-    /// 0 to sweep every window. Valid-side counterpart of `--batches-per-epoch`.
+    /// Validation batches per epoch; 0 sweeps every window. Counterpart of
+    /// `--batches-per-epoch`.
     #[arg(long, default_value_t = 200, help_heading = "Validation")]
     pub valid_batches: usize,
 
