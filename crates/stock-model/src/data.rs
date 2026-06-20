@@ -113,7 +113,7 @@ impl TickerFrames {
     /// If a frame's ticker or date column is malformed.
     ///
     /// # Panics
-    /// If a ticker index or row count exceeds `u32`, far larger than supported.
+    /// If a retained frame has no rows, impossible since `rows >= steps >= 1`.
     pub fn latest_windows(&self, steps: usize) -> PolarsResult<Vec<Window>> {
         let mut windows = Vec::new();
         for (ticker_index, frame) in self.frames.iter().enumerate() {
@@ -121,12 +121,10 @@ impl TickerFrames {
             if rows < steps {
                 continue;
             }
-            let ticker_index = u32::try_from(ticker_index).expect("ticker count exceeds u32");
-            let start = u32::try_from(rows - steps).expect("row index exceeds u32");
             let date = *date_buffer(frame)?.last().expect("height >= steps >= 1");
             windows.push(Window {
                 ticker_index,
-                start,
+                start: rows - steps,
                 ticker: ticker_name(frame)?,
                 date,
             });
@@ -136,20 +134,15 @@ impl TickerFrames {
 
     /// Every window of length `steps`, in ticker-then-date order, as a [`StockItem`].
     /// Short tickers contribute none. The training dataset's pool.
-    ///
-    /// # Panics
-    /// If a ticker index or row count exceeds `u32`, far larger than supported.
     #[must_use]
     pub fn enumerate_windows(&self, steps: usize) -> Vec<StockItem> {
         let mut windows = Vec::new();
-        for (ticker_index, frame) in self.frames.iter().enumerate() {
+        for (ticker, frame) in self.frames.iter().enumerate() {
             let rows = frame.height();
             if rows < steps {
                 continue;
             }
-            let ticker = u32::try_from(ticker_index).expect("ticker count exceeds u32");
-            let last_start = u32::try_from(rows - steps).expect("row index exceeds u32");
-            for start in 0..=last_start {
+            for start in 0..=rows - steps {
                 windows.push(StockItem { ticker, start });
             }
         }
@@ -162,9 +155,6 @@ impl TickerFrames {
     ///
     /// # Errors
     /// If a frame's ticker or date column is malformed.
-    ///
-    /// # Panics
-    /// If a ticker index or row count exceeds `u32`, far larger than supported.
     pub fn windows_since(&self, steps: usize, cutoff: NaiveDate) -> PolarsResult<Vec<Window>> {
         let mut windows = Vec::new();
         for (ticker_index, frame) in self.frames.iter().enumerate() {
@@ -174,7 +164,6 @@ impl TickerFrames {
             }
             let dates = date_buffer(frame)?;
             let ticker = ticker_name(frame)?;
-            let ticker_index = u32::try_from(ticker_index).expect("ticker count exceeds u32");
             for start in 0..=rows - steps {
                 let last = start + steps - 1;
                 if dates[last] < cutoff {
@@ -182,7 +171,7 @@ impl TickerFrames {
                 }
                 windows.push(Window {
                     ticker_index,
-                    start: u32::try_from(start).expect("row index exceeds u32"),
+                    start,
                     ticker: ticker.clone(),
                     date: dates[last],
                 });
@@ -277,8 +266,8 @@ impl TickerFrames {
 /// the training dataset and the signal builders and consumed by [`stack_windows`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StockItem {
-    pub ticker: u32,
-    pub start: u32,
+    pub ticker: usize,
+    pub start: usize,
 }
 
 impl StockItem {
@@ -289,10 +278,9 @@ impl StockItem {
     /// If `start + steps` exceeds the ticker's rows, an out-of-range slice.
     #[must_use]
     pub fn window<B: Backend>(&self, features: &[Tensor<B, 2>], steps: usize) -> Tensor<B, 2> {
-        let start = self.start as usize;
-        features[self.ticker as usize]
+        features[self.ticker]
             .clone()
-            .slice(start..start + steps)
+            .slice(self.start..self.start + steps)
     }
 }
 
@@ -322,8 +310,8 @@ pub fn stack_windows<B: Backend>(
 /// the ticker and last-bar date that key the signal. Produced by [`TickerFrames::windows_since`]
 /// for the backtest and [`TickerFrames::latest_windows`] for the trader.
 pub struct Window {
-    pub ticker_index: u32,
-    pub start: u32,
+    pub ticker_index: usize,
+    pub start: usize,
     pub ticker: String,
     pub date: NaiveDate,
 }

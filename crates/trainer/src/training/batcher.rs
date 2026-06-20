@@ -47,10 +47,8 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
         let label_slices = items
             .iter()
             .map(|item| {
-                let last = item.start as usize + self.steps - 1;
-                self.labels[item.ticker as usize]
-                    .clone()
-                    .slice(last..last + 1)
+                let last = item.start + self.steps - 1;
+                self.labels[item.ticker].clone().slice(last..last + 1)
             })
             .collect();
         let label = Tensor::cat(label_slices, 0);
