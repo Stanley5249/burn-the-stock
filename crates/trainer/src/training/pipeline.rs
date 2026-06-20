@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use burn::data::dataloader::DataLoaderBuilder;
-use burn::data::dataset::Dataset;
 use burn::data::dataset::transform::{PartialDataset, SamplerDataset, SamplerDatasetOptions};
+use burn::data::dataset::{Dataset, InMemDataset};
 use burn::module::Module;
 use burn::optim::AdamWConfig;
 use burn::prelude::*;
@@ -18,13 +18,12 @@ use miette::{IntoDiagnostic, Result, WrapErr, bail};
 
 use crate::data::label::{into_labeled, label_counts};
 use crate::training::batcher::StockBatcher;
-use crate::training::dataset::WindowDataset;
 use crate::training::metric::{ExpectedValueMetric, PrecisionClassMetric};
 use crate::training::model::StockClassifier;
 use chrono::NaiveDate;
 use fastrand::Rng;
 use stock_model::class::{Action, NUM_CLASSES};
-use stock_model::data::TickerFrames;
+use stock_model::data::{StockItem, TickerFrames};
 use stock_model::model::StockModelConfig;
 
 /// Top-level training configuration.
@@ -188,7 +187,7 @@ pub fn train<B: AutodiffBackend>(
 
     // `SamplerDataset` caps each epoch to a fixed window budget and walks a reshuffled
     // permutation across the run.
-    let train_windows = WindowDataset::new(&train_store, config.steps);
+    let train_windows = InMemDataset::new(train_store.enumerate_windows(config.steps));
     let total_windows = train_windows.len();
     if total_windows == 0 {
         bail!("no training windows; check steps and the train/valid split");
@@ -223,11 +222,13 @@ pub fn train<B: AutodiffBackend>(
 
     let dataloader_valid = match valid_batches {
         Some(batches) => {
-            let dataset = WindowDataset::subsample(&valid_store, config.steps, config.seed);
+            let dataset = subsample_windows(&valid_store, config.steps, config.seed);
             let cap = (batches * config.batch_size).min(dataset.len());
             valid_builder().build(PartialDataset::new(dataset, 0, cap))
         }
-        None => valid_builder().build(WindowDataset::new(&valid_store, config.steps)),
+        None => valid_builder().build(InMemDataset::new(
+            valid_store.enumerate_windows(config.steps),
+        )),
     };
 
     let model = StockClassifier::new(&config.model, config.class_weights, device);
@@ -309,6 +310,14 @@ fn sample_tickers(store: TickerFrames, count: usize, seed: u64) -> TickerFrames 
     TickerFrames { frames }
 }
 
+/// Every window of `store`, shuffled once by `seed`, so a `PartialDataset` cap yields a
+/// validation subsample drawn evenly across tickers and dates.
+fn subsample_windows(store: &TickerFrames, steps: usize, seed: u64) -> InMemDataset<StockItem> {
+    let mut windows = store.enumerate_windows(steps);
+    Rng::with_seed(seed).shuffle(&mut windows);
+    InMemDataset::new(windows)
+}
+
 /// Epoch (1-based) of the lowest-valid-loss checkpoint still on disk. burn has no
 /// best-checkpoint accessor and its checkpointer prunes all but the last few plus its
 /// own best, so we read every epoch's loss from `LearnerSummary` and filter to the
@@ -330,4 +339,24 @@ fn best_valid_loss_epoch(artifact_dir: &Path) -> Option<usize> {
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|entry| entry.step)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::synthetic;
+
+    #[test]
+    fn subsample_windows_is_reproducible() {
+        let store = synthetic(4, 20);
+        let collect = |dataset: &InMemDataset<StockItem>| {
+            (0..dataset.len())
+                .map(|i| dataset.get(i))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            collect(&subsample_windows(&store, 4, 99)),
+            collect(&subsample_windows(&store, 4, 99))
+        );
+    }
 }
