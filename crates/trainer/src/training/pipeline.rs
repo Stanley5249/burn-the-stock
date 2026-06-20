@@ -10,6 +10,7 @@ use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{ClassReduction, FBetaScoreMetric, LossMetric};
+use burn::train::renderer::CliMetricsRenderer;
 use burn::train::{
     Learner, LearnerSummary, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining,
 };
@@ -151,18 +152,14 @@ pub fn train<B: AutodiffBackend>(
     };
 
     // One global cutoff `valid_days` before the latest date, aligned across tickers.
-    let max_date = store
-        .max_date()
+    let (data_start, max_date) = store
+        .date_bounds()
         .into_diagnostic()?
         .expect("loaded data should have at least one dated row");
     let cutoff = max_date - chrono::Duration::days(valid_days);
 
     // Resolve the split to concrete dates and pin the universe, so the backtest reloads
     // this exact window regardless of newer bars.
-    let data_start = store
-        .min_date()
-        .into_diagnostic()?
-        .expect("loaded data should have at least one dated row");
     let tickers = store.tickers().into_diagnostic()?;
     let config = config
         .clone()
@@ -210,15 +207,14 @@ pub fn train<B: AutodiffBackend>(
             .with_seed(config.seed),
     );
 
-    let dataloader_train =
-        DataLoaderBuilder::new(StockBatcher::<B>::new(config.steps, &train_store, device))
-            .batch_size(config.batch_size)
-            .set_device(device.clone())
-            .build(train_sampler);
+    let dataloader_train = DataLoaderBuilder::new(StockBatcher::new(config.steps, &train_store))
+        .batch_size(config.batch_size)
+        .set_device(device.clone())
+        .build(train_sampler);
 
     // Valid pipeline on the inner backend. A full sweep dwarfs a training run, so when
     // asked, cap a once-shuffled pool, stable across epochs.
-    let valid_batcher = StockBatcher::<B::InnerBackend>::new(config.steps, &valid_store, device);
+    let valid_batcher = StockBatcher::new(config.steps, &valid_store);
     let valid_builder = || {
         DataLoaderBuilder::new(valid_batcher.clone())
             .batch_size(config.batch_size)
@@ -250,6 +246,10 @@ pub fn train<B: AutodiffBackend>(
         .with_file_checkpointer(CompactRecorder::new())
         // Our startup logger owns `experiment.log`; stop burn installing its own.
         .with_application_logger(None)
+        // The TUI renderer divides by the train-sample count and aborts when a
+        // valid update lands first (burn metric_numeric.rs); the CLI renderer
+        // does not.
+        .renderer(CliMetricsRenderer::new())
         .num_epochs(num_epochs)
         .summary();
 

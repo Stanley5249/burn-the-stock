@@ -1,9 +1,14 @@
 use burn::config::Config;
 use burn::prelude::*;
 use burn::tensor::activation::softmax;
+use polars::prelude::Series;
 
 use crate::class::{Action, NUM_CLASSES, SELL};
+use crate::data::{Window, gather_windows};
 use crate::model::{StockModel, StockModelConfig};
+
+/// Windows per forward pass, capping device memory on a universe-wide scoring run.
+const SCORE_CHUNK: usize = 1024;
 
 /// The inference slice of a run's config. `Config` ignores the extra training-only
 /// fields, so this loads from the same `config.json`.
@@ -62,5 +67,31 @@ pub fn predict<B: Backend>(model: &StockModel<B>, technical: Tensor<B, 3>) -> Ve
         });
     }
 
+    predictions
+}
+
+/// Gather each window's features and score it, chunked to bound device memory. The
+/// returned predictions align by index with `windows`. The one inference path shared by
+/// the backtest and the live trader.
+///
+/// # Panics
+/// If a feature series is not contiguous `f32`, which [`crate::data::TickerFrames::feature_series`] guarantees.
+#[must_use]
+pub fn score<B: Backend>(
+    model: &StockModel<B>,
+    features: &[Series],
+    windows: &[Window],
+    steps: usize,
+    device: &B::Device,
+) -> Vec<Prediction> {
+    let mut predictions = Vec::with_capacity(windows.len());
+
+    for chunk in windows.chunks(SCORE_CHUNK) {
+        let items: Vec<_> = chunk.iter().map(Window::item).collect();
+
+        let technical = gather_windows::<B>(features, &items, steps, device);
+
+        predictions.extend(predict(model, technical));
+    }
     predictions
 }

@@ -14,9 +14,9 @@ use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_model::class::Action;
-use stock_model::data::{TickerFrames, Window, stack_windows};
+use stock_model::data::TickerFrames;
 use stock_model::features::DATE;
-use stock_model::inference::{InferenceConfig, predict};
+use stock_model::inference::{InferenceConfig, score};
 
 type Backend = Wgpu;
 
@@ -89,19 +89,15 @@ fn main() -> Result<()> {
     let frame = recent_frame(&args.data, lookback).into_diagnostic()?;
     let store = TickerFrames::from_lazy(frame).into_diagnostic()?;
 
-    // Same windowing path as the backtest: slice each ticker's tail out of the
-    // resident feature tensors rather than copying the FEATURE column back to the host.
+    // Same inference path as the backtest: copy each ticker's tail out of the per-ticker
+    // feature series, then one forward over every ticker.
     let windows = store.latest_windows(config.steps).into_diagnostic()?;
-    let features = store
-        .feature_tensors::<Backend>(&device)
-        .into_diagnostic()?;
-    let items: Vec<_> = windows.iter().map(Window::item).collect();
-    let technical = stack_windows(&features, &items, config.steps, &device);
+    let features = store.feature_series().into_diagnostic()?;
+    let predictions = score::<Backend>(&model, &features, &windows, config.steps, &device);
 
-    // One forward over every ticker; the model is tiny and there is one window each.
     let decisions: Vec<(String, Action)> = windows
         .into_iter()
-        .zip(predict(&model, technical))
+        .zip(predictions)
         .map(|(window, prediction)| (window.ticker, prediction.action))
         .collect();
 

@@ -1,6 +1,7 @@
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
-use stock_model::data::{StockItem, TickerFrames, stack_windows};
+use polars::prelude::Series;
+use stock_model::data::{StockItem, TickerFrames, gather_windows};
 
 #[derive(Clone, Debug)]
 pub struct StockBatch<B: Backend> {
@@ -10,48 +11,52 @@ pub struct StockBatch<B: Backend> {
     pub label: Tensor<B, 1, Int>,
 }
 
-/// Builds a [`StockBatch`] by slicing windows out of the per-ticker resident tensors.
-/// The whole store is uploaded once into those tensors, so a batch is a pure on-device
-/// slice and stack with no per-batch host transfer. The tensors clone by shared handle,
-/// so the batcher is cheap to clone across the loader; train and valid build their own.
+/// Builds a [`StockBatch`] by copying each window's contiguous rows out of the
+/// per-ticker feature `Series` into one flat host buffer, then a single upload. The
+/// `Series` clone by shared buffer, so the batcher is cheap to clone across the loader's
+/// workers; train and valid build their own. No backend type, the upload picks it up.
 #[derive(Clone)]
-pub struct StockBatcher<B: Backend> {
+pub struct StockBatcher {
     steps: usize,
-    features: Vec<Tensor<B, 2>>,
-    labels: Vec<Tensor<B, 1, Int>>,
+    features: Vec<Series>,
+    labels: Vec<Series>,
 }
 
-impl<B: Backend> StockBatcher<B> {
-    /// Upload the store's per-ticker feature and label tensors once.
+impl StockBatcher {
+    /// Pull the store's per-ticker feature and label `Series`.
     ///
     /// # Panics
     /// If the store is unlabeled or a column has the wrong dtype, both store invariants.
-    pub fn new(steps: usize, store: &TickerFrames, device: &B::Device) -> Self {
+    pub fn new(steps: usize, store: &TickerFrames) -> Self {
         Self {
             steps,
-            features: store
-                .feature_tensors(device)
-                .expect("store has a feature column"),
+            features: store.feature_series().expect("store has a feature column"),
             labels: store
-                .label_tensors(device)
+                .label_series()
                 .expect("labeled store has a label column"),
         }
     }
 }
 
-impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
+impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher {
+    #[tracing::instrument(skip_all, fields(n = items.len()))]
     fn batch(&self, items: Vec<StockItem>, device: &B::Device) -> StockBatch<B> {
-        let technical = stack_windows(&self.features, &items, self.steps, device);
+        let technical = gather_windows::<B>(&self.features, &items, self.steps, device);
 
-        // The label comes from the window's last day.
-        let label_slices = items
+        // The label comes from the window's last day, indexed ticker-locally.
+        let rows: Vec<i64> = items
             .iter()
             .map(|item| {
-                let last = item.start + self.steps - 1;
-                self.labels[item.ticker].clone().slice(last..last + 1)
+                i64::from(
+                    self.labels[item.ticker]
+                        .u8()
+                        .expect("u8 label series")
+                        .get(item.start + self.steps - 1)
+                        .expect("row in range"),
+                )
             })
             .collect();
-        let label = Tensor::cat(label_slices, 0);
+        let label = Tensor::from_data(TensorData::new(rows, [items.len()]), device);
 
         StockBatch { technical, label }
     }
@@ -71,7 +76,7 @@ mod tests {
         // Two tickers of ten rows; row `i` fills features with `base + i`, base
         // separating tickers (0 and 1000).
         let store = synthetic(2, 10);
-        let batcher = StockBatcher::<TestBackend>::new(4, &store, &FlexDevice);
+        let batcher = StockBatcher::new(4, &store);
 
         // Ticker 0 from row 0, ticker 1 from row 1.
         let items = vec![
@@ -84,7 +89,7 @@ mod tests {
                 start: 1,
             },
         ];
-        let batch = batcher.batch(items, &FlexDevice);
+        let batch: StockBatch<TestBackend> = batcher.batch(items, &FlexDevice);
 
         assert_eq!(batch.technical.dims(), [2, 4, NUM_FEATURES]);
         assert_eq!(batch.label.dims(), [2]);

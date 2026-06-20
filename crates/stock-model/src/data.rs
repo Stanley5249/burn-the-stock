@@ -1,8 +1,8 @@
 //! Per-ticker standardized frames, the data store shared by training, backtest, and
 //! the live trader. Feature engineering runs once over the full universe, then the
-//! frame is partitioned by ticker. Each ticker's rows become one resident tensor, and a
-//! window is a contiguous slice of it, so there is no host re-slicing and no on-device
-//! gather.
+//! frame is partitioned by ticker. Windowing reads each ticker's contiguous feature
+//! rows straight out of polars' buffer and gathers a batch into one flat host buffer,
+//! a single upload per batch rather than a slice and stack per window.
 
 use std::path::Path;
 
@@ -60,54 +60,38 @@ impl TickerFrames {
         Self::from_lazy(raw)
     }
 
-    /// Each ticker's `FEATURE` rows as one resident `[rows, NUM_FEATURES]` tensor on
-    /// `device`. The slice source every window build reads from.
+    /// Each ticker's flattened f32 `FEATURE` values as one contiguous `Series`
+    /// (`rows * NUM_FEATURES`, row-major), reusing polars' Arc-backed buffer. The gather
+    /// source every window build reads from, paired with [`gather_windows`]. `rechunk`
+    /// guarantees a single chunk so the window slice is contiguous.
     ///
     /// # Errors
     /// If a frame lacks an `f32` feature array column.
-    pub fn feature_tensors<B: Backend>(
-        &self,
-        device: &B::Device,
-    ) -> PolarsResult<Vec<Tensor<B, 2>>> {
+    pub fn feature_series(&self) -> PolarsResult<Vec<Series>> {
         self.frames
             .iter()
-            .map(|frame| {
-                let flat = feature_buffer(frame)?;
-                Ok(Tensor::from_data(
-                    TensorData::new(flat, [frame.height(), NUM_FEATURES]),
-                    device,
-                ))
-            })
+            .map(|frame| Ok(frame.column(&FEATURE)?.array()?.get_inner().rechunk()))
             .collect()
     }
 
-    /// Each ticker's `LABEL` rows as one resident `[rows]` tensor on `device`, only
+    /// Each ticker's `LABEL` column as a `Series`, aligned to its feature rows. Only
     /// present after the trainer labels the store.
     ///
     /// # Errors
-    /// If a frame lacks a `u8` label column.
-    pub fn label_tensors<B: Backend>(
-        &self,
-        device: &B::Device,
-    ) -> PolarsResult<Vec<Tensor<B, 1, Int>>> {
+    /// If a frame lacks a label column.
+    pub fn label_series(&self) -> PolarsResult<Vec<Series>> {
         self.frames
             .iter()
-            .map(|frame| {
-                let classes: Vec<u8> = frame.column(&LABEL)?.u8()?.into_no_null_iter().collect();
-                Ok(Tensor::from_data(
-                    TensorData::new(classes, [frame.height()]),
-                    device,
-                ))
-            })
+            .map(|frame| Ok(frame.column(&LABEL)?.as_materialized_series().clone()))
             .collect()
     }
 
     /// Each kept ticker's most recent `steps`-day window, keyed by ticker and its
     /// last-bar date. Tickers shorter than `steps` are skipped. Pair with
-    /// [`feature_tensors`] and [`stack_windows`] to build the live trader's input,
+    /// [`feature_series`] and [`gather_windows`] to build the live trader's input,
     /// the same windowing path the backtest uses.
     ///
-    /// [`feature_tensors`]: Self::feature_tensors
+    /// [`feature_series`]: Self::feature_series
     ///
     /// # Errors
     /// If a frame's ticker or date column is malformed.
@@ -188,36 +172,24 @@ impl TickerFrames {
         self.frames.iter().map(quotes_of).collect()
     }
 
-    /// The latest date across every ticker, to anchor a split. `None` when no ticker
-    /// has a dated row.
+    /// The earliest and latest dated row across every ticker, to anchor a split. `None`
+    /// when no ticker has a dated row.
     ///
     /// # Errors
     /// If a frame's date column is malformed.
-    pub fn max_date(&self) -> PolarsResult<Option<NaiveDate>> {
-        let mut max = None;
+    pub fn date_bounds(&self) -> PolarsResult<Option<(NaiveDate, NaiveDate)>> {
+        let mut bounds: Option<(NaiveDate, NaiveDate)> = None;
         for frame in &self.frames {
-            // Dates ascend, so the last row is the ticker's latest.
-            if let Some(&last) = date_buffer(frame)?.last() {
-                max = max.max(Some(last));
+            let dates = date_buffer(frame)?;
+            // Dates ascend, so first and last are this ticker's min and max.
+            if let (Some(&first), Some(&last)) = (dates.first(), dates.last()) {
+                bounds = Some(match bounds {
+                    Some((lo, hi)) => (lo.min(first), hi.max(last)),
+                    None => (first, last),
+                });
             }
         }
-        Ok(max)
-    }
-
-    /// The earliest date across every ticker, the train window's start. `None` when no
-    /// ticker has a dated row.
-    ///
-    /// # Errors
-    /// If a frame's date column is malformed.
-    pub fn min_date(&self) -> PolarsResult<Option<NaiveDate>> {
-        let mut min: Option<NaiveDate> = None;
-        for frame in &self.frames {
-            // Dates ascend, so the first row is the ticker's earliest.
-            if let Some(&first) = date_buffer(frame)?.first() {
-                min = Some(min.map_or(first, |current| current.min(first)));
-            }
-        }
-        Ok(min)
+        Ok(bounds)
     }
 
     /// Every ticker symbol in frame order, the run's universe.
@@ -263,47 +235,42 @@ impl TickerFrames {
 
 /// A window coordinate: a ticker by its frame index and the start row of a
 /// `steps`-length slice. The shared key into the resident feature tensors, produced by
-/// the training dataset and the signal builders and consumed by [`stack_windows`].
+/// the training dataset and the signal builders and consumed by [`gather_windows`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StockItem {
     pub ticker: usize,
     pub start: usize,
 }
 
-impl StockItem {
-    /// This window's contiguous `[steps, NUM_FEATURES]` slice of its ticker's resident
-    /// tensor.
-    ///
-    /// # Panics
-    /// If `start + steps` exceeds the ticker's rows, an out-of-range slice.
-    #[must_use]
-    pub fn window<B: Backend>(&self, features: &[Tensor<B, 2>], steps: usize) -> Tensor<B, 2> {
-        features[self.ticker]
-            .clone()
-            .slice(self.start..self.start + steps)
-    }
-}
-
-/// Assemble a `[windows.len(), steps, NUM_FEATURES]` tensor by stacking each window's
-/// contiguous slice of its ticker's resident tensor. The one windowing path, shared by
-/// training batches, backtest chunks, and the trader's tails.
+/// Assemble a `[windows.len(), steps, NUM_FEATURES]` tensor by copying each window's
+/// contiguous rows into one flat host buffer, then a single upload. No per-window tensor
+/// op, so the kernel does not grow with the batch and the JIT backend never compiles a
+/// many-operand `stack`. The one windowing path, shared by training batches, backtest
+/// chunks, and the trader's tails. `features` comes from [`TickerFrames::feature_series`],
+/// indexed ticker-locally by [`StockItem::ticker`].
+///
+/// # Panics
+/// If a series is not contiguous `f32`, which [`TickerFrames::feature_series`] guarantees.
 #[must_use]
-pub fn stack_windows<B: Backend>(
-    features: &[Tensor<B, 2>],
+#[tracing::instrument(skip_all, fields(n = windows.len()))]
+pub fn gather_windows<B: Backend>(
+    features: &[Series],
     windows: &[StockItem],
     steps: usize,
     device: &B::Device,
 ) -> Tensor<B, 3> {
-    if windows.is_empty() {
-        return Tensor::zeros([0, steps, NUM_FEATURES], device);
+    let count = windows.len();
+    let mut flat = Vec::with_capacity(count * steps * NUM_FEATURES);
+    for window in windows {
+        let rows = features[window.ticker]
+            .f32()
+            .expect("f32 feature series")
+            .cont_slice()
+            .expect("contiguous feature series");
+        let base = window.start * NUM_FEATURES;
+        flat.extend_from_slice(&rows[base..base + steps * NUM_FEATURES]);
     }
-
-    let slices = windows
-        .iter()
-        .map(|item| item.window(features, steps))
-        .collect();
-
-    Tensor::stack(slices, 0)
+    Tensor::from_data(TensorData::new(flat, [count, steps, NUM_FEATURES]), device)
 }
 
 /// One scored window: its `(ticker_index, start)` into the resident tensors, plus
@@ -317,7 +284,7 @@ pub struct Window {
 }
 
 impl Window {
-    /// The lightweight `(ticker_index, start)` coordinate for [`stack_windows`],
+    /// The lightweight `(ticker_index, start)` coordinate for [`gather_windows`],
     /// dropping the ticker name and date that key the signal.
     #[must_use]
     pub fn item(&self) -> StockItem {
@@ -346,17 +313,6 @@ fn ticker_name(frame: &DataFrame) -> PolarsResult<String> {
         .get(0)
         .expect("partition group is non-empty")
         .to_owned())
-}
-
-/// A frame's `FEATURE` array flattened row-major to `rows * NUM_FEATURES` values.
-fn feature_buffer(frame: &DataFrame) -> PolarsResult<Vec<f32>> {
-    Ok(frame
-        .column(&FEATURE)?
-        .array()?
-        .get_inner()
-        .f32()?
-        .into_no_null_iter()
-        .collect())
 }
 
 /// A frame's `DATE` column as `NaiveDate`s, in row order.
@@ -460,9 +416,9 @@ mod tests {
     }
 
     #[test]
-    fn stack_windows_slices_contiguous_rows() {
+    fn gather_windows_slices_contiguous_rows() {
         let store = synthetic(2, 10);
-        let features = store.feature_tensors::<Flex>(&FlexDevice).unwrap();
+        let features = store.feature_series().unwrap();
 
         // Ticker 0 from row 0, ticker 1 from row 1.
         let windows = [
@@ -475,7 +431,7 @@ mod tests {
                 start: 1,
             },
         ];
-        let tensor = stack_windows::<Flex>(&features, &windows, 4, &FlexDevice);
+        let tensor = gather_windows::<Flex>(&features, &windows, 4, &FlexDevice);
 
         assert_eq!(tensor.dims(), [2, 4, NUM_FEATURES]);
         let values = tensor.into_data().to_vec::<f32>().unwrap();
@@ -516,12 +472,12 @@ mod tests {
     }
 
     #[test]
-    fn max_date_is_the_latest_row() {
+    fn date_bounds_span_first_to_last_row() {
         let store = synthetic(3, 20);
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         assert_eq!(
-            store.max_date().unwrap(),
-            Some(epoch + chrono::Duration::days(19))
+            store.date_bounds().unwrap(),
+            Some((epoch, epoch + chrono::Duration::days(19)))
         );
     }
 }

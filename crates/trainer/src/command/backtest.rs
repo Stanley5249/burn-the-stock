@@ -10,8 +10,8 @@ use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_model::class::Action;
-use stock_model::data::{TickerFrames, TickerQuotes, Window, stack_windows};
-use stock_model::inference::predict;
+use stock_model::data::{TickerFrames, TickerQuotes};
+use stock_model::inference::score;
 use stock_model::strategy::expected_edge;
 
 use crate::cli::BacktestArgs;
@@ -21,9 +21,6 @@ use crate::portfolio::{
 use crate::training::TrainingConfig;
 
 type InferenceBackend = Wgpu;
-
-/// Windows per forward pass, capping GPU memory on a universe-wide backtest.
-const SCORE_CHUNK: usize = 1024;
 
 /// Run the portfolio backtest over the held-out split, reporting metrics and a CSV of
 /// the daily account value.
@@ -56,20 +53,12 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     let cutoff = args.valid_from.unwrap_or(split.valid_from);
 
     // Windows ending on or after the cutoff, lookback drawn from earlier bars.
-    let features = store
-        .feature_tensors::<InferenceBackend>(&device)
-        .into_diagnostic()?;
+    let features = store.feature_series().into_diagnostic()?;
     let windows = store
         .windows_since(config.steps, cutoff)
         .into_diagnostic()?;
 
-    // Score in chunks so the GPU holds one chunk of windows at a time.
-    let mut predictions = Vec::with_capacity(windows.len());
-    for chunk in windows.chunks(SCORE_CHUNK) {
-        let items: Vec<_> = chunk.iter().map(Window::item).collect();
-        let technical = stack_windows(&features, &items, config.steps, &device);
-        predictions.extend(predict(&model, technical));
-    }
+    let predictions = score::<InferenceBackend>(&model, &features, &windows, config.steps, &device);
 
     // Index each signal by (ticker, signal date).
     let mut signals: HashMap<String, HashMap<NaiveDate, (f32, Action)>> = HashMap::new();
