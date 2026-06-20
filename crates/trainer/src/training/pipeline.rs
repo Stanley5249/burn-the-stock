@@ -16,7 +16,7 @@ use burn::train::{
 };
 use miette::{IntoDiagnostic, Result, WrapErr, bail};
 
-use crate::data::label::{into_labeled, label_counts};
+use crate::label::{into_labeled, label_counts};
 use crate::training::batcher::StockBatcher;
 use crate::training::metric::{ExpectedValueMetric, PrecisionClassMetric};
 use crate::training::model::StockClassifier;
@@ -344,7 +344,7 @@ fn best_valid_loss_epoch(artifact_dir: &Path) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::synthetic;
+    use crate::label::synthetic;
 
     #[test]
     fn subsample_windows_is_reproducible() {

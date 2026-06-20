@@ -1,6 +1,6 @@
 mod cli;
 mod command;
-mod data;
+mod label;
 mod logging;
 mod portfolio;
 mod training;

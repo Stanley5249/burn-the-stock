@@ -65,7 +65,7 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::synthetic;
+    use crate::label::synthetic;
     use burn::backend::flex::{Flex, FlexDevice};
     use stock_model::model::NUM_FEATURES;
 
