@@ -40,6 +40,7 @@ impl<B: Backend> StockClassifier<B> {
         self.model
     }
 
+    #[tracing::instrument(skip_all)]
     fn forward_classification(&self, batch: &StockBatch<B>) -> StockOutput<B> {
         let logits = self.model.forward(batch.technical.clone());
 
@@ -67,6 +68,7 @@ impl<B: Backend> ItemLazy for StockOutput<B> {
     // Metrics run on the synced CPU backend, matching burn's ClassificationOutput.
     type ItemSync = StockOutput<Flex>;
 
+    #[tracing::instrument(skip_all)]
     fn sync(self) -> Self::ItemSync {
         let [output, loss, targets] = Transaction::default()
             .register(self.output)
@@ -111,6 +113,7 @@ impl<B: AutodiffBackend> TrainStep for StockClassifier<B> {
     type Input = StockBatch<B>;
     type Output = StockOutput<B>;
 
+    #[tracing::instrument(skip_all)]
     fn step(&self, batch: StockBatch<B>) -> TrainOutput<StockOutput<B>> {
         let item = self.forward_classification(&batch);
         TrainOutput::new(self, item.loss.backward(), item)

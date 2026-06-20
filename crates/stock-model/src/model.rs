@@ -29,6 +29,7 @@ pub struct StockModel<B: Backend> {
 impl<B: Backend> StockModel<B> {
     /// Logits `[batch, NUM_CLASSES]`. Dropout is inert on a plain backend, so this
     /// is both the inference and training forward.
+    #[tracing::instrument(skip_all)]
     pub fn forward(&self, technical: Tensor<B, 3>) -> Tensor<B, 2> {
         let temporal_1 = self.gru_1.forward(technical, None);
         let temporal_1 = self.gru_1_norm.forward(temporal_1);

@@ -6893,6 +6893,7 @@ dependencies = [
  "chrono",
  "miette",
  "polars",
+ "tracing",
 ]
 
 [[package]]
@@ -7732,6 +7733,7 @@ dependencies = [
  "burn",
  "chrono",
  "clap",
+ "dotenvy",
  "fastrand",
  "miette",
  "polars",

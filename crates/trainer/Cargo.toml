@@ -12,6 +12,7 @@ burn = {
 }
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
+dotenvy = { workspace = true }
 fastrand = "2.4.1"
 miette = { workspace = true, features = ["fancy"] }
 polars = {

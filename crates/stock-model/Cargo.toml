@@ -20,6 +20,7 @@ polars = {
     "strings"
   ]
 }
+tracing = { workspace = true }
 
 [dev-dependencies]
 burn = { workspace = true, features = ["flex", "std"] }
