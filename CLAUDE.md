@@ -51,6 +51,6 @@ Single-letter loop counters are fine (`i`, `j`, `k`), but prefer meaningful name
 
 Favor explicit conjunctions and transition words to connect your thoughts. Use natural phrasing instead of colons or semicolons, and limit punctuation to standard ASCII characters.
 
-Comments target the surprising. The reader follows ordinary code logic, so a comment earns its place on a genuinely counterintuitive choice and states its why simply and concisely. Keep doc comments and any clippy-required `# Errors` or `# Panics` section in the same simple, concise style.
+Comments target the surprising. The reader follows ordinary code logic, so a comment earns its place on a genuinely counterintuitive choice and states its why simply and concisely. The default is no comment; when in doubt, leave it out. Keep doc comments and any clippy-required `# Errors` or `# Panics` section in the same simple, concise style.
 
 Commits use conventional commit format. Subject under 50 chars (hard limit 72).
