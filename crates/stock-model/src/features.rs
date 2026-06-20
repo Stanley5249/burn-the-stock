@@ -36,10 +36,6 @@ pub const FEATURE_NAMES: [PlSmallStr; NUM_FEATURES] = [
     VOLUME_RETURN,
 ];
 
-const fn col(name: PlSmallStr) -> Expr {
-    Expr::Column(name)
-}
-
 /// Build the stationary feature expressions, one per [`FEATURE_NAMES`]: the natural log
 /// of each channel's ratio to the prior bar. The four prices share one anchor, the
 /// previous close. The
