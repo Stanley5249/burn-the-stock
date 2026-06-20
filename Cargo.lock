@@ -7735,9 +7735,7 @@ dependencies = [
  "fastrand",
  "miette",
  "polars",
- "stock-client",
  "stock-model",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]

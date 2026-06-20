@@ -27,27 +27,6 @@ pub struct StockModel<B: Backend> {
 }
 
 impl<B: Backend> StockModel<B> {
-    #[must_use]
-    pub fn new(config: &StockModelConfig, device: &B::Device) -> Self {
-        let gru_1 = GruConfig::new(NUM_FEATURES, config.d_hidden, true).init(device);
-        let gru_1_norm = RmsNormConfig::new(config.d_hidden).init(device);
-        let gru_2 = GruConfig::new(config.d_hidden, config.d_hidden, true).init(device);
-        let gru_2_norm = RmsNormConfig::new(config.d_hidden).init(device);
-        let hidden = LinearConfig::new(config.d_hidden, config.d_head).init(device);
-        let head = LinearConfig::new(config.d_head, NUM_CLASSES).init(device);
-
-        Self {
-            gru_1,
-            gru_1_norm,
-            gru_2,
-            gru_2_norm,
-            hidden,
-            head,
-            activation: Gelu::new(),
-            dropout: DropoutConfig::new(config.dropout).init(),
-        }
-    }
-
     /// Logits `[batch, NUM_CLASSES]`. Dropout is inert on a plain backend, so this
     /// is both the inference and training forward.
     pub fn forward(&self, technical: Tensor<B, 3>) -> Tensor<B, 2> {
@@ -86,7 +65,16 @@ pub struct StockModelConfig {
 impl StockModelConfig {
     #[must_use]
     pub fn init<B: Backend>(&self, device: &B::Device) -> StockModel<B> {
-        StockModel::new(self, device)
+        StockModel {
+            gru_1: GruConfig::new(NUM_FEATURES, self.d_hidden, true).init(device),
+            gru_1_norm: RmsNormConfig::new(self.d_hidden).init(device),
+            gru_2: GruConfig::new(self.d_hidden, self.d_hidden, true).init(device),
+            gru_2_norm: RmsNormConfig::new(self.d_hidden).init(device),
+            hidden: LinearConfig::new(self.d_hidden, self.d_head).init(device),
+            head: LinearConfig::new(self.d_head, NUM_CLASSES).init(device),
+            activation: Gelu::new(),
+            dropout: DropoutConfig::new(self.dropout).init(),
+        }
     }
 }
 
