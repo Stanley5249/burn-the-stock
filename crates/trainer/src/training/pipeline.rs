@@ -141,8 +141,7 @@ pub fn train<B: AutodiffBackend>(
         config.take_profit,
         config.stop_loss,
         config.label_horizon,
-    )
-    .into_diagnostic()?;
+    )?;
 
     // Trim before the split so both sides shrink together.
     let store = match max_tickers {
@@ -164,9 +163,7 @@ pub fn train<B: AutodiffBackend>(
         .clone()
         .with_split(Some(DataSplit::new(data_start, cutoff, max_date, tickers)));
 
-    let (train_store, valid_store) = store
-        .train_valid_split(cutoff, config.steps)
-        .into_diagnostic()?;
+    let (train_store, valid_store) = store.train_valid_split(cutoff, config.steps)?;
 
     // Class balance per split, to tune the barriers toward an even mix.
     let train_counts = label_counts(&train_store).into_diagnostic()?;

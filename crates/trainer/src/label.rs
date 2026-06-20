@@ -2,6 +2,7 @@
 //! triple-barrier labeling of the standardized frames. Loading and splitting live in the
 //! shared store.
 
+use miette::{IntoDiagnostic, Result, ensure};
 use polars::prelude::*;
 use stock_model::class::Action;
 use stock_model::data::{LABEL, TickerFrames};
@@ -19,7 +20,7 @@ pub fn into_labeled(
     take_profit: f32,
     stop_loss: f32,
     horizon: usize,
-) -> PolarsResult<TickerFrames> {
+) -> Result<TickerFrames> {
     let mut labeled = Vec::with_capacity(frames.frames.len());
 
     for frame in &frames.frames {
@@ -30,9 +31,9 @@ pub fn into_labeled(
         }
 
         let labels = compute_labels(
-            frame.column(&HIGH)?,
-            frame.column(&LOW)?,
-            frame.column(&CLOSE)?,
+            frame.column(&HIGH).into_diagnostic()?,
+            frame.column(&LOW).into_diagnostic()?,
+            frame.column(&CLOSE).into_diagnostic()?,
             take_profit,
             stop_loss,
             horizon,
@@ -40,7 +41,8 @@ pub fn into_labeled(
 
         // `compute_labels` already drops the trailing horizon, so the head aligns.
         let mut head = frame.head(Some(height - horizon));
-        head.with_column(Column::new(LABEL, labels))?;
+        head.with_column(Column::new(LABEL, labels))
+            .into_diagnostic()?;
         labeled.push(head);
     }
 
@@ -70,14 +72,14 @@ fn compute_labels(
     take_profit: f32,
     stop_loss: f32,
     horizon: usize,
-) -> PolarsResult<Vec<u8>> {
-    let high = high.f32()?;
-    let low = low.f32()?;
-    let close = close.f32()?;
+) -> Result<Vec<u8>> {
+    let high = high.f32().into_diagnostic()?;
+    let low = low.f32().into_diagnostic()?;
+    let close = close.f32().into_diagnostic()?;
 
-    polars_ensure!(
+    ensure!(
         !high.has_nulls() && !low.has_nulls() && !close.has_nulls(),
-        InvalidOperation: "OHLC columns must not contain nulls"
+        "OHLC columns must not contain nulls"
     );
 
     let high: Vec<f32> = high.into_no_null_iter().collect();

@@ -5,7 +5,7 @@
 //! meant to run once.
 
 use clap::Parser;
-use miette::{Context, IntoDiagnostic, Result};
+use miette::{Context, IntoDiagnostic, Result, miette};
 use polars::prelude::*;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::path::{Path, PathBuf};
@@ -34,10 +34,10 @@ struct Args {
 
 /// Distinct `(market, code)` pairs from the price parquet, sorted for a
 /// deterministic fetch order.
-fn load_universe(input: &Path) -> miette::Result<Vec<(String, String)>> {
+fn load_universe(input: &Path) -> Result<Vec<(String, String)>> {
     let path = input
         .to_str()
-        .ok_or_else(|| miette::miette!("input path is not valid UTF-8"))?;
+        .ok_or_else(|| miette!("input path is not valid UTF-8"))?;
 
     let frame = LazyFrame::scan_parquet(PlRefPath::new(path), ScanArgsParquet::default())
         .into_diagnostic()?

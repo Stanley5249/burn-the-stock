@@ -8,6 +8,7 @@ use std::path::Path;
 
 use burn::prelude::*;
 use chrono::NaiveDate;
+use miette::{IntoDiagnostic, Result, ensure};
 use polars::prelude::*;
 
 use crate::features::{
@@ -203,12 +204,12 @@ impl TickerFrames {
     ///
     /// # Errors
     /// If a frame's date column is malformed or a split leaves one side empty.
-    pub fn train_valid_split(&self, cutoff: NaiveDate, steps: usize) -> PolarsResult<(Self, Self)> {
+    pub fn train_valid_split(&self, cutoff: NaiveDate, steps: usize) -> Result<(Self, Self)> {
         let mut train = Vec::with_capacity(self.frames.len());
         let mut valid = Vec::with_capacity(self.frames.len());
 
         for frame in &self.frames {
-            let dates = date_buffer(frame)?;
+            let dates = date_buffer(frame).into_diagnostic()?;
             // Dates ascend, so this is the count of rows before the cutoff.
             let split = dates.partition_point(|&day| day < cutoff);
             let left = frame.head(Some(split));
@@ -222,9 +223,9 @@ impl TickerFrames {
             }
         }
 
-        polars_ensure!(
+        ensure!(
             !train.is_empty() && !valid.is_empty(),
-            NoData: "train/valid split left one side empty; check cutoff and steps"
+            "train/valid split left one side empty; check cutoff and steps"
         );
 
         Ok((Self { frames: train }, Self { frames: valid }))
