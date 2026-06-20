@@ -105,7 +105,7 @@ impl TickerFrames {
             if rows < steps {
                 continue;
             }
-            let date = *date_buffer(frame)?.last().expect("height >= steps >= 1");
+            let date = date_endpoints(frame)?.expect("height >= steps >= 1").1;
             windows.push(Window {
                 ticker_index,
                 start: rows - steps,
@@ -180,9 +180,7 @@ impl TickerFrames {
     pub fn date_bounds(&self) -> PolarsResult<Option<(NaiveDate, NaiveDate)>> {
         let mut bounds: Option<(NaiveDate, NaiveDate)> = None;
         for frame in &self.frames {
-            let dates = date_buffer(frame)?;
-            // Dates ascend, so first and last are this ticker's min and max.
-            if let (Some(&first), Some(&last)) = (dates.first(), dates.last()) {
+            if let Some((first, last)) = date_endpoints(frame)? {
                 bounds = Some(match bounds {
                     Some((lo, hi)) => (lo.min(first), hi.max(last)),
                     None => (first, last),
@@ -313,6 +311,16 @@ fn ticker_name(frame: &DataFrame) -> PolarsResult<String> {
         .get(0)
         .expect("partition group is non-empty")
         .to_owned())
+}
+
+/// A frame's first and last `DATE`, in one pass without materializing the column.
+/// `None` when the frame has no dated row. Rows ascend, so `.1` is the latest bar.
+fn date_endpoints(frame: &DataFrame) -> PolarsResult<Option<(NaiveDate, NaiveDate)>> {
+    let mut dates = frame.column(&DATE)?.date()?.as_date_iter().flatten();
+    let Some(first) = dates.next() else {
+        return Ok(None);
+    };
+    Ok(Some((first, dates.last().unwrap_or(first))))
 }
 
 /// A frame's `DATE` column as `NaiveDate`s, in row order.
