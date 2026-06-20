@@ -10,7 +10,7 @@ use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_model::class::Action;
-use stock_model::data::{TickerFrames, TickerQuotes, stack_windows};
+use stock_model::data::{TickerFrames, TickerQuotes, Window, stack_windows};
 use stock_model::inference::predict;
 use stock_model::strategy::expected_edge;
 
@@ -66,11 +66,8 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     // Score in chunks so the GPU holds one chunk of windows at a time.
     let mut predictions = Vec::with_capacity(windows.len());
     for chunk in windows.chunks(SCORE_CHUNK) {
-        let pairs: Vec<(u32, u32)> = chunk
-            .iter()
-            .map(|window| (window.ticker_index, window.start))
-            .collect();
-        let technical = stack_windows(&features, &pairs, config.steps, &device);
+        let items: Vec<_> = chunk.iter().map(Window::item).collect();
+        let technical = stack_windows(&features, &items, config.steps, &device);
         predictions.extend(predict(&model, technical));
     }
 

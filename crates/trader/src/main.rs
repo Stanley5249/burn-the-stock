@@ -14,7 +14,7 @@ use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_model::class::Action;
-use stock_model::data::{TickerFrames, stack_windows};
+use stock_model::data::{TickerFrames, Window, stack_windows};
 use stock_model::features::DATE;
 use stock_model::inference::{InferenceConfig, predict};
 
@@ -92,8 +92,8 @@ fn main() -> Result<()> {
     let features = store
         .feature_tensors::<Backend>(&device)
         .into_diagnostic()?;
-    let pairs: Vec<(u32, u32)> = windows.iter().map(|w| (w.ticker_index, w.start)).collect();
-    let technical = stack_windows(&features, &pairs, config.steps, &device);
+    let items: Vec<_> = windows.iter().map(Window::item).collect();
+    let technical = stack_windows(&features, &items, config.steps, &device);
 
     // One forward over every ticker; the model is tiny and there is one window each.
     let decisions: Vec<(String, Action)> = windows

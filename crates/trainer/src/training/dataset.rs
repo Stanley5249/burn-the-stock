@@ -1,20 +1,12 @@
 use burn::data::dataset::Dataset;
 use fastrand::Rng;
-use stock_model::data::TickerFrames;
-
-/// One training sample: the `(ticker, start)` window the batcher slices. Backend-free,
-/// so the item carries no feature data.
-#[derive(Clone, Copy, Debug)]
-pub struct StockItem {
-    pub ticker: u32,
-    pub start: u32,
-}
+use stock_model::data::{StockItem, TickerFrames};
 
 /// A [`Dataset`] over every `steps`-length window of a [`TickerFrames`]. Each window is
-/// resolved at construction, so the dataset owns a flat `Vec<(u32, u32)>` and `get` is a
+/// resolved at construction, so the dataset owns a flat `Vec<StockItem>` and `get` is a
 /// cheap lookup off the store's hot path.
 pub struct WindowDataset {
-    windows: Vec<(u32, u32)>,
+    windows: Vec<StockItem>,
 }
 
 impl WindowDataset {
@@ -36,9 +28,7 @@ impl WindowDataset {
 
 impl Dataset<StockItem> for WindowDataset {
     fn get(&self, index: usize) -> Option<StockItem> {
-        self.windows
-            .get(index)
-            .map(|&(ticker, start)| StockItem { ticker, start })
+        self.windows.get(index).copied()
     }
 
     fn len(&self) -> usize {

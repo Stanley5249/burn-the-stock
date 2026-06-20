@@ -1,7 +1,6 @@
-use crate::training::dataset::StockItem;
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
-use stock_model::data::{TickerFrames, stack_windows};
+use stock_model::data::{StockItem, TickerFrames, stack_windows};
 
 #[derive(Clone, Debug)]
 pub struct StockBatch<B: Backend> {
@@ -42,8 +41,7 @@ impl<B: Backend> StockBatcher<B> {
 
 impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher<B> {
     fn batch(&self, items: Vec<StockItem>, device: &B::Device) -> StockBatch<B> {
-        let windows: Vec<(u32, u32)> = items.iter().map(|item| (item.ticker, item.start)).collect();
-        let technical = stack_windows(&self.features, &windows, self.steps, device);
+        let technical = stack_windows(&self.features, &items, self.steps, device);
 
         // The label comes from the window's last day.
         let label_slices = items

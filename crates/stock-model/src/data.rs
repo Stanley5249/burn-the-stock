@@ -134,23 +134,23 @@ impl TickerFrames {
         Ok(windows)
     }
 
-    /// Every `(ticker_index, start)` window of length `steps`, in ticker-then-date
-    /// order. Short tickers contribute none. The training dataset's pool.
+    /// Every window of length `steps`, in ticker-then-date order, as a [`StockItem`].
+    /// Short tickers contribute none. The training dataset's pool.
     ///
     /// # Panics
     /// If a ticker index or row count exceeds `u32`, far larger than supported.
     #[must_use]
-    pub fn enumerate_windows(&self, steps: usize) -> Vec<(u32, u32)> {
+    pub fn enumerate_windows(&self, steps: usize) -> Vec<StockItem> {
         let mut windows = Vec::new();
         for (ticker_index, frame) in self.frames.iter().enumerate() {
             let rows = frame.height();
             if rows < steps {
                 continue;
             }
-            let ticker_index = u32::try_from(ticker_index).expect("ticker count exceeds u32");
+            let ticker = u32::try_from(ticker_index).expect("ticker count exceeds u32");
             let last_start = u32::try_from(rows - steps).expect("row index exceeds u32");
             for start in 0..=last_start {
-                windows.push((ticker_index, start));
+                windows.push(StockItem { ticker, start });
             }
         }
         windows
@@ -272,16 +272,37 @@ impl TickerFrames {
     }
 }
 
+/// A window coordinate: a ticker by its frame index and the start row of a
+/// `steps`-length slice. The shared key into the resident feature tensors, produced by
+/// the training dataset and the signal builders and consumed by [`stack_windows`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StockItem {
+    pub ticker: u32,
+    pub start: u32,
+}
+
+impl StockItem {
+    /// This window's contiguous `[steps, NUM_FEATURES]` slice of its ticker's resident
+    /// tensor.
+    ///
+    /// # Panics
+    /// If `start + steps` exceeds the ticker's rows, an out-of-range slice.
+    #[must_use]
+    pub fn window<B: Backend>(&self, features: &[Tensor<B, 2>], steps: usize) -> Tensor<B, 2> {
+        let start = self.start as usize;
+        features[self.ticker as usize]
+            .clone()
+            .slice(start..start + steps)
+    }
+}
+
 /// Assemble a `[windows.len(), steps, NUM_FEATURES]` tensor by stacking each window's
 /// contiguous slice of its ticker's resident tensor. The one windowing path, shared by
 /// training batches, backtest chunks, and the trader's tails.
-///
-/// # Panics
-/// If a window's `start + steps` exceeds its ticker's rows, an out-of-range slice.
 #[must_use]
 pub fn stack_windows<B: Backend>(
     features: &[Tensor<B, 2>],
-    windows: &[(u32, u32)],
+    windows: &[StockItem],
     steps: usize,
     device: &B::Device,
 ) -> Tensor<B, 3> {
@@ -291,12 +312,7 @@ pub fn stack_windows<B: Backend>(
 
     let slices = windows
         .iter()
-        .map(|&(ticker, start)| {
-            let start = start as usize;
-            features[ticker as usize]
-                .clone()
-                .slice(start..start + steps)
-        })
+        .map(|item| item.window(features, steps))
         .collect();
 
     Tensor::stack(slices, 0)
@@ -310,6 +326,18 @@ pub struct Window {
     pub start: u32,
     pub ticker: String,
     pub date: NaiveDate,
+}
+
+impl Window {
+    /// The lightweight `(ticker_index, start)` coordinate for [`stack_windows`],
+    /// dropping the ticker name and date that key the signal.
+    #[must_use]
+    pub fn item(&self) -> StockItem {
+        StockItem {
+            ticker: self.ticker_index,
+            start: self.start,
+        }
+    }
 }
 
 /// One ticker's raw daily prices for the backtest, sharing `dates`' row order.
@@ -440,7 +468,7 @@ mod tests {
         let windows = store.enumerate_windows(4);
         // Each 6-row ticker yields 3 windows; none from a ticker shorter than 4.
         assert_eq!(windows.len(), 6);
-        assert!(windows.iter().all(|&(ticker, _)| ticker < 2));
+        assert!(windows.iter().all(|item| item.ticker < 2));
     }
 
     #[test]
@@ -449,7 +477,16 @@ mod tests {
         let features = store.feature_tensors::<Flex>(&FlexDevice).unwrap();
 
         // Ticker 0 from row 0, ticker 1 from row 1.
-        let windows = [(0u32, 0u32), (1, 1)];
+        let windows = [
+            StockItem {
+                ticker: 0,
+                start: 0,
+            },
+            StockItem {
+                ticker: 1,
+                start: 1,
+            },
+        ];
         let tensor = stack_windows::<Flex>(&features, &windows, 4, &FlexDevice);
 
         assert_eq!(tensor.dims(), [2, 4, NUM_FEATURES]);
