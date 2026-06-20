@@ -10,7 +10,6 @@ use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{ClassReduction, FBetaScoreMetric, LossMetric};
-use burn::train::renderer::CliMetricsRenderer;
 use burn::train::{
     Learner, LearnerSummary, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining,
 };
@@ -244,10 +243,6 @@ pub fn train<B: AutodiffBackend>(
         .with_file_checkpointer(CompactRecorder::new())
         // Our startup logger owns `experiment.log`; stop burn installing its own.
         .with_application_logger(None)
-        // The TUI renderer divides by the train-sample count and aborts when a
-        // valid update lands first (burn metric_numeric.rs); the CLI renderer
-        // does not.
-        .renderer(CliMetricsRenderer::new())
         .num_epochs(num_epochs)
         .summary();
 
