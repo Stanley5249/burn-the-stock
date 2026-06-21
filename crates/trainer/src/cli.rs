@@ -184,8 +184,9 @@ impl TrainArgs {
 }
 
 /// Long-only portfolio backtest over the held-out window under `sim_stock` rules.
-/// Barriers and the split come from the saved `config.json`; the buy gate, fill
-/// model, and window are flags here.
+/// Defaults to the winning setup: barriers off so positions ride to a 20-day time exit.
+/// The split still comes from the saved `config.json`; the buy gate, fill, exits, and
+/// window are flags here.
 #[derive(Parser, Debug)]
 pub struct BacktestArgs {
     /// Directory holding a run's `config.json` and `model.mpk`. Defaults to the
@@ -209,29 +210,33 @@ pub struct BacktestArgs {
     #[arg(long, default_value_t = 0.0)]
     pub threshold: f32,
 
-    /// Take-profit exit, a fraction of the entry price. Defaults to the run's config.
-    #[arg(long)]
-    pub take_profit: Option<f32>,
+    /// Take-profit exit as a fraction of price. Default 1.0 is wide enough to never fire,
+    /// since barriers backtest worse than riding to the time exit. Lower to re-enable.
+    #[arg(long, default_value_t = 1.0)]
+    pub take_profit: f32,
 
-    /// Stop-loss exit, a fraction of the entry price. Defaults to the run's config.
-    #[arg(long)]
-    pub stop_loss: Option<f32>,
+    /// Stop-loss exit as a fraction of price. Default 1.0 is effectively off, since stops
+    /// cut winners that recover. Lower to re-enable.
+    #[arg(long, default_value_t = 1.0)]
+    pub stop_loss: f32,
 
-    /// Trading days to hold before a time exit. Defaults to the run's `label_horizon`.
-    #[arg(long)]
-    pub max_hold: Option<usize>,
+    /// Trading days to hold before the time exit, the primary exit. Default 20 is the
+    /// hold length that backtests best across windows.
+    #[arg(long, default_value_t = 20)]
+    pub max_hold: usize,
 
     /// Most stocks held at once; each buy targets an equal `equity / slots`.
     #[arg(long, default_value_t = 10)]
     pub max_holdings: usize,
 
-    /// Disable rotation, so a full book holds to its exits instead of churning into
-    /// stronger names. Isolates pick quality from churn cost.
+    /// Rotate a full book into stronger names instead of holding to the time exit. Off by
+    /// default, since with wide exits it churns every day and the costs erase the edge.
     #[arg(long)]
-    pub no_rotate: bool,
+    pub rotate: bool,
 
-    /// Which prices fills happen at: `low-high` optimistic, `open` pessimistic.
-    #[arg(long, value_enum, default_value_t = Fill::LowHigh)]
+    /// Which prices fills happen at: `low-high` optimistic, `open` pessimistic. Defaults to
+    /// the honest pessimistic fill; `low-high` assumes every buy at the low and is fantasy.
+    #[arg(long, value_enum, default_value_t = Fill::Open)]
     pub fill: Fill,
 
     /// Equity-curve CSV path. Defaults to `<artifact_dir>/backtest-equity.csv`.
