@@ -11,6 +11,10 @@ pub enum Error {
     #[diagnostic(code(stock::env))]
     Env(#[from] std::env::VarError),
 
+    #[error(transparent)]
+    #[diagnostic(code(stock::url))]
+    Url(#[from] url::ParseError),
+
     #[error("API returned failure: {status}")]
     #[diagnostic(code(stock::api))]
     Api { status: String },

@@ -3,10 +3,11 @@ use crate::types::{MarketType, StockInfo, UserStock};
 use crate::urls;
 use serde::Deserialize;
 use std::collections::HashMap;
+use url::Url;
 
 pub struct SimStockClient {
     http: reqwest::Client,
-    base: String,
+    base: Url,
     account: String,
     password: String,
 }
@@ -19,15 +20,22 @@ impl SimStockClient {
 
     /// Load credentials from `STOCK_ACCOUNT` and `STOCK_PASSWORD`, and the trading API base
     /// from `SIM_STOCK_BASE` (default [`urls::SIM_STOCK_API_BASE`]). Call
-    /// `dotenvy::dotenv().ok()` first if using a `.env` file.
+    /// `dotenvy::dotenv().ok()` first if using a `.env` file. A trailing slash is added so
+    /// endpoint joins keep the `trading_api` segment.
     ///
     /// # Errors
-    /// If either credential env var is missing.
+    /// If a credential env var is missing or the base URL does not parse.
     pub fn from_env(http: reqwest::Client) -> Result<Self> {
         let account = std::env::var("STOCK_ACCOUNT")?;
         let password = std::env::var("STOCK_PASSWORD")?;
-        let base = std::env::var("SIM_STOCK_BASE")
+
+        let mut base = std::env::var("SIM_STOCK_BASE")
             .unwrap_or_else(|_| urls::SIM_STOCK_API_BASE.to_string());
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        let base = Url::parse(&base)?;
+
         Ok(Self {
             http,
             base,
@@ -41,7 +49,7 @@ impl SimStockClient {
     pub async fn stock_list(&self) -> Result<HashMap<String, StockInfo>> {
         let list = self
             .http
-            .get(format!("{}/stock_list", self.base))
+            .get(self.base.join("stock_list")?)
             .send()
             .await?
             .error_for_status()?
@@ -71,7 +79,7 @@ impl SimStockClient {
 
         let response: Response = self
             .http
-            .get(format!("{}/stock_type", self.base))
+            .get(self.base.join("stock_type")?)
             .query(&[("stock_code", code)])
             .send()
             .await?
@@ -100,7 +108,7 @@ impl SimStockClient {
 
         let response: Response = self
             .http
-            .post(format!("{}/get_user_stocks", self.base))
+            .post(self.base.join("get_user_stocks")?)
             .form(&[("account", &self.account), ("password", &self.password)])
             .send()
             .await?
@@ -137,7 +145,7 @@ impl SimStockClient {
 
         let response: Response = self
             .http
-            .post(format!("{}/{}", self.base, action))
+            .post(self.base.join(action)?)
             .form(&[
                 ("account", self.account.as_str()),
                 ("password", self.password.as_str()),
@@ -160,5 +168,36 @@ impl SimStockClient {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_base_joins_to_full_endpoints() {
+        let base = Url::parse(urls::SIM_STOCK_API_BASE).unwrap();
+        assert_eq!(
+            base.join("buy").unwrap().as_str(),
+            "https://ciot.imis.ncku.edu.tw/stock/trading_api/buy"
+        );
+        assert_eq!(
+            base.join("get_user_stocks").unwrap().as_str(),
+            "https://ciot.imis.ncku.edu.tw/stock/trading_api/get_user_stocks"
+        );
+    }
+
+    #[test]
+    fn base_without_trailing_slash_keeps_the_trading_api_segment() {
+        let mut base = "https://example.com/stock/trading_api".to_string();
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        let base = Url::parse(&base).unwrap();
+        assert_eq!(
+            base.join("sell").unwrap().as_str(),
+            "https://example.com/stock/trading_api/sell"
+        );
     }
 }

@@ -16,6 +16,7 @@ rust_decimal = { workspace = true, features = ["serde", "serde-with-str"] }
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
