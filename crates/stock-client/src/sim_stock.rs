@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 pub struct SimStockClient {
     http: reqwest::Client,
+    base: String,
     account: String,
     password: String,
 }
@@ -16,16 +17,20 @@ impl SimStockClient {
         &self.http
     }
 
-    /// Load credentials from `STOCK_ACCOUNT` and `STOCK_PASSWORD`. Call
+    /// Load credentials from `STOCK_ACCOUNT` and `STOCK_PASSWORD`, and the trading API base
+    /// from `SIM_STOCK_BASE` (default [`urls::SIM_STOCK_API_BASE`]). Call
     /// `dotenvy::dotenv().ok()` first if using a `.env` file.
     ///
     /// # Errors
-    /// If either env var is missing.
+    /// If either credential env var is missing.
     pub fn from_env(http: reqwest::Client) -> Result<Self> {
         let account = std::env::var("STOCK_ACCOUNT")?;
         let password = std::env::var("STOCK_PASSWORD")?;
+        let base = std::env::var("SIM_STOCK_BASE")
+            .unwrap_or_else(|_| urls::SIM_STOCK_API_BASE.to_string());
         Ok(Self {
             http,
+            base,
             account,
             password,
         })
@@ -36,7 +41,7 @@ impl SimStockClient {
     pub async fn stock_list(&self) -> Result<HashMap<String, StockInfo>> {
         let list = self
             .http
-            .get(format!("{}/stock_list", urls::SIM_STOCK_API_BASE))
+            .get(format!("{}/stock_list", self.base))
             .send()
             .await?
             .error_for_status()?
@@ -66,7 +71,7 @@ impl SimStockClient {
 
         let response: Response = self
             .http
-            .get(format!("{}/stock_type", urls::SIM_STOCK_API_BASE))
+            .get(format!("{}/stock_type", self.base))
             .query(&[("stock_code", code)])
             .send()
             .await?
@@ -95,7 +100,7 @@ impl SimStockClient {
 
         let response: Response = self
             .http
-            .post(format!("{}/get_user_stocks", urls::SIM_STOCK_API_BASE))
+            .post(format!("{}/get_user_stocks", self.base))
             .form(&[("account", &self.account), ("password", &self.password)])
             .send()
             .await?
@@ -132,7 +137,7 @@ impl SimStockClient {
 
         let response: Response = self
             .http
-            .post(format!("{}/{}", urls::SIM_STOCK_API_BASE, action))
+            .post(format!("{}/{}", self.base, action))
             .form(&[
                 ("account", self.account.as_str()),
                 ("password", self.password.as_str()),
