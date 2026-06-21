@@ -3,17 +3,14 @@ use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig, RmsNorm, RmsN
 use burn::prelude::*;
 
 use crate::class::NUM_CLASSES;
+use crate::features::NUM_FEATURES;
 
-/// Standardized feature width of the technical input, matching the feature column.
-/// The single source of the tensor's feature dimension; the polars `FEATURE_NAMES`
-/// list is checked against it.
-pub const NUM_FEATURES: usize = 5;
-
-/// GRU classifier over the standardized feature window. A two-layer GRU summarizes
-/// the window into its last hidden state, which an MLP head turns into action
-/// logits. Architecture only; the loss and training step live with the trainer.
+/// GRU classifier over the standardized feature window. A two-layer GRU
+/// summarizes the window into its last hidden state, which an MLP head turns
+/// into action logits. Architecture only; the loss and training step live with
+/// the trainer.
 ///
-/// Input `[batch, steps, 5]`, output `[batch, NUM_CLASSES]` logits.
+/// Input `[batch, steps, NUM_FEATURES]`, output `[batch, NUM_CLASSES]` logits.
 #[derive(Module, Debug)]
 pub struct StockModel<B: Backend> {
     gru_1: Gru<B>,

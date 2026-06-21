@@ -12,9 +12,9 @@ use miette::{IntoDiagnostic, Result, ensure};
 use polars::prelude::*;
 
 use crate::features::{
-    CLOSE, DATE, FEATURE, HIGH, LOW, OPEN, TICKER, feature_array, standardized_features,
+    CLOSE, DATE, FEATURE, HIGH, LOW, NUM_FEATURES, OPEN, TICKER, feature_array,
+    standardized_features,
 };
-use crate::model::NUM_FEATURES;
 
 /// Triple-barrier class per row, added by the trainer. Absent in the trader and the
 /// backtest, which never read labels.
