@@ -248,6 +248,11 @@ pub struct BacktestArgs {
     #[arg(long, default_value_t = 10)]
     pub max_holdings: usize,
 
+    /// Disable rotation, so a full book holds to its exits instead of churning into
+    /// stronger names. Isolates pick quality from churn cost.
+    #[arg(long)]
+    pub no_rotate: bool,
+
     /// Which prices fills happen at: `low-high` optimistic, `open` pessimistic.
     #[arg(long, value_enum, default_value_t = Fill::LowHigh)]
     pub fill: Fill,

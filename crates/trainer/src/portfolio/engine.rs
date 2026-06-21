@@ -31,7 +31,9 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
         sell_phase(day, index, is_last, config, &mut ledger);
 
         if !is_last {
-            rotate_phase(day, config, &mut ledger);
+            if config.rotate {
+                rotate_phase(day, config, &mut ledger);
+            }
             buy_phase(day, index, config, &mut ledger);
         }
 
@@ -314,6 +316,7 @@ mod tests {
             take_profit: 100.0,
             stop_loss: 0.99,
             max_hold_days: usize::MAX,
+            rotate: true,
         }
     }
 
@@ -436,6 +439,40 @@ mod tests {
     }
 
     #[test]
+    fn rotation_off_holds_through_a_stronger_challenger() {
+        // Same setup as outranked_holding_rotates_out, but rotation disabled: A stays.
+        let mut day1 = TradingDay {
+            date: date(1),
+            bars: HashMap::new(),
+        };
+        day1.bars
+            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 10.0, 10.0));
+        let mut day2 = TradingDay {
+            date: date(2),
+            bars: HashMap::new(),
+        };
+        day2.bars
+            .insert("A".to_string(), bar(0.2, Action::Hold, 11.0, 12.0, 11.0));
+        day2.bars
+            .insert("B".to_string(), bar(0.9, Action::Buy, 50.0, 51.0, 50.0));
+        let day3 = TradingDay {
+            date: date(3),
+            bars: HashMap::new(),
+        };
+
+        let mut cfg = config(1_000_000.0, 1);
+        cfg.rotate = false;
+        let report = run(&[day1, day2, day3], &cfg);
+
+        assert!(
+            report
+                .trades
+                .iter()
+                .all(|t| t.exit_reason != ExitReason::Rotate)
+        );
+    }
+
+    #[test]
     fn marginal_challenger_does_not_rotate() {
         // Challenger B (0.505) beats A (0.500) by less than the round-trip cost, so the
         // full book holds A rather than churning into B for no net gain.
@@ -477,6 +514,7 @@ mod tests {
             take_profit,
             stop_loss,
             max_hold_days,
+            rotate: true,
         }
     }
 

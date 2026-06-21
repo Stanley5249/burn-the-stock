@@ -88,6 +88,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         take_profit: f64::from(args.take_profit.unwrap_or(config.take_profit)),
         stop_loss: f64::from(args.stop_loss.unwrap_or(config.stop_loss)),
         max_hold_days: args.max_hold.unwrap_or(config.label_horizon),
+        rotate: !args.no_rotate,
     };
     let report = portfolio::run(&days, &backtest_config);
 

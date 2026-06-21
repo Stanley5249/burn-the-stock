@@ -72,6 +72,8 @@ pub struct BacktestConfig {
     pub stop_loss: f64,
     /// Trading days to hold before a time exit, the vertical barrier.
     pub max_hold_days: usize,
+    /// Whether a full book may rotate the weakest holding into a stronger challenger.
+    pub rotate: bool,
 }
 
 /// One ticker's signal and prices on one trading day. `score` and `action` are the
