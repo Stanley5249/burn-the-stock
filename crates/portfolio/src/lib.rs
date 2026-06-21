@@ -12,7 +12,7 @@ mod pricing;
 mod report;
 mod types;
 
-pub use engine::{affordable_shares, exit_decision, run};
+pub use engine::{affordable_shares, exit_decision, run, score_weights};
 pub use pricing::{
     LOT, SELL_TAX_RATE, buy_price, commission, round_trip_cost, sell_price, tick_ceil, tick_floor,
 };

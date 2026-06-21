@@ -234,9 +234,29 @@ fn holdings_value(holdings: &HashMap<String, Holding>, bars: &HashMap<String, Da
         .sum()
 }
 
+/// Normalized buy weights from `scores`, each name's positive score as a share of the
+/// total, summing to one. All-nonpositive scores split evenly. The shared rule the
+/// backtest and the live trader both size positions by.
+#[must_use]
+pub fn score_weights(scores: &[f32]) -> Vec<f64> {
+    let weights: Vec<f64> = scores
+        .iter()
+        .map(|score| f64::from(*score).max(0.0))
+        .collect();
+    let total: f64 = weights.iter().sum();
+
+    if total <= 0.0 {
+        #[allow(clippy::cast_precision_loss)]
+        let even = 1.0 / (weights.len().max(1) as f64);
+        return vec![even; weights.len()];
+    }
+
+    weights.iter().map(|weight| weight / total).collect()
+}
+
 /// Per-ticker buy target for score weighting: split `cash` across the top candidates that
-/// fit the open slots, in proportion to each name's positive score. Names beyond the open
-/// slots are omitted, so the buy loop targets them at zero and skips them.
+/// fit the open slots by [`score_weights`]. Names beyond the open slots are omitted, so the
+/// buy loop targets them at zero and skips them.
 fn score_targets(
     candidates: &[(&String, &DayBar)],
     holdings: &HashMap<String, Holding>,
@@ -246,22 +266,11 @@ fn score_targets(
     let open_slots = config.max_holdings.saturating_sub(holdings.len());
     let chosen = &candidates[..open_slots.min(candidates.len())];
 
-    let weight = |score: f32| f64::from(score).max(0.0);
-    let total: f64 = chosen.iter().map(|(_, bar)| weight(bar.score)).sum();
-
-    if total <= 0.0 {
-        // No positive scores: split evenly so the cash still deploys.
-        #[allow(clippy::cast_precision_loss)]
-        let even = cash / (chosen.len().max(1) as f64);
-        return chosen
-            .iter()
-            .map(|(ticker, _)| ((*ticker).clone(), even))
-            .collect();
-    }
-
+    let scores: Vec<f32> = chosen.iter().map(|(_, bar)| bar.score).collect();
     chosen
         .iter()
-        .map(|(ticker, bar)| ((*ticker).clone(), cash * weight(bar.score) / total))
+        .zip(score_weights(&scores))
+        .map(|((ticker, _), weight)| ((*ticker).clone(), cash * weight))
         .collect()
 }
 

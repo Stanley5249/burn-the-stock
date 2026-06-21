@@ -7728,10 +7728,16 @@ dependencies = [
  "burn",
  "chrono",
  "clap",
+ "dotenvy",
  "miette",
  "polars",
+ "portfolio",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
  "stock-client",
  "stock-model",
+ "tokio",
 ]
 
 [[package]]
