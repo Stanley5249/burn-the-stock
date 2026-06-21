@@ -95,10 +95,19 @@ fn main() -> Result<()> {
     let features = store.feature_series().into_diagnostic()?;
     let predictions = score::<Backend>(&model, &features, &windows, config.steps, &device);
 
+    // A below-average pick (z < 0) sells, otherwise buy; the portfolio gates buys by the
+    // score, so Hold is never emitted.
     let decisions: Vec<(String, Action)> = windows
         .into_iter()
         .zip(predictions)
-        .map(|(window, prediction)| (window.ticker, prediction.action))
+        .map(|(window, prediction)| {
+            let action = if prediction.score < 0.0 {
+                Action::Sell
+            } else {
+                Action::Buy
+            };
+            (window.ticker, action)
+        })
         .collect();
 
     place_orders(&decisions)

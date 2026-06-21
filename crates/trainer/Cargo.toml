@@ -26,6 +26,7 @@ polars = {
     "parquet",
     "partition_by",
     "performant",
+    "rolling_window",
     "strings"
   ]
 }

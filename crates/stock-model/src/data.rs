@@ -16,8 +16,8 @@ use crate::features::{
     standardized_features,
 };
 
-/// Triple-barrier class per row, added by the trainer. Absent in the trader and the
-/// backtest, which never read labels.
+/// The trainer's forward-MFE rank target per row, added before partitioning. Absent in
+/// the trader and the backtest, which never read labels.
 pub const LABEL: PlSmallStr = PlSmallStr::from_static("label");
 
 /// One standardized frame per ticker, each sorted by date and holding `TICKER`, `DATE`,
@@ -27,25 +27,52 @@ pub struct TickerFrames {
     pub frames: Vec<DataFrame>,
 }
 
+/// Standardize a raw OHLCV frame into the model feature array, as one lazy frame sorted
+/// `[TICKER, DATE]`. Shared by [`TickerFrames::from_lazy`] and the path-scanning
+/// [`TickerFrames::standardized_long`].
+fn standardize(raw: LazyFrame) -> LazyFrame {
+    standardized_features(raw).select([
+        col(TICKER),
+        col(DATE),
+        feature_array().alias(FEATURE),
+        col(OPEN),
+        col(HIGH),
+        col(LOW),
+        col(CLOSE),
+    ])
+}
+
 impl TickerFrames {
-    /// Standardize a raw OHLCV frame and partition it by ticker. The single place the
-    /// universe is turned into per-ticker frames.
+    /// Standardize a raw OHLCV frame and partition it by ticker, all rows, no labels.
     ///
     /// # Errors
     /// If the frame cannot be collected or partitioned.
     pub fn from_lazy(raw: LazyFrame) -> PolarsResult<Self> {
-        let long = standardized_features(raw)
-            .select([
-                col(TICKER),
-                col(DATE),
-                feature_array().alias(FEATURE),
-                col(OPEN),
-                col(HIGH),
-                col(LOW),
-                col(CLOSE),
-            ])
-            .collect()?;
+        Self::partition_long(&standardize(raw).collect()?)
+    }
 
+    /// Scan and standardize the OHLCV parquet into one lazy frame, sorted `[TICKER, DATE]`,
+    /// before partitioning. The trainer splices its label columns in here, then calls
+    /// [`partition_long`]; [`load`] is the no-label path.
+    ///
+    /// [`partition_long`]: Self::partition_long
+    /// [`load`]: Self::load
+    ///
+    /// # Errors
+    /// If the parquet cannot be scanned.
+    pub fn standardized_long(path: &Path) -> PolarsResult<LazyFrame> {
+        let raw =
+            LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?;
+        Ok(standardize(raw))
+    }
+
+    /// Partition a standardized long frame into the per-ticker store. The single place
+    /// the universe is turned into per-ticker frames, so the trainer can label the long
+    /// frame first.
+    ///
+    /// # Errors
+    /// If the frame cannot be partitioned.
+    pub fn partition_long(long: &DataFrame) -> PolarsResult<Self> {
         Ok(Self {
             frames: long.partition_by_stable([TICKER], true)?,
         })
@@ -56,9 +83,7 @@ impl TickerFrames {
     /// # Errors
     /// If the parquet cannot be scanned or standardized.
     pub fn load(path: &Path) -> PolarsResult<Self> {
-        let raw =
-            LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?;
-        Self::from_lazy(raw)
+        Self::partition_long(&Self::standardized_long(path)?.collect()?)
     }
 
     /// Each ticker's flattened f32 `FEATURE` values as one contiguous `Series`
@@ -358,7 +383,7 @@ mod tests {
 
     /// `n_tickers` tickers of `rows` rows each. Row `i` fills every feature slot and the
     /// close with `ticker * 1000 + i`, so a window's value identifies its ticker and
-    /// row; labels cycle 0/1/2; the price range is one unit.
+    /// row; the label is `i` as `f32`; the price range is one unit.
     fn synthetic(n_tickers: i16, rows: i16) -> TickerFrames {
         use crate::features::FEATURE_NAMES;
 
@@ -382,12 +407,7 @@ mod tests {
                     Column::new(HIGH, value.iter().map(|v| v + 1.0).collect::<Vec<_>>()),
                     Column::new(LOW, value.iter().map(|v| v - 1.0).collect::<Vec<_>>()),
                     Column::new(CLOSE, value.clone()),
-                    Column::new(
-                        LABEL,
-                        (0..rows)
-                            .map(|i| u8::try_from(i % 3).unwrap())
-                            .collect::<Vec<_>>(),
-                    ),
+                    Column::new(LABEL, (0..rows).map(f32::from).collect::<Vec<_>>()),
                 ];
                 for feature in FEATURE_NAMES {
                     columns.push(Column::new(feature, value.clone()));

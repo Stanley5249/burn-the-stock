@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
-use stock_model::class::Action;
 
 use super::pricing::{
     LOT, SELL_TAX_RATE, buy_price, commission, round_trip_cost, sell_price, tick_floor,
@@ -87,7 +86,7 @@ fn exit_decision(
         Some((tick_floor(lower), ExitReason::StopLoss))
     } else if index - holding.entry_index >= config.max_hold_days {
         Some((tick_floor(f64::from(bar.close)), ExitReason::Time))
-    } else if bar.action == Action::Sell {
+    } else if bar.score < 0.0 {
         Some((sell_price(bar, config.fill), ExitReason::Signal))
     } else if is_last {
         Some((sell_price(bar, config.fill), ExitReason::Final))
@@ -294,10 +293,9 @@ mod tests {
         NaiveDate::from_ymd_opt(2026, 1, day).unwrap()
     }
 
-    fn bar(score: f32, action: Action, low: f32, high: f32, close: f32) -> DayBar {
+    fn bar(score: f32, low: f32, high: f32, close: f32) -> DayBar {
         DayBar {
             score,
-            action,
             open: low,
             low,
             high,
@@ -328,19 +326,19 @@ mod tests {
             bars: HashMap::new(),
         };
         day1.bars
-            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 12.0, 11.0));
+            .insert("A".to_string(), bar(0.5, 10.0, 12.0, 11.0));
         let mut day2 = TradingDay {
             date: date(2),
             bars: HashMap::new(),
         };
         day2.bars
-            .insert("A".to_string(), bar(0.1, Action::Hold, 13.0, 16.0, 15.0));
+            .insert("A".to_string(), bar(0.1, 13.0, 16.0, 15.0));
         let mut day3 = TradingDay {
             date: date(3),
             bars: HashMap::new(),
         };
         day3.bars
-            .insert("A".to_string(), bar(0.0, Action::Hold, 18.0, 20.0, 19.0));
+            .insert("A".to_string(), bar(0.0, 18.0, 20.0, 19.0));
 
         let report = run(&[day1, day2, day3], &config(1_000_000.0, 2));
 
@@ -364,17 +362,17 @@ mod tests {
             bars: HashMap::new(),
         };
         day1.bars
-            .insert("A".to_string(), bar(0.6, Action::Buy, 10.0, 11.0, 11.0));
+            .insert("A".to_string(), bar(0.6, 10.0, 11.0, 11.0));
         day1.bars
-            .insert("B".to_string(), bar(0.5, Action::Buy, 100.0, 101.0, 100.0));
+            .insert("B".to_string(), bar(0.5, 100.0, 101.0, 100.0));
         let mut day2 = TradingDay {
             date: date(2),
             bars: HashMap::new(),
         };
         day2.bars
-            .insert("A".to_string(), bar(0.0, Action::Sell, 19.0, 20.0, 20.0));
+            .insert("A".to_string(), bar(-0.1, 19.0, 20.0, 20.0));
         day2.bars
-            .insert("B".to_string(), bar(0.0, Action::Sell, 89.0, 90.0, 90.0));
+            .insert("B".to_string(), bar(-0.1, 89.0, 90.0, 90.0));
 
         let report = run(&[day1, day2], &config(2_000_000.0, 2));
 
@@ -395,7 +393,7 @@ mod tests {
             bars: HashMap::new(),
         };
         day1.bars
-            .insert("A".to_string(), bar(0.05, Action::Buy, 10.0, 12.0, 11.0));
+            .insert("A".to_string(), bar(0.05, 10.0, 12.0, 11.0));
         let mut cfg = config(1_000_000.0, 10);
         cfg.threshold = 0.2;
 
@@ -413,15 +411,15 @@ mod tests {
             bars: HashMap::new(),
         };
         day1.bars
-            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 10.0, 10.0));
+            .insert("A".to_string(), bar(0.5, 10.0, 10.0, 10.0));
         let mut day2 = TradingDay {
             date: date(2),
             bars: HashMap::new(),
         };
         day2.bars
-            .insert("A".to_string(), bar(0.2, Action::Hold, 11.0, 12.0, 11.0));
+            .insert("A".to_string(), bar(0.2, 11.0, 12.0, 11.0));
         day2.bars
-            .insert("B".to_string(), bar(0.9, Action::Buy, 50.0, 51.0, 50.0));
+            .insert("B".to_string(), bar(0.9, 50.0, 51.0, 50.0));
         let day3 = TradingDay {
             date: date(3),
             bars: HashMap::new(),
@@ -446,15 +444,15 @@ mod tests {
             bars: HashMap::new(),
         };
         day1.bars
-            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 10.0, 10.0));
+            .insert("A".to_string(), bar(0.5, 10.0, 10.0, 10.0));
         let mut day2 = TradingDay {
             date: date(2),
             bars: HashMap::new(),
         };
         day2.bars
-            .insert("A".to_string(), bar(0.2, Action::Hold, 11.0, 12.0, 11.0));
+            .insert("A".to_string(), bar(0.2, 11.0, 12.0, 11.0));
         day2.bars
-            .insert("B".to_string(), bar(0.9, Action::Buy, 50.0, 51.0, 50.0));
+            .insert("B".to_string(), bar(0.9, 50.0, 51.0, 50.0));
         let day3 = TradingDay {
             date: date(3),
             bars: HashMap::new(),
@@ -481,15 +479,15 @@ mod tests {
             bars: HashMap::new(),
         };
         day1.bars
-            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 10.0, 10.0));
+            .insert("A".to_string(), bar(0.5, 10.0, 10.0, 10.0));
         let mut day2 = TradingDay {
             date: date(2),
             bars: HashMap::new(),
         };
         day2.bars
-            .insert("A".to_string(), bar(0.500, Action::Hold, 11.0, 12.0, 11.0));
+            .insert("A".to_string(), bar(0.500, 11.0, 12.0, 11.0));
         day2.bars
-            .insert("B".to_string(), bar(0.505, Action::Buy, 50.0, 51.0, 50.0));
+            .insert("B".to_string(), bar(0.505, 50.0, 51.0, 50.0));
         let day3 = TradingDay {
             date: date(3),
             bars: HashMap::new(),
@@ -526,7 +524,7 @@ mod tests {
             bars: HashMap::new(),
         };
         day1.bars
-            .insert("A".to_string(), bar(0.5, Action::Buy, 10.0, 10.0, 10.0));
+            .insert("A".to_string(), bar(0.5, 10.0, 10.0, 10.0));
         let mut day2 = TradingDay {
             date: date(2),
             bars: HashMap::new(),
@@ -543,10 +541,7 @@ mod tests {
     #[test]
     fn take_profit_exit_fills_at_the_barrier() {
         // High 12 crosses the +10% barrier (11); sell at the barrier tick.
-        let report = run_exit_scenario(
-            bar(0.0, Action::Hold, 10.0, 12.0, 11.0),
-            &barrier_config(0.1, 0.5, 100),
-        );
+        let report = run_exit_scenario(bar(0.0, 10.0, 12.0, 11.0), &barrier_config(0.1, 0.5, 100));
 
         assert_eq!(report.trade_count, 1);
         assert_eq!(report.trades[0].exit_reason, ExitReason::TakeProfit);
@@ -557,10 +552,7 @@ mod tests {
     #[test]
     fn stop_loss_exit_fills_at_the_barrier() {
         // Low 8 crosses the -10% barrier (9); sell at the barrier tick.
-        let report = run_exit_scenario(
-            bar(0.0, Action::Hold, 8.0, 10.0, 9.0),
-            &barrier_config(0.5, 0.1, 100),
-        );
+        let report = run_exit_scenario(bar(0.0, 8.0, 10.0, 9.0), &barrier_config(0.5, 0.1, 100));
 
         assert_eq!(report.trade_count, 1);
         assert_eq!(report.trades[0].exit_reason, ExitReason::StopLoss);
@@ -571,10 +563,7 @@ mod tests {
     #[test]
     fn time_exit_sells_at_the_horizon_close() {
         // Neither barrier touched, but the one-day hold limit is reached on day 2.
-        let report = run_exit_scenario(
-            bar(0.0, Action::Hold, 10.0, 11.0, 10.5),
-            &barrier_config(0.5, 0.5, 1),
-        );
+        let report = run_exit_scenario(bar(0.0, 10.0, 11.0, 10.5), &barrier_config(0.5, 0.5, 1));
 
         assert_eq!(report.trade_count, 1);
         assert_eq!(report.trades[0].exit_reason, ExitReason::Time);
@@ -584,10 +573,7 @@ mod tests {
     #[test]
     fn both_barriers_in_one_bar_takes_profit() {
         // Bar touches both the +10% and -10% barriers; the optimistic rule takes profit.
-        let report = run_exit_scenario(
-            bar(0.0, Action::Hold, 8.0, 12.0, 10.0),
-            &barrier_config(0.1, 0.1, 100),
-        );
+        let report = run_exit_scenario(bar(0.0, 8.0, 12.0, 10.0), &barrier_config(0.1, 0.1, 100));
 
         assert_eq!(report.trade_count, 1);
         assert_eq!(report.trades[0].exit_reason, ExitReason::TakeProfit);

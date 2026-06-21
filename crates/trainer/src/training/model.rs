@@ -1,47 +1,30 @@
 use burn::backend::flex::{Flex, FlexDevice};
-use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
+use burn::nn::loss::{HuberLoss, HuberLossConfig, Reduction};
 use burn::prelude::*;
 use burn::tensor::Transaction;
-use burn::tensor::activation::softmax;
 use burn::tensor::backend::AutodiffBackend;
-use burn::train::metric::{Adaptor, ConfusionStatsInput, ItemLazy, LossInput};
+use burn::train::metric::{Adaptor, ItemLazy, LossInput};
 use burn::train::{InferenceStep, TrainOutput, TrainStep};
-use stock_model::class::{Action, BUY, NUM_CLASSES};
 use stock_model::model::StockModel;
 
 use crate::training::batcher::StockBatch;
 use crate::training::metric::StockEvalInput;
 use crate::training::pipeline::TrainingConfig;
 
-/// Training wrapper around [`StockModel`], adding the loss and the train/eval steps,
-/// so the model crate stays free of training machinery.
+/// Training wrapper around [`StockModel`], adding the Huber loss and the train/eval
+/// steps, so the model crate stays free of training machinery.
 #[derive(Module, Debug)]
-pub struct StockClassifier<B: Backend> {
+pub struct StockRegressor<B: Backend> {
     model: StockModel<B>,
-    loss: CrossEntropyLoss<B>,
-    // Barrier payoffs and round-trip cost for the soft expected-value term. Primitive
-    // fields, so burn skips them in the record and the gradient.
-    take_profit: f32,
-    stop_loss: f32,
-    fee: f32,
-    ev_weight: f32,
+    loss: HuberLoss,
 }
 
-impl<B: Backend> StockClassifier<B> {
+impl<B: Backend> StockRegressor<B> {
     pub fn new(config: &TrainingConfig, device: &B::Device) -> Self {
         let model = config.model.init::<B>(device);
-        let loss = CrossEntropyLossConfig::new()
-            .with_weights(Some(config.class_weights.to_vec()))
-            .init(device);
+        let loss = HuberLossConfig::new(config.huber_delta).init();
 
-        Self {
-            model,
-            loss,
-            take_profit: config.take_profit,
-            stop_loss: config.stop_loss,
-            fee: config.fee,
-            ev_weight: config.ev_weight,
-        }
+        Self { model, loss }
     }
 
     /// The architecture without the loss, to save for inference.
@@ -50,66 +33,35 @@ impl<B: Backend> StockClassifier<B> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn forward_classification(&self, batch: &StockBatch<B>) -> StockOutput<B> {
-        let logits = self.model.forward(batch.technical.clone());
+    fn forward_regression(&self, batch: &StockBatch<B>) -> StockOutput<B> {
+        let [batch_size, _, _] = batch.technical.dims();
+        let prediction = self
+            .model
+            .forward(batch.technical.clone())
+            .reshape([batch_size]);
 
-        let mut loss = self.loss.forward(logits.clone(), batch.label.clone());
-
-        if self.ev_weight > 0.0 {
-            let ev = negative_expected_value(
-                logits.clone(),
-                batch.label.clone(),
-                self.take_profit,
-                self.stop_loss,
-                self.fee,
-            );
-            loss = loss + ev.mul_scalar(self.ev_weight);
-        }
+        let loss = self
+            .loss
+            .forward(prediction.clone(), batch.target.clone(), Reduction::Mean);
 
         StockOutput {
             loss,
-            output: logits,
-            targets: batch.label.clone(),
+            output: prediction,
+            targets: batch.target.clone(),
         }
     }
 }
 
-/// Negative soft expected value of the Buy policy, the differentiable surrogate for
-/// `ExpectedValueMetric`. It swaps that metric's hard `argmax == Buy` indicator for the
-/// softmax Buy probability, so each row contributes `buy_probability * reward`, where the
-/// reward is the barrier payoff net of fee keyed on the true label. Minimizing it raises
-/// expected value. Returned negated so it adds to the cross-entropy loss.
-fn negative_expected_value<B: Backend>(
-    logits: Tensor<B, 2>,
-    targets: Tensor<B, 1, Int>,
-    take_profit: f32,
-    stop_loss: f32,
-    fee: f32,
-) -> Tensor<B, 1> {
-    let buy_probability = softmax(logits, 1).narrow(1, BUY, 1).squeeze_dim(1);
-
-    let is_buy = targets
-        .clone()
-        .equal_elem(i64::from(Action::Buy.class()))
-        .float();
-    let is_sell = targets.equal_elem(i64::from(Action::Sell.class())).float();
-    let reward = (is_buy.mul_scalar(take_profit) - is_sell.mul_scalar(stop_loss)).sub_scalar(fee);
-
-    (reward * buy_probability).mean().neg()
-}
-
-/// Model output carrying the classification fields. A local stand-in for burn's
-/// `ClassificationOutput`, which the orphan rule blocks us from adapting to the
-/// trade-aware metrics. Shapes: `output` `[batch, NUM_CLASSES]` and `targets`
-/// `[batch]`.
+/// Model output carrying the regression fields. Shapes: `output` `[batch]` scores and
+/// `targets` `[batch]`.
 pub struct StockOutput<B: Backend> {
     pub loss: Tensor<B, 1>,
-    pub output: Tensor<B, 2>,
-    pub targets: Tensor<B, 1, Int>,
+    pub output: Tensor<B, 1>,
+    pub targets: Tensor<B, 1>,
 }
 
 impl<B: Backend> ItemLazy for StockOutput<B> {
-    // Metrics run on the synced CPU backend, matching burn's ClassificationOutput.
+    // Metrics run on the synced CPU backend.
     type ItemSync = StockOutput<Flex>;
 
     #[tracing::instrument(skip_all)]
@@ -138,57 +90,55 @@ impl<B: Backend> Adaptor<LossInput<B>> for StockOutput<B> {
     }
 }
 
-impl<B: Backend> Adaptor<ConfusionStatsInput<B>> for StockOutput<B> {
-    fn adapt(&self) -> ConfusionStatsInput<B> {
-        ConfusionStatsInput::new(
-            self.output.clone(),
-            self.targets.clone().one_hot(NUM_CLASSES).bool(),
-        )
-    }
-}
-
 impl<B: Backend> Adaptor<StockEvalInput<B>> for StockOutput<B> {
     fn adapt(&self) -> StockEvalInput<B> {
-        StockEvalInput::new(self.output.clone(), self.targets.clone())
+        StockEvalInput {
+            predictions: self.output.clone(),
+            targets: self.targets.clone(),
+        }
     }
 }
 
-impl<B: AutodiffBackend> TrainStep for StockClassifier<B> {
+impl<B: AutodiffBackend> TrainStep for StockRegressor<B> {
     type Input = StockBatch<B>;
     type Output = StockOutput<B>;
 
     #[tracing::instrument(skip_all)]
     fn step(&self, batch: StockBatch<B>) -> TrainOutput<StockOutput<B>> {
-        let item = self.forward_classification(&batch);
+        let item = self.forward_regression(&batch);
         TrainOutput::new(self, item.loss.backward(), item)
     }
 }
 
-impl<B: Backend> InferenceStep for StockClassifier<B> {
+impl<B: Backend> InferenceStep for StockRegressor<B> {
     type Input = StockBatch<B>;
     type Output = StockOutput<B>;
 
     fn step(&self, batch: StockBatch<B>) -> StockOutput<B> {
-        self.forward_classification(&batch)
+        self.forward_regression(&batch)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn::optim::AdamWConfig;
     use burn::tensor::ElementConversion;
+    use stock_model::features::NUM_FEATURES;
+    use stock_model::model::StockModelConfig;
 
     #[test]
-    fn negative_ev_matches_reward_under_certain_buy() {
+    fn forward_regression_scores_each_row() {
         let device = FlexDevice;
-        // A saturated Buy logit drives buy_probability to ~1, so the loss approaches the
-        // negated reward for a true Buy: -(take_profit - fee).
-        let logits = Tensor::<Flex, 2>::from_data([[0.0, 0.0, 10.0]], &device);
-        let targets = Tensor::<Flex, 1, Int>::from_data([2], &device);
+        let config = TrainingConfig::new(StockModelConfig::new(), AdamWConfig::new());
+        let model = StockRegressor::<Flex>::new(&config, &device);
 
-        let loss = negative_expected_value(logits, targets, 0.09, 0.04, 0.01);
-        let value = loss.into_scalar().elem::<f64>();
+        let technical = Tensor::<Flex, 3>::zeros([4, config.steps, NUM_FEATURES], &device);
+        let target = Tensor::<Flex, 1>::zeros([4], &device);
 
-        assert!((value + 0.08).abs() < 1e-3);
+        let output = model.forward_regression(&StockBatch { technical, target });
+
+        assert_eq!(output.output.dims(), [4]);
+        assert!(output.loss.into_scalar().elem::<f64>().is_finite());
     }
 }

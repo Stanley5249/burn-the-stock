@@ -8,20 +8,19 @@ use burn::optim::AdamWConfig;
 use burn::prelude::*;
 use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
+use burn::train::metric::LossMetric;
 use burn::train::metric::store::{Aggregate, Direction, Split};
-use burn::train::metric::{ClassReduction, FBetaScoreMetric, LossMetric};
 use burn::train::{
     Learner, LearnerSummary, MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining,
 };
 use miette::{IntoDiagnostic, Result, WrapErr, bail};
 
-use crate::label::{into_labeled, label_counts};
+use crate::label::load_labeled;
 use crate::training::batcher::StockBatcher;
-use crate::training::metric::{ExpectedValueMetric, PrecisionClassMetric};
-use crate::training::model::StockClassifier;
+use crate::training::metric::CorrelationMetric;
+use crate::training::model::StockRegressor;
 use chrono::NaiveDate;
 use fastrand::Rng;
-use stock_model::class::{Action, NUM_CLASSES};
 use stock_model::data::{StockItem, TickerFrames};
 use stock_model::model::StockModelConfig;
 
@@ -32,27 +31,18 @@ pub struct TrainingConfig {
     pub optimizer: AdamWConfig,
     #[config(default = 1.0e-4)]
     pub learning_rate: f64,
-    /// Take-profit barrier, a positive fraction of the entry close.
+    /// Take-profit barrier the backtest uses as its exit default, a fraction of price.
     #[config(default = 0.09)]
     pub take_profit: f32,
-    /// Stop-loss barrier, a positive fraction of the entry close.
+    /// Stop-loss barrier the backtest uses as its exit default, a fraction of price.
     #[config(default = 0.09)]
     pub stop_loss: f32,
-    /// Vertical-barrier horizon in trading days.
+    /// Forward horizon in trading days the MFE target looks ahead.
     #[config(default = 25)]
     pub label_horizon: usize,
-    /// Round-trip transaction cost per position. 0.1425% per leg plus 0.3% sell tax
-    /// is 0.585%.
-    #[config(default = 0.005_85)]
-    pub fee: f32,
-    /// Sell, Hold, Buy cross-entropy weights, upweighting the rare actionable classes.
-    #[config(default = "[2.0, 1.0, 2.0]")]
-    pub class_weights: [f32; NUM_CLASSES],
-    /// Weight on the soft expected-value loss term added to cross-entropy. 0 disables it,
-    /// leaving pure weighted cross-entropy. EV sits on a ~0.01-0.1 scale, so useful
-    /// values run well above 1.
-    #[config(default = 0.0)]
-    pub ev_weight: f32,
+    /// Huber loss delta, the residual size where it switches from squared to linear.
+    #[config(default = 1.0)]
+    pub huber_delta: f32,
     /// Full passes over the training data; `passes * windows / epoch_size` epochs run.
     #[config(default = 3)]
     pub passes: usize,
@@ -137,15 +127,9 @@ pub fn train<B: AutodiffBackend>(
 
     B::seed(device, config.seed);
 
-    // Load the standardized store once, then label it; the batchers produce tensors
-    // later, so the data is not copied per backend.
-    let store = TickerFrames::load(data_path).into_diagnostic()?;
-    let store = into_labeled(
-        &store,
-        config.take_profit,
-        config.stop_loss,
-        config.label_horizon,
-    )?;
+    // Load, label, and partition the store once; the batchers produce tensors later, so
+    // the data is not copied per backend.
+    let store = load_labeled(data_path, config.label_horizon)?;
 
     // Trim before the split so both sides shrink together.
     let store = match max_tickers {
@@ -168,19 +152,6 @@ pub fn train<B: AutodiffBackend>(
         .with_split(Some(DataSplit::new(data_start, cutoff, max_date, tickers)));
 
     let (train_store, valid_store) = store.train_valid_split(cutoff, config.steps)?;
-
-    // Class balance per split, to tune the barriers toward an even mix.
-    let train_counts = label_counts(&train_store).into_diagnostic()?;
-    let valid_counts = label_counts(&valid_store).into_diagnostic()?;
-    tracing::info!(
-        train_sell = train_counts[0],
-        train_hold = train_counts[1],
-        train_buy = train_counts[2],
-        valid_sell = valid_counts[0],
-        valid_hold = valid_counts[1],
-        valid_buy = valid_counts[2],
-        "label balance"
-    );
 
     config
         .save(artifact_dir.join("config.json"))
@@ -232,19 +203,14 @@ pub fn train<B: AutodiffBackend>(
         )),
     };
 
-    let model = StockClassifier::new(&config, device);
+    let model = StockRegressor::new(&config, device);
 
-    let optimizer = config.optimizer.init::<B, StockClassifier<B>>();
+    let optimizer = config.optimizer.init::<B, StockRegressor<B>>();
 
     let learner = Learner::new(model, optimizer, config.learning_rate);
 
     let mut training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_valid)
-        .metrics((
-            FBetaScoreMetric::multiclass(1.0, 1, ClassReduction::Macro),
-            ExpectedValueMetric::new(config.take_profit, config.stop_loss, config.fee),
-            PrecisionClassMetric::new(Action::Buy),
-            LossMetric::new(),
-        ))
+        .metrics((CorrelationMetric::new(), LossMetric::new()))
         .with_file_checkpointer(CompactRecorder::new())
         // Our startup logger owns `experiment.log`; stop burn installing its own.
         .with_application_logger(None)
@@ -273,7 +239,7 @@ pub fn train<B: AutodiffBackend>(
         let checkpoint = artifact_dir
             .join("checkpoint")
             .join(format!("model-{epoch}"));
-        StockClassifier::<B::InnerBackend>::new(&config, device)
+        StockRegressor::<B::InnerBackend>::new(&config, device)
             .load_file(&checkpoint, &CompactRecorder::new(), device)
             .into_diagnostic()
             .wrap_err_with(|| format!("loading best checkpoint {}", checkpoint.display()))?

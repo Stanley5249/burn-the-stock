@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use burn::optim::AdamWConfig;
 use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
-use stock_model::class::NUM_CLASSES;
 use stock_model::model::StockModelConfig;
 
 use crate::portfolio::Fill;
@@ -98,34 +97,21 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Training schedule")]
     pub seed: Option<u64>,
 
-    /// Sell/Hold/Buy cross-entropy weights; default [2, 1, 2].
-    #[arg(
-        long,
-        num_args = 3,
-        value_names = ["SELL", "HOLD", "BUY"],
-        help_heading = "Training schedule"
-    )]
-    pub class_weights: Option<Vec<f32>>,
-
-    /// Weight on the soft expected-value loss term added to cross-entropy; 0 disables it.
+    /// Huber loss delta: the residual size where it switches from squared to linear.
     #[arg(long, help_heading = "Training schedule")]
-    pub ev_weight: Option<f32>,
+    pub huber_delta: Option<f32>,
 
-    /// Take-profit barrier for the triple-barrier labels, as a fraction of price.
+    /// Backtest take-profit exit default, as a fraction of price.
     #[arg(long, help_heading = "Labeling")]
     pub take_profit: Option<f32>,
 
-    /// Stop-loss barrier for the triple-barrier labels, as a fraction of price.
+    /// Backtest stop-loss exit default, as a fraction of price.
     #[arg(long, help_heading = "Labeling")]
     pub stop_loss: Option<f32>,
 
-    /// Vertical-barrier horizon in trading days for the triple-barrier labels.
+    /// Forward horizon in trading days the MFE target looks ahead.
     #[arg(long, help_heading = "Labeling")]
     pub label_horizon: Option<usize>,
-
-    /// Round-trip cost charged per position by the Sharpe metric (Taiwan: 0.585%).
-    #[arg(long, help_heading = "Labeling")]
-    pub fee: Option<f32>,
 
     /// Validation batches per epoch; 0 sweeps every window. Counterpart of
     /// `--batches-per-epoch`.
@@ -180,16 +166,7 @@ impl TrainArgs {
         apply!(config, self.take_profit, with_take_profit);
         apply!(config, self.stop_loss, with_stop_loss);
         apply!(config, self.label_horizon, with_label_horizon);
-        apply!(config, self.fee, with_fee);
-        apply!(config, self.ev_weight, with_ev_weight);
-        if let Some(class_weights) = &self.class_weights {
-            // clap's num_args = 3 guarantees exactly NUM_CLASSES values.
-            let weights: [f32; NUM_CLASSES] = class_weights
-                .clone()
-                .try_into()
-                .expect("--class-weights takes exactly NUM_CLASSES values");
-            config = config.with_class_weights(weights);
-        }
+        apply!(config, self.huber_delta, with_huber_delta);
 
         config
     }

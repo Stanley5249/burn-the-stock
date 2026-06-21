@@ -3,7 +3,6 @@ use std::fmt;
 
 use chrono::NaiveDate;
 use clap::ValueEnum;
-use stock_model::class::Action;
 
 /// Why a holding was closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,11 +75,10 @@ pub struct BacktestConfig {
     pub rotate: bool,
 }
 
-/// One ticker's signal and prices on one trading day. `score` and `action` are the
-/// model's call, already lagged to the previous close.
+/// One ticker's signal and prices on one trading day. `score` is the model's call,
+/// already lagged to the previous close; the engine derives Buy/Sell from it.
 pub struct DayBar {
     pub score: f32,
-    pub action: Action,
     pub open: f32,
     pub low: f32,
     pub high: f32,

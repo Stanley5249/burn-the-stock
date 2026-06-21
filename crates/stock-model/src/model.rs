@@ -2,15 +2,14 @@ use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::{Dropout, DropoutConfig, Gelu, Linear, LinearConfig, RmsNorm, RmsNormConfig};
 use burn::prelude::*;
 
-use crate::class::NUM_CLASSES;
 use crate::features::NUM_FEATURES;
 
-/// GRU classifier over the standardized feature window. A two-layer GRU
+/// GRU regressor over the standardized feature window. A two-layer GRU
 /// summarizes the window into its last hidden state, which an MLP head turns
-/// into action logits. Architecture only; the loss and training step live with
+/// into a single score. Architecture only; the loss and training step live with
 /// the trainer.
 ///
-/// Input `[batch, steps, NUM_FEATURES]`, output `[batch, NUM_CLASSES]` logits.
+/// Input `[batch, steps, NUM_FEATURES]`, output `[batch, 1]` score.
 #[derive(Module, Debug)]
 pub struct StockModel<B: Backend> {
     gru_1: Gru<B>,
@@ -24,7 +23,7 @@ pub struct StockModel<B: Backend> {
 }
 
 impl<B: Backend> StockModel<B> {
-    /// Logits `[batch, NUM_CLASSES]`. Dropout is inert on a plain backend, so this
+    /// Score `[batch, 1]`. Dropout is inert on a plain backend, so this
     /// is both the inference and training forward.
     #[tracing::instrument(skip_all)]
     pub fn forward(&self, technical: Tensor<B, 3>) -> Tensor<B, 2> {
@@ -69,7 +68,7 @@ impl StockModelConfig {
             gru_2: GruConfig::new(self.d_hidden, self.d_hidden, true).init(device),
             gru_2_norm: RmsNormConfig::new(self.d_hidden).init(device),
             hidden: LinearConfig::new(self.d_hidden, self.d_head).init(device),
-            head: LinearConfig::new(self.d_head, NUM_CLASSES).init(device),
+            head: LinearConfig::new(self.d_head, 1).init(device),
             activation: Gelu::new(),
             dropout: DropoutConfig::new(self.dropout).init(),
         }
@@ -89,8 +88,8 @@ mod tests {
 
         let technical = Tensor::<Flex, 3>::zeros([2, 8, NUM_FEATURES], &device);
 
-        let logits = model.forward(technical);
+        let score = model.forward(technical);
 
-        assert_eq!(logits.dims(), [2, NUM_CLASSES]);
+        assert_eq!(score.dims(), [2, 1]);
     }
 }

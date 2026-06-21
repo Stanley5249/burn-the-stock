@@ -8,73 +8,74 @@ use burn::train::metric::{
     Metric, MetricAttributes, MetricMetadata, MetricName, Numeric, NumericAttributes, NumericEntry,
     SerializedEntry,
 };
-use stock_model::class::Action;
 
-/// Input shared by the trade-aware metrics: logits and true class per row.
+/// Input for the rank metric: the predicted score and the true target per row.
 pub struct StockEvalInput<B: Backend> {
-    pub logits: Tensor<B, 2>,
-    pub targets: Tensor<B, 1, Int>,
+    pub predictions: Tensor<B, 1>,
+    pub targets: Tensor<B, 1>,
 }
 
-impl<B: Backend> StockEvalInput<B> {
-    pub fn new(logits: Tensor<B, 2>, targets: Tensor<B, 1, Int>) -> Self {
-        Self { logits, targets }
-    }
-}
-
-/// Empirical expected value of the Buy policy, per opportunity. Over the rows
-/// predicted Buy (`argmax == BUY`), each pays the round-trip `fee` and earns by its
-/// true label: a true Buy `+take_profit`, a true Sell `-stop_loss`, a true Hold `0`.
-/// Non-Buy rows score `0`. The batch mean is the per-name EV net of cost, so it
-/// rises as the model both buys more and buys correctly.
+/// Pearson correlation between the predicted score and the target over the batch, the
+/// information coefficient that tracks ranking quality. The target is already z-scored
+/// per date, so this batch-level Pearson is a close proxy for the true per-date IC.
+//
+// ponytail: batch-Pearson mixes dates; per-date grouping is the upgrade if the proxy drifts.
 #[derive(Clone)]
-pub struct ExpectedValueMetric<B: Backend> {
+pub struct CorrelationMetric<B: Backend> {
     name: MetricName,
     state: NumericMetricState,
-    take_profit: f64,
-    stop_loss: f64,
-    fee: f64,
     _b: PhantomData<B>,
 }
 
-impl<B: Backend> ExpectedValueMetric<B> {
-    pub fn new(take_profit: f32, stop_loss: f32, fee: f32) -> Self {
+impl<B: Backend> CorrelationMetric<B> {
+    pub fn new() -> Self {
         Self {
-            name: Arc::new("Expected value".to_string()),
+            name: Arc::new("Correlation".to_string()),
             state: NumericMetricState::default(),
-            take_profit: f64::from(take_profit),
-            stop_loss: f64::from(stop_loss),
-            fee: f64::from(fee),
             _b: PhantomData,
         }
     }
 }
 
-impl<B: Backend> Metric for ExpectedValueMetric<B> {
+impl<B: Backend> Default for CorrelationMetric<B> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<B: Backend> Metric for CorrelationMetric<B> {
     type Input = StockEvalInput<B>;
 
     fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
-        let buy_class = i64::from(Action::Buy.class());
-        let sell_class = i64::from(Action::Sell.class());
+        let [batch_size] = input.predictions.dims();
 
-        let [batch_size, _] = input.logits.dims();
-        let predictions = input.logits.clone().argmax(1).reshape([batch_size]);
-        let predicted_buy = predictions.equal_elem(buy_class).float();
+        let predictions = input.predictions.clone();
+        let targets = input.targets.clone();
 
-        let is_buy = input.targets.clone().equal_elem(buy_class).float();
-        let is_sell = input.targets.clone().equal_elem(sell_class).float();
+        let mean_prediction = predictions.clone().mean().into_scalar().elem::<f64>();
+        let mean_target = targets.clone().mean().into_scalar().elem::<f64>();
 
-        // Round-trip fee on every taken position, plus the barrier payoff keyed on
-        // the true label. Averaged across the whole batch, so the score scales with
-        // how often Buy fires, not just per-trade quality.
-        let payoff =
-            is_buy.mul_scalar(self.take_profit) - is_sell.mul_scalar(self.stop_loss) - self.fee;
-        let total = (payoff * predicted_buy).sum().into_scalar().elem::<f64>();
-        #[allow(clippy::cast_precision_loss)]
-        let value = total / batch_size as f64;
+        let centered_prediction = predictions.sub_scalar(mean_prediction);
+        let centered_target = targets.sub_scalar(mean_target);
+
+        let covariance = (centered_prediction.clone() * centered_target.clone())
+            .mean()
+            .into_scalar()
+            .elem::<f64>();
+        let variance_prediction = (centered_prediction.clone() * centered_prediction)
+            .mean()
+            .into_scalar()
+            .elem::<f64>();
+        let variance_target = (centered_target.clone() * centered_target)
+            .mean()
+            .into_scalar()
+            .elem::<f64>();
+
+        let correlation =
+            covariance / (variance_prediction.sqrt() * variance_target.sqrt() + 1e-12);
 
         self.state.update(
-            value,
+            correlation,
             batch_size,
             FormatOptions::new(self.name()).precision(4),
         )
@@ -97,86 +98,7 @@ impl<B: Backend> Metric for ExpectedValueMetric<B> {
     }
 }
 
-impl<B: Backend> Numeric for ExpectedValueMetric<B> {
-    fn value(&self) -> NumericEntry {
-        self.state.current_value()
-    }
-
-    fn running_value(&self) -> NumericEntry {
-        self.state.running_value()
-    }
-}
-
-/// Precision for one action class, in percent: of the rows predicted as this class,
-/// the fraction whose true label matches. Per class, since the macro F-beta hides
-/// whether the rare Buy and Sell calls are the trustworthy ones.
-#[derive(Clone)]
-pub struct PrecisionClassMetric<B: Backend> {
-    name: MetricName,
-    class: i64,
-    state: NumericMetricState,
-    _b: PhantomData<B>,
-}
-
-impl<B: Backend> PrecisionClassMetric<B> {
-    pub fn new(action: Action) -> Self {
-        Self {
-            name: Arc::new(format!("Precision {}", action.as_str())),
-            class: i64::from(action.class()),
-            state: NumericMetricState::default(),
-            _b: PhantomData,
-        }
-    }
-}
-
-impl<B: Backend> Metric for PrecisionClassMetric<B> {
-    type Input = StockEvalInput<B>;
-
-    fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
-        let [batch_size, _] = input.logits.dims();
-        let predictions = input.logits.clone().argmax(1).reshape([batch_size]);
-        let predicted = predictions.equal_elem(self.class);
-
-        let count =
-            usize::try_from(predicted.clone().int().sum().into_scalar().elem::<i64>()).unwrap_or(0);
-
-        let predicted = predicted.float();
-        let actual = input.targets.clone().equal_elem(self.class).float();
-
-        let predicted_count = predicted.clone().sum().into_scalar().elem::<f64>();
-        let true_positive = (predicted * actual).sum().into_scalar().elem::<f64>();
-
-        let value = if count > 0 {
-            100.0 * true_positive / predicted_count
-        } else {
-            0.0
-        };
-
-        self.state.update(
-            value,
-            count,
-            FormatOptions::new(self.name()).unit("%").precision(2),
-        )
-    }
-
-    fn clear(&mut self) {
-        self.state.reset();
-    }
-
-    fn name(&self) -> MetricName {
-        self.name.clone()
-    }
-
-    fn attributes(&self) -> MetricAttributes {
-        NumericAttributes {
-            unit: Some("%".to_string()),
-            higher_is_better: true,
-        }
-        .into()
-    }
-}
-
-impl<B: Backend> Numeric for PrecisionClassMetric<B> {
+impl<B: Backend> Numeric for CorrelationMetric<B> {
     fn value(&self) -> NumericEntry {
         self.state.current_value()
     }
@@ -208,42 +130,39 @@ mod tests {
     }
 
     #[test]
-    fn expected_value_averages_net_payoff_over_batch() {
+    fn correlation_is_one_for_aligned_scores() {
         let device = FlexDevice;
-        // Rows 0-2 predict Buy, row 3 predicts Hold and is excluded. Each predicted
-        // buy pays the fee; true labels Buy, Sell, Hold pay +tp, -sl, 0 on top.
-        let logits = Tensor::<Flex, 2>::from_data(
-            [
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 1.0],
-                [0.0, 1.0, 0.0],
-            ],
-            &device,
+        // A perfect linear relationship: targets = 2 * predictions, so corr == 1.
+        let predictions = Tensor::<Flex, 1>::from_data([1.0, 2.0, 3.0, 4.0], &device);
+        let targets = Tensor::<Flex, 1>::from_data([2.0, 4.0, 6.0, 8.0], &device);
+
+        let mut metric = CorrelationMetric::<Flex>::new();
+        metric.update(
+            &StockEvalInput {
+                predictions,
+                targets,
+            },
+            &meta(),
         );
-        let targets = Tensor::<Flex, 1, Int>::from_data([2, 0, 1, 2], &device);
 
-        let mut metric = ExpectedValueMetric::<Flex>::new(0.10, 0.04, 0.01);
-        metric.update(&StockEvalInput::new(logits, targets), &meta());
-
-        // Payoffs 0.09, -0.05, -0.01 summed over 3 predicted buys, over the batch of 4.
-        assert!((metric.value().current() - 0.03 / 4.0).abs() < 1e-6);
+        assert!((metric.value().current() - 1.0).abs() < 1e-4);
     }
 
     #[test]
-    fn precision_counts_true_buys() {
+    fn correlation_is_negative_for_reversed_scores() {
         let device = FlexDevice;
-        // Predictions argmax to Buy, Buy, Hold.
-        let logits = Tensor::<Flex, 2>::from_data(
-            [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
-            &device,
+        let predictions = Tensor::<Flex, 1>::from_data([1.0, 2.0, 3.0, 4.0], &device);
+        let targets = Tensor::<Flex, 1>::from_data([4.0, 3.0, 2.0, 1.0], &device);
+
+        let mut metric = CorrelationMetric::<Flex>::new();
+        metric.update(
+            &StockEvalInput {
+                predictions,
+                targets,
+            },
+            &meta(),
         );
-        let targets = Tensor::<Flex, 1, Int>::from_data([2, 0, 1], &device);
 
-        let mut metric = PrecisionClassMetric::<Flex>::new(Action::Buy);
-        metric.update(&StockEvalInput::new(logits, targets), &meta());
-
-        // Two rows predicted Buy, only the first is truly Buy, so 50%.
-        assert!((metric.value().current() - 50.0).abs() < 1e-4);
+        assert!((metric.value().current() + 1.0).abs() < 1e-4);
     }
 }

@@ -7,8 +7,8 @@ use stock_model::data::{StockItem, TickerFrames, gather_windows};
 pub struct StockBatch<B: Backend> {
     /// Shape `[batch_size, steps, stationary_features]`.
     pub technical: Tensor<B, 3>,
-    /// Shape `[batch_size]` -- class index 0/1/2.
-    pub label: Tensor<B, 1, Int>,
+    /// Shape `[batch_size]` -- the per-date z-scored MFE target.
+    pub target: Tensor<B, 1>,
 }
 
 /// Builds a [`StockBatch`] by copying each window's contiguous rows out of the
@@ -43,22 +43,20 @@ impl<B: Backend> Batcher<B, StockItem, StockBatch<B>> for StockBatcher {
     fn batch(&self, items: Vec<StockItem>, device: &B::Device) -> StockBatch<B> {
         let technical = gather_windows::<B>(&self.features, &items, self.steps, device);
 
-        // The label comes from the window's last day, indexed ticker-locally.
-        let rows: Vec<i64> = items
+        // The target comes from the window's last day, indexed ticker-locally.
+        let rows: Vec<f32> = items
             .iter()
             .map(|item| {
-                i64::from(
-                    self.labels[item.ticker]
-                        .u8()
-                        .expect("u8 label series")
-                        .get(item.start + self.steps - 1)
-                        .expect("row in range"),
-                )
+                self.labels[item.ticker]
+                    .f32()
+                    .expect("f32 label series")
+                    .get(item.start + self.steps - 1)
+                    .expect("row in range")
             })
             .collect();
-        let label = Tensor::from_data(TensorData::new(rows, [items.len()]), device);
+        let target = Tensor::from_data(TensorData::new(rows, [items.len()]), device);
 
-        StockBatch { technical, label }
+        StockBatch { technical, target }
     }
 }
 
@@ -94,7 +92,7 @@ mod tests {
         let batch: StockBatch<TestBackend> = batcher.batch(items, &FlexDevice);
 
         assert_eq!(batch.technical.dims(), [2, 4, NUM_FEATURES]);
-        assert_eq!(batch.label.dims(), [2]);
+        assert_eq!(batch.target.dims(), [2]);
 
         // First window covers ticker 0 rows 0..4, second ticker 1 rows 1..5.
         let values = batch.technical.into_data().to_vec::<f32>().unwrap();
@@ -105,9 +103,8 @@ mod tests {
             assert!((values[(4 + row) * stride] - (1001.0 + f32::from(step))).abs() < 1e-6);
         }
 
-        // Labels come from each window's last row: ticker 0 row 3 (3 % 3 = 0) and
-        // ticker 1 row 4 (4 % 3 = 1).
-        let labels: Vec<i64> = batch.label.into_data().iter::<i64>().collect();
-        assert_eq!(labels, vec![0, 1]);
+        // Targets come from each window's last row: ticker 0 row 3 and ticker 1 row 4.
+        let targets: Vec<f32> = batch.target.into_data().iter::<f32>().collect();
+        assert_eq!(targets, vec![3.0, 4.0]);
     }
 }

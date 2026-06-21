@@ -1,9 +1,7 @@
 use burn::config::Config;
 use burn::prelude::*;
-use burn::tensor::activation::softmax;
 use polars::prelude::Series;
 
-use crate::class::{Action, NUM_CLASSES, SELL};
 use crate::data::{Window, gather_windows};
 use crate::model::{StockModel, StockModelConfig};
 
@@ -21,53 +19,25 @@ pub struct InferenceConfig {
 /// One window's model output, with no trading policy applied. Aligned by index to the
 /// `technical` rows passed to [`predict`], so the caller recovers ticker and date.
 pub struct Prediction {
-    /// Class probabilities in model order: Sell, Hold, Buy.
-    pub probabilities: [f32; NUM_CLASSES],
-    /// The argmax class.
-    pub action: Action,
+    /// The predicted per-date z-scored MFE: higher means a stronger relative pick.
+    pub score: f32,
 }
 
-/// Score an already-windowed `[rows, steps, NUM_FEATURES]` batch: forward, softmax, and
-/// argmax each row. The returned predictions align by index with the input rows. The
-/// caller chunks to bound GPU memory, since this holds the whole batch at once.
+/// Score an already-windowed `[rows, steps, NUM_FEATURES]` batch: one forward, one score
+/// per row. The returned predictions align by index with the input rows. The caller
+/// chunks to bound GPU memory, since this holds the whole batch at once.
 ///
 /// # Panics
-/// If the model output is not `f32` or a row does not hold `NUM_CLASSES` values.
+/// If the model output is not `f32`.
 #[must_use]
 pub fn predict<B: Backend>(model: &StockModel<B>, technical: Tensor<B, 3>) -> Vec<Prediction> {
-    let rows = technical.dims()[0];
-    let probabilities = softmax(model.forward(technical), 1);
-
-    // One host transfer; softmax is monotonic so its argmax agrees with the pre-softmax
-    // argmax without a second device op.
-    let flat = probabilities
+    let flat = model
+        .forward(technical)
         .into_data()
         .to_vec::<f32>()
-        .expect("softmax output is f32");
+        .expect("model output is f32");
 
-    let mut predictions = Vec::with_capacity(rows);
-    for row in 0..rows {
-        let base = row * NUM_CLASSES;
-        let probabilities: [f32; NUM_CLASSES] = flat[base..base + NUM_CLASSES]
-            .try_into()
-            .expect("one row holds NUM_CLASSES probabilities");
-
-        // Scans low to high and only replaces on a strict improvement, so a tie keeps
-        // the earlier class, matching burn's argmax.
-        let mut class = SELL;
-        for (candidate, &probability) in probabilities.iter().enumerate().skip(1) {
-            if probability > probabilities[class] {
-                class = candidate;
-            }
-        }
-
-        predictions.push(Prediction {
-            probabilities,
-            action: Action::from_class(class).expect("argmax is below NUM_CLASSES"),
-        });
-    }
-
-    predictions
+    flat.into_iter().map(|score| Prediction { score }).collect()
 }
 
 /// Gather each window's features and score it, chunked to bound device memory. The

@@ -9,10 +9,8 @@ use burn::record::CompactRecorder;
 use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
-use stock_model::class::Action;
 use stock_model::data::{TickerFrames, TickerQuotes};
 use stock_model::inference::score;
-use stock_model::strategy::expected_edge;
 
 use crate::cli::BacktestArgs;
 use crate::portfolio::{
@@ -61,18 +59,15 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
 
     let predictions = score::<InferenceBackend>(&model, &features, &windows, config.steps, &device);
 
-    // Index each signal by (ticker, signal date).
-    let mut signals: HashMap<String, HashMap<NaiveDate, (f32, Action)>> = HashMap::new();
+    // Index each predicted score by (ticker, signal date). The score is the z-scored MFE;
+    // the engine derives the Buy/Sell signal from it, so a below-average score (z < 0)
+    // becomes a Sell that exits a name the model has cooled on.
+    let mut signals: HashMap<String, HashMap<NaiveDate, f32>> = HashMap::new();
     for (window, prediction) in windows.iter().zip(&predictions) {
-        let edge = expected_edge(
-            &prediction.probabilities,
-            config.take_profit,
-            config.stop_loss,
-        );
         signals
             .entry(window.ticker.clone())
             .or_default()
-            .insert(window.date, (edge, prediction.action));
+            .insert(window.date, prediction.score);
     }
 
     let fill = args.fill;
@@ -130,7 +125,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
 /// skipped.
 fn build_days(
     quotes: &[TickerQuotes],
-    signals: &HashMap<String, HashMap<NaiveDate, (f32, Action)>>,
+    signals: &HashMap<String, HashMap<NaiveDate, f32>>,
 ) -> Vec<TradingDay> {
     let mut by_date: BTreeMap<NaiveDate, HashMap<String, DayBar>> = BTreeMap::new();
 
@@ -138,8 +133,7 @@ fn build_days(
         let ticker_signals = signals.get(&quotes.ticker);
         for index in 1..quotes.dates.len() {
             let signal_date = quotes.dates[index - 1];
-            let Some(&(score, action)) = ticker_signals.and_then(|map| map.get(&signal_date))
-            else {
+            let Some(&score) = ticker_signals.and_then(|map| map.get(&signal_date)) else {
                 continue;
             };
 
@@ -157,7 +151,6 @@ fn build_days(
                 quotes.ticker.clone(),
                 DayBar {
                     score,
-                    action,
                     open,
                     low,
                     high,

@@ -118,8 +118,8 @@ fn cross_sectional_zscore() -> [Expr; NUM_BASE] {
 }
 
 /// Standardize a raw OHLCV frame into the model's feature columns, keeping raw
-/// high/low/close for the barrier labels. The per-date z-score needs the full
-/// ticker universe, not a single stock.
+/// high/low/close for the trainer's forward-MFE label. The per-date z-score needs the
+/// full ticker universe, not a single stock.
 pub fn standardized_features(frame: LazyFrame) -> LazyFrame {
     frame
         .select([
