@@ -204,8 +204,8 @@ pub struct BacktestArgs {
     #[arg(long)]
     pub valid_from: Option<NaiveDate>,
 
-    /// Minimum expected edge `clamp(P(Buy)*tp - P(Sell)*sl, 0)` to buy, so weak signals
-    /// stay in cash.
+    /// Minimum predicted score (the per-date z-scored MFE) to buy, so below-gate names
+    /// stay in cash. Scores cluster near zero, so useful values are small.
     #[arg(long, default_value_t = 0.0)]
     pub threshold: f32,
 
