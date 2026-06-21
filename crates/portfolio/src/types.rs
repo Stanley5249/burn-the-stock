@@ -55,14 +55,26 @@ pub enum Fill {
     Open,
 }
 
+/// How a day's buy budget is split across the names being bought.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Weighting {
+    /// Equal weight: every open slot targets `equity / max_holdings`.
+    Equal,
+    /// Score weight: each name's target is its score's share of the budget, so stronger
+    /// picks get more capital.
+    Score,
+}
+
 /// Knobs that shape one backtest run.
 pub struct BacktestConfig {
     /// Minimum net-bullish score to consider buying a stock.
     pub threshold: f32,
     /// Which prices fills happen at.
     pub fill: Fill,
-    /// Most stocks held at once; each new buy targets `equity / max_holdings`.
+    /// Most stocks held at once.
     pub max_holdings: usize,
+    /// How the day's buy budget is split across names.
+    pub weighting: Weighting,
     /// Opening balance.
     pub starting_cash: f64,
     /// Take-profit exit, a positive fraction of the entry price.

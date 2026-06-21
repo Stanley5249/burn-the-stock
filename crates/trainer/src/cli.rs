@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use stock_model::model::StockModelConfig;
 
 use crate::training::{RunOptions, TrainingConfig};
-use portfolio::Fill;
+use portfolio::{Fill, Weighting};
 
 #[derive(Parser, Debug)]
 #[command(about = "Stock MFE-rank regressor: train a model or backtest a run")]
@@ -215,9 +215,14 @@ pub struct BacktestArgs {
     #[arg(long, default_value_t = 20)]
     pub max_hold: usize,
 
-    /// Most stocks held at once; each buy targets an equal `equity / slots`.
+    /// Most stocks held at once.
     #[arg(long, default_value_t = 10)]
     pub max_holdings: usize,
+
+    /// How the day's buy budget is split across names: `equal` per slot, or `score` so
+    /// stronger picks get more capital.
+    #[arg(long, value_enum, default_value_t = Weighting::Equal)]
+    pub weighting: Weighting,
 
     /// Rotate a full book into stronger names instead of holding to the time exit. Off by
     /// default, since with wide exits it churns every day and the costs erase the edge.

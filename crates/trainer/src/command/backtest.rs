@@ -80,6 +80,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         threshold: args.threshold,
         fill,
         max_holdings: args.max_holdings,
+        weighting: args.weighting,
         starting_cash: STARTING_CASH,
         take_profit: f64::from(args.take_profit),
         stop_loss: f64::from(args.stop_loss),

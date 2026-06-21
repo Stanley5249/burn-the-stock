@@ -1,5 +1,5 @@
 use super::pricing::round_trip_cost;
-use super::types::{BacktestConfig, BacktestReport, ExitReason, Fill, Trade};
+use super::types::{BacktestConfig, BacktestReport, ExitReason, Fill, Trade, Weighting};
 
 /// Window-level context for the summary, the parts neither the report nor config carry.
 pub struct RenderContext {
@@ -54,6 +54,10 @@ pub fn summary(
         Fill::LowHigh => "low/high (optimistic)",
         Fill::Open => "open (pessimistic)",
     };
+    let weighting = match config.weighting {
+        Weighting::Equal => "equal per slot",
+        Weighting::Score => "score-weighted",
+    };
     let dates = match (report.equity_curve.first(), report.equity_curve.last()) {
         (Some(first), Some(last)) => format!("{} -> {}", first.date, last.date),
         _ => "none".to_string(),
@@ -90,6 +94,7 @@ pub fn summary(
         ),
     );
     summary_row(&mut out, "fills", fill);
+    summary_row(&mut out, "weighting", weighting);
     let _ = writeln!(out, "  Performance");
     summary_row(&mut out, "starting cash", &format_ntd(report.starting_cash));
     summary_row(&mut out, "final equity", &format_ntd(report.final_equity));

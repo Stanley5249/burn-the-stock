@@ -17,7 +17,7 @@ pub use pricing::{
     LOT, SELL_TAX_RATE, buy_price, commission, round_trip_cost, sell_price, tick_ceil, tick_floor,
 };
 pub use report::{RenderContext, summary};
-pub use types::{BacktestConfig, BacktestReport, DayBar, Fill, TradingDay};
+pub use types::{BacktestConfig, BacktestReport, DayBar, Fill, TradingDay, Weighting};
 
 /// The platform's simulated starting balance.
 pub const STARTING_CASH: f64 = 100_000_000.0;

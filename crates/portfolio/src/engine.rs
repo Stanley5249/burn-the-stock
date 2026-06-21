@@ -7,7 +7,7 @@ use super::pricing::{
 };
 use super::types::{
     BacktestConfig, BacktestReport, DayBar, EquityPoint, ExitReason, Holding, Ledger, Side, Trade,
-    TradeEvent, TradingDay,
+    TradeEvent, TradingDay, Weighting,
 };
 
 /// Run the simulation over `days` (ascending). Each day: run the exit ladder (barriers,
@@ -211,6 +211,37 @@ fn holdings_value(holdings: &HashMap<String, Holding>, bars: &HashMap<String, Da
         .sum()
 }
 
+/// Per-ticker buy target for score weighting: split `cash` across the top candidates that
+/// fit the open slots, in proportion to each name's positive score. Names beyond the open
+/// slots are omitted, so the buy loop targets them at zero and skips them.
+fn score_targets(
+    candidates: &[(&String, &DayBar)],
+    holdings: &HashMap<String, Holding>,
+    cash: f64,
+    config: &BacktestConfig,
+) -> HashMap<String, f64> {
+    let open_slots = config.max_holdings.saturating_sub(holdings.len());
+    let chosen = &candidates[..open_slots.min(candidates.len())];
+
+    let weight = |score: f32| f64::from(score).max(0.0);
+    let total: f64 = chosen.iter().map(|(_, bar)| weight(bar.score)).sum();
+
+    if total <= 0.0 {
+        // No positive scores: split evenly so the cash still deploys.
+        #[allow(clippy::cast_precision_loss)]
+        let even = cash / (chosen.len().max(1) as f64);
+        return chosen
+            .iter()
+            .map(|(ticker, _)| ((*ticker).clone(), even))
+            .collect();
+    }
+
+    chosen
+        .iter()
+        .map(|(ticker, bar)| ((*ticker).clone(), cash * weight(bar.score) / total))
+        .collect()
+}
+
 /// Whole-lot shares affordable for `budget`, trimmed until `cash` also covers the
 /// commission. Zero when even one lot is out of reach.
 #[must_use]
@@ -226,13 +257,15 @@ pub fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
     shares
 }
 
-/// Fill open slots with the strongest above-threshold names not already held.
+/// Fill open slots with the strongest above-threshold names not already held. Equal
+/// weighting targets `equity / max_holdings` per name; score weighting splits the cash
+/// budget across the open slots in proportion to each name's score.
 fn buy_phase(day: &TradingDay, index: usize, config: &BacktestConfig, ledger: &mut Ledger) {
     // Equal-weight target from equity at the buy phase start, so all of the day's
     // buys size against the same value.
     let equity = ledger.cash + holdings_value(&ledger.holdings, &day.bars);
     #[allow(clippy::cast_precision_loss)]
-    let target = equity / config.max_holdings.max(1) as f64;
+    let equal_target = equity / config.max_holdings.max(1) as f64;
 
     let mut candidates: Vec<(&String, &DayBar)> = day
         .bars
@@ -250,10 +283,20 @@ fn buy_phase(day: &TradingDay, index: usize, config: &BacktestConfig, ledger: &m
             .then_with(|| left.0.cmp(right.0))
     });
 
+    let score_targets = match config.weighting {
+        Weighting::Equal => HashMap::new(),
+        Weighting::Score => score_targets(&candidates, &ledger.holdings, ledger.cash, config),
+    };
+
     for (ticker, bar) in candidates {
         if ledger.holdings.len() >= config.max_holdings {
             break;
         }
+        let target = match config.weighting {
+            Weighting::Equal => equal_target,
+            // Names past the open slots are absent, so they target zero and skip below.
+            Weighting::Score => score_targets.get(ticker).copied().unwrap_or(0.0),
+        };
         let price = buy_price(bar, config.fill);
         let shares = affordable_shares(target.min(ledger.cash), price, ledger.cash);
         if shares <= 0.0 {
@@ -310,6 +353,7 @@ mod tests {
             threshold: 0.0,
             fill: Fill::LowHigh,
             max_holdings,
+            weighting: Weighting::Equal,
             starting_cash,
             // Barriers wide enough never to fire, so these tests exercise the
             // model-Sell and final-day exits only.
@@ -403,6 +447,42 @@ mod tests {
 
         assert_eq!(report.trade_count, 0);
         assert!((report.final_equity - 1_000_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn score_weighting_buys_more_of_the_stronger_name() {
+        // Same price, B scores 3x A, so score weighting sizes B's position larger.
+        let mut day1 = TradingDay {
+            date: date(1),
+            bars: HashMap::new(),
+        };
+        day1.bars
+            .insert("A".to_string(), bar(1.0, 10.0, 10.0, 10.0));
+        day1.bars
+            .insert("B".to_string(), bar(3.0, 10.0, 10.0, 10.0));
+        let mut day2 = TradingDay {
+            date: date(2),
+            bars: HashMap::new(),
+        };
+        day2.bars
+            .insert("A".to_string(), bar(1.0, 10.0, 10.0, 10.0));
+        day2.bars
+            .insert("B".to_string(), bar(3.0, 10.0, 10.0, 10.0));
+
+        let mut cfg = config(1_000_000.0, 2);
+        cfg.weighting = Weighting::Score;
+
+        let report = run(&[day1, day2], &cfg);
+
+        let shares = |ticker: &str| {
+            report
+                .trades
+                .iter()
+                .find(|trade| trade.ticker == ticker)
+                .expect("ticker traded")
+                .shares
+        };
+        assert!(shares("B") > shares("A"));
     }
 
     #[test]
@@ -510,6 +590,7 @@ mod tests {
             threshold: 0.0,
             fill: Fill::LowHigh,
             max_holdings: 1,
+            weighting: Weighting::Equal,
             starting_cash: 1_000_000.0,
             take_profit,
             stop_loss,
