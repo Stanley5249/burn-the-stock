@@ -40,7 +40,12 @@ pub struct Args {
     #[arg(long, default_value_t = 2)]
     pub settle_lag: i64,
 
-    /// Trading days to hold before the time exit.
+    /// Use the laddered exits (time / model-sell / barriers) instead of the default, which
+    /// sells the whole book every day to harvest the buy-low/sell-high spread.
+    #[arg(long)]
+    pub exit_ladder: bool,
+
+    /// Trading days to hold before the time exit (laddered-exit mode only).
     #[arg(long, default_value_t = 20)]
     pub max_hold: usize,
 

@@ -61,23 +61,36 @@ async fn main() -> Result<()> {
     let mut state = LiveState::load_or_seed(&args.state, STARTING_CASH)?;
     state.settle(today);
 
-    // Top above-gate names we do not already hold.
+    // Default daily rotation sells the whole book, so held names are buyable again (rebought
+    // at the low after selling at the high). Laddered-exit mode keeps held names, so they are
+    // excluded from candidates and only the freed slots are filled.
     let candidates: Vec<(String, f32)> = ranked
         .iter()
-        .filter(|(ticker, score)| !held.contains(ticker) && *score > args.threshold)
+        .filter(|(ticker, score)| {
+            *score > args.threshold && (!args.exit_ladder || !held.contains(ticker))
+        })
         .take(args.shortlist)
         .cloned()
         .collect();
 
-    // Quote held names (to sell) and candidates (to buy).
+    // Quote held names (to sell) and candidates (to buy); dedup since rotation lists held
+    // names in both.
     let mut symbols: Vec<String> = holdings.iter().map(|h| h.stock_code_id.clone()).collect();
     symbols.extend(candidates.iter().map(|(ticker, _)| ticker.clone()));
+    symbols.sort();
+    symbols.dedup();
     let quotes = fetch_quotes(&http, &symbols, args.quote_delay_ms).await;
 
     let sells = plan_sells(&holdings, &quotes, &score_of, &args, today);
 
+    // ponytail: rotation recycles capital only as fast as sells settle; if settlement lags
+    // the order cutoff, a split-capital cadence is the follow-up.
     let budget = state.settled_cash * (1.0 - args.buffer);
-    let open_slots = args.max_holdings.saturating_sub(holdings.len());
+    let open_slots = if args.exit_ladder {
+        args.max_holdings.saturating_sub(holdings.len())
+    } else {
+        args.max_holdings
+    };
     let buys = plan_buys(&candidates, &quotes, budget, open_slots);
 
     print!(

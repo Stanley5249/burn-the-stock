@@ -30,8 +30,9 @@ pub struct Buy {
     pub cost: f64,
 }
 
-/// Decide each holding's exit on the shared ladder, selling the whole position at the quote
-/// high. Holdings without a usable quote are left alone.
+/// Plan the day's exits, each sold whole at the quote high. By default (`exit_ladder` off)
+/// every holding is sold to harvest the daily spread; with `exit_ladder` on, only holdings
+/// the shared ladder flags exit. Holdings without a usable quote are left alone.
 pub fn plan_sells(
     holdings: &[UserStock],
     quotes: &HashMap<String, FugleQuote>,
@@ -49,37 +50,43 @@ pub fn plan_sells(
             continue;
         };
 
-        let entry_price = holding
-            .beginning_price
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
-        let days = days_held(holding.createtime, today);
+        let reason = if args.exit_ladder {
+            let entry_price = holding
+                .beginning_price
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0);
+            let days = days_held(holding.createtime, today);
+            match exit_decision(
+                entry_price,
+                days,
+                &bar,
+                args.take_profit,
+                args.stop_loss,
+                args.max_hold,
+                Fill::LowHigh,
+            ) {
+                Some((_, reason)) => reason,
+                None => continue,
+            }
+        } else {
+            ExitReason::Rotate
+        };
 
-        if let Some((_, reason)) = exit_decision(
-            entry_price,
-            days,
-            &bar,
-            args.take_profit,
-            args.stop_loss,
-            args.max_hold,
-            Fill::LowHigh,
-        ) {
-            let price = sell_price(&bar, Fill::LowHigh);
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "share counts are small lot multiples"
-            )]
-            let amount = price * holding.shares as f64;
-            let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
-            sells.push(Sell {
-                code: holding.stock_code_id.clone(),
-                shares: holding.shares,
-                price,
-                proceeds,
-                reason,
-            });
-        }
+        let price = sell_price(&bar, Fill::LowHigh);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "share counts are small lot multiples"
+        )]
+        let amount = price * holding.shares as f64;
+        let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
+        sells.push(Sell {
+            code: holding.stock_code_id.clone(),
+            shares: holding.shares,
+            price,
+            proceeds,
+            reason,
+        });
     }
     sells
 }
