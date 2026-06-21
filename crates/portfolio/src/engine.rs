@@ -6,8 +6,8 @@ use super::pricing::{
     LOT, SELL_TAX_RATE, buy_price, commission, round_trip_cost, sell_price, tick_floor,
 };
 use super::types::{
-    BacktestConfig, BacktestReport, DayBar, EquityPoint, ExitReason, Holding, Ledger, Side, Trade,
-    TradeEvent, TradingDay, Weighting,
+    BacktestConfig, BacktestReport, DayBar, EquityPoint, ExitReason, Fill, Holding, Ledger, Side,
+    Trade, TradeEvent, TradingDay, Weighting,
 };
 
 /// Run the simulation over `days` (ascending). Each day: run the exit ladder (barriers,
@@ -63,10 +63,39 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     )
 }
 
-/// Exit price and reason for a holding today, or `None` to keep holding. Take-profit
-/// wins a both-touch bar; then stop-loss, the time barrier, a model Sell, and finally
-/// the forced liquidation on the last day. Rotation is handled in [`rotate_phase`].
-fn exit_decision(
+/// Exit price and reason for a position today, or `None` to keep holding. Take-profit wins
+/// a both-touch bar; then stop-loss, the time barrier, then a model Sell. The shared ladder
+/// the backtest and the live trader both sell on, so the two never drift. `days_held` is
+/// trading days since entry.
+#[must_use]
+pub fn exit_decision(
+    entry_price: f64,
+    days_held: usize,
+    bar: &DayBar,
+    take_profit: f64,
+    stop_loss: f64,
+    max_hold_days: usize,
+    fill: Fill,
+) -> Option<(f64, ExitReason)> {
+    let upper = entry_price * (1.0 + take_profit);
+    let lower = entry_price * (1.0 - stop_loss);
+
+    if f64::from(bar.high) >= upper {
+        Some((tick_floor(upper), ExitReason::TakeProfit))
+    } else if f64::from(bar.low) <= lower {
+        Some((tick_floor(lower), ExitReason::StopLoss))
+    } else if days_held >= max_hold_days {
+        Some((tick_floor(f64::from(bar.close)), ExitReason::Time))
+    } else if bar.score < 0.0 {
+        Some((sell_price(bar, fill), ExitReason::Signal))
+    } else {
+        None
+    }
+}
+
+/// Backtest wrapper over [`exit_decision`], adding the no-bar and final-day liquidations
+/// that only the simulation has.
+fn holding_exit(
     holding: &Holding,
     bar: Option<&DayBar>,
     index: usize,
@@ -78,22 +107,16 @@ fn exit_decision(
         return is_last.then_some((holding.mark, ExitReason::Final));
     };
 
-    let upper = holding.entry_price * (1.0 + config.take_profit);
-    let lower = holding.entry_price * (1.0 - config.stop_loss);
-
-    if f64::from(bar.high) >= upper {
-        Some((tick_floor(upper), ExitReason::TakeProfit))
-    } else if f64::from(bar.low) <= lower {
-        Some((tick_floor(lower), ExitReason::StopLoss))
-    } else if index - holding.entry_index >= config.max_hold_days {
-        Some((tick_floor(f64::from(bar.close)), ExitReason::Time))
-    } else if bar.score < 0.0 {
-        Some((sell_price(bar, config.fill), ExitReason::Signal))
-    } else if is_last {
-        Some((sell_price(bar, config.fill), ExitReason::Final))
-    } else {
-        None
-    }
+    exit_decision(
+        holding.entry_price,
+        index - holding.entry_index,
+        bar,
+        config.take_profit,
+        config.stop_loss,
+        config.max_hold_days,
+        config.fill,
+    )
+    .or_else(|| is_last.then_some((sell_price(bar, config.fill), ExitReason::Final)))
 }
 
 /// Apply the exit ladder to every holding, booking each closed position.
@@ -108,7 +131,7 @@ fn sell_phase(
         .holdings
         .iter()
         .filter_map(|(ticker, holding)| {
-            exit_decision(holding, day.bars.get(ticker), index, is_last, config)
+            holding_exit(holding, day.bars.get(ticker), index, is_last, config)
                 .map(|(price, reason)| (ticker.clone(), price, reason))
         })
         .collect();
