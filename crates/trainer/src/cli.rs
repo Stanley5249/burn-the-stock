@@ -9,7 +9,7 @@ use crate::portfolio::Fill;
 use crate::training::{RunOptions, TrainingConfig};
 
 #[derive(Parser, Debug)]
-#[command(about = "Stock action classifier: train a model or backtest a run")]
+#[command(about = "Stock MFE-rank regressor: train a model or backtest a run")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -101,14 +101,6 @@ pub struct TrainArgs {
     #[arg(long, help_heading = "Training schedule")]
     pub huber_delta: Option<f32>,
 
-    /// Backtest take-profit exit default, as a fraction of price.
-    #[arg(long, help_heading = "Labeling")]
-    pub take_profit: Option<f32>,
-
-    /// Backtest stop-loss exit default, as a fraction of price.
-    #[arg(long, help_heading = "Labeling")]
-    pub stop_loss: Option<f32>,
-
     /// Forward horizon in trading days the MFE target looks ahead.
     #[arg(long, help_heading = "Labeling")]
     pub label_horizon: Option<usize>,
@@ -163,8 +155,6 @@ impl TrainArgs {
         apply!(config, self.window_steps, with_steps);
         apply!(config, self.seed, with_seed);
         apply!(config, self.learning_rate, with_learning_rate);
-        apply!(config, self.take_profit, with_take_profit);
-        apply!(config, self.stop_loss, with_stop_loss);
         apply!(config, self.label_horizon, with_label_horizon);
         apply!(config, self.huber_delta, with_huber_delta);
 

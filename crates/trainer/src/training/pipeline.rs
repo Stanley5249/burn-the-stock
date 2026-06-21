@@ -31,12 +31,6 @@ pub struct TrainingConfig {
     pub optimizer: AdamWConfig,
     #[config(default = 1.0e-4)]
     pub learning_rate: f64,
-    /// Take-profit barrier the backtest uses as its exit default, a fraction of price.
-    #[config(default = 0.09)]
-    pub take_profit: f32,
-    /// Stop-loss barrier the backtest uses as its exit default, a fraction of price.
-    #[config(default = 0.09)]
-    pub stop_loss: f32,
     /// Forward horizon in trading days the MFE target looks ahead.
     #[config(default = 25)]
     pub label_horizon: usize,

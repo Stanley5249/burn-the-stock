@@ -13,7 +13,6 @@ use chrono::Duration;
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result};
 use polars::prelude::*;
-use stock_model::class::Action;
 use stock_model::data::TickerFrames;
 use stock_model::features::DATE;
 use stock_model::inference::{InferenceConfig, score};
@@ -58,8 +57,8 @@ fn recent_frame(path: &Path, lookback: i64) -> PolarsResult<LazyFrame> {
     Ok(frame.filter(col(DATE).gt_eq(lit(cutoff))))
 }
 
-/// Submit the day's per-ticker actions as orders to `sim_stock`.
-fn place_orders(decisions: &[(String, Action)]) -> Result<()> {
+/// Submit the day's per-ticker decisions as orders to `sim_stock`.
+fn place_orders(decisions: &[(String, &str)]) -> Result<()> {
     todo!("submit orders to sim_stock: {decisions:?}")
 }
 
@@ -95,18 +94,17 @@ fn main() -> Result<()> {
     let features = store.feature_series().into_diagnostic()?;
     let predictions = score::<Backend>(&model, &features, &windows, config.steps, &device);
 
-    // A below-average pick (z < 0) sells, otherwise buy; the portfolio gates buys by the
-    // score, so Hold is never emitted.
-    let decisions: Vec<(String, Action)> = windows
+    // A below-average pick (z < 0) sells, otherwise buy.
+    let decisions: Vec<(String, &str)> = windows
         .into_iter()
         .zip(predictions)
         .map(|(window, prediction)| {
-            let action = if prediction.score < 0.0 {
-                Action::Sell
+            let side = if prediction.score < 0.0 {
+                "Sell"
             } else {
-                Action::Buy
+                "Buy"
             };
-            (window.ticker, action)
+            (window.ticker, side)
         })
         .collect();
 

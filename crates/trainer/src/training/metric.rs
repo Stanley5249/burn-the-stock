@@ -17,9 +17,8 @@ pub struct StockEvalInput<B: Backend> {
 
 /// Pearson correlation between the predicted score and the target over the batch, the
 /// information coefficient that tracks ranking quality. The target is already z-scored
-/// per date, so this batch-level Pearson is a close proxy for the true per-date IC.
-//
-// ponytail: batch-Pearson mixes dates; per-date grouping is the upgrade if the proxy drifts.
+/// per date, so this batch-level Pearson is a close proxy for the true per-date IC;
+/// group rows by date to compute that IC exactly, should the proxy drift.
 #[derive(Clone)]
 pub struct CorrelationMetric<B: Backend> {
     name: MetricName,

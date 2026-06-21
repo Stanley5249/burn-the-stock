@@ -81,7 +81,7 @@ mod tests {
     use burn::backend::flex::{Flex, FlexDevice};
 
     #[test]
-    fn forward_outputs_logits() {
+    fn forward_outputs_score() {
         let device = FlexDevice;
         let config = StockModelConfig::new();
         let model = config.init::<Flex>(&device);
