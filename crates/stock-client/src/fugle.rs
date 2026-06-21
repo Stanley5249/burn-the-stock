@@ -76,6 +76,25 @@ pub async fn fetch_candles(
     Ok(response)
 }
 
+/// Fetch the live intraday quote for `symbol`, the morning range and last trade the live
+/// trader sets limit prices from.
+///
+/// # Errors
+/// Network or deserialization failure.
+pub async fn fetch_quote(http: &reqwest::Client, symbol: &str) -> Result<FugleQuote> {
+    let url = format!("{}/{}", urls::FUGLE_INTRADAY_QUOTE, symbol);
+
+    let response = http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    Ok(response)
+}
+
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum FugleMarket {
     Tse,
@@ -150,6 +169,20 @@ pub struct FugleTickerDetail {
     pub industry: Option<String>,
     #[serde(rename = "securityType")]
     pub security_type: Option<String>,
+}
+
+/// Live intraday quote. No `deny_unknown_fields`: the endpoint returns deep bid/ask,
+/// total, and last-trade objects we do not model. Prices are `Option` since they are
+/// absent before the first trade of the session.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FugleQuote {
+    pub symbol: String,
+    pub name: Option<String>,
+    pub open_price: Option<f64>,
+    pub high_price: Option<f64>,
+    pub low_price: Option<f64>,
+    pub last_price: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

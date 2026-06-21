@@ -2,7 +2,7 @@ use chrono::NaiveDate;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::LazyLock;
 use stock_client::error::Error;
-use stock_client::fugle::{FugleMarket, fetch_candles, fetch_ticker, fetch_tickers};
+use stock_client::fugle::{FugleMarket, fetch_candles, fetch_quote, fetch_ticker, fetch_tickers};
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     dotenvy::dotenv().unwrap();
@@ -114,6 +114,27 @@ async fn test_fugle_candles_tsmc() {
         volume = ?first.volume,
         "first bar"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires network access, FUGLE_API_KEY, and an open market session"]
+async fn test_fugle_quote_tsmc() {
+    let quote = fetch_quote(&HTTP, "2330").await.unwrap();
+
+    tracing::info!(
+        symbol = quote.symbol,
+        open = ?quote.open_price,
+        high = ?quote.high_price,
+        low = ?quote.low_price,
+        last = ?quote.last_price,
+        "TSMC quote"
+    );
+
+    assert_eq!(quote.symbol, "2330");
+    // During a session the high is at or above the low.
+    if let (Some(high), Some(low)) = (quote.high_price, quote.low_price) {
+        assert!(high >= low, "high below low");
+    }
 }
 
 #[tokio::test]
