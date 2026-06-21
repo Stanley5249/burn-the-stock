@@ -1,22 +1,24 @@
 use super::types::{DayBar, Fill};
 
 /// Shares per Taiwan lot. Counts stay f64 lot-multiples to avoid integer casts.
-pub(super) const LOT: f64 = 1_000.0;
+pub const LOT: f64 = 1_000.0;
 /// Commission charged on each buy and sell.
 const COMMISSION_RATE: f64 = 0.001_425;
 /// Minimum commission per transaction.
 const MIN_COMMISSION: f64 = 20.0;
 /// Securities transaction tax, charged on sells only.
-pub(super) const SELL_TAX_RATE: f64 = 0.003;
+pub const SELL_TAX_RATE: f64 = 0.003;
 
 /// Commission on a trade of `amount`, with the per-transaction floor.
-pub(super) fn commission(amount: f64) -> f64 {
+#[must_use]
+pub fn commission(amount: f64) -> f64 {
     (amount * COMMISSION_RATE).max(MIN_COMMISSION)
 }
 
 /// Round-trip cost as a fraction: commission on both legs plus the sell tax. The edge
 /// gain a rotation must clear to be worth the churn.
-pub(super) fn round_trip_cost() -> f64 {
+#[must_use]
+pub fn round_trip_cost() -> f64 {
     2.0 * COMMISSION_RATE + SELL_TAX_RATE
 }
 
@@ -38,19 +40,22 @@ fn tick_size(price: f64) -> f64 {
 }
 
 /// Largest legal tick `<= price`; the epsilon absorbs float error.
-pub(super) fn tick_floor(price: f64) -> f64 {
+#[must_use]
+pub fn tick_floor(price: f64) -> f64 {
     let tick = tick_size(price);
     ((price / tick) + 1e-9).floor() * tick
 }
 
 /// Smallest legal tick price `>= price`.
-fn tick_ceil(price: f64) -> f64 {
+#[must_use]
+pub fn tick_ceil(price: f64) -> f64 {
     let tick = tick_size(price);
     ((price / tick) - 1e-9).ceil() * tick
 }
 
 /// Buy fill: lowest legal tick at or above the day's low (or open).
-pub(super) fn buy_price(bar: &DayBar, fill: Fill) -> f64 {
+#[must_use]
+pub fn buy_price(bar: &DayBar, fill: Fill) -> f64 {
     match fill {
         Fill::LowHigh => tick_ceil(f64::from(bar.low)),
         Fill::Open => tick_ceil(f64::from(bar.open)),
@@ -58,7 +63,8 @@ pub(super) fn buy_price(bar: &DayBar, fill: Fill) -> f64 {
 }
 
 /// Sell fill: highest legal tick at or below the day's high (or open).
-pub(super) fn sell_price(bar: &DayBar, fill: Fill) -> f64 {
+#[must_use]
+pub fn sell_price(bar: &DayBar, fill: Fill) -> f64 {
     match fill {
         Fill::LowHigh => tick_floor(f64::from(bar.high)),
         Fill::Open => tick_floor(f64::from(bar.open)),

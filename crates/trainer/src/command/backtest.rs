@@ -12,10 +12,11 @@ use polars::prelude::*;
 use stock_model::data::{TickerFrames, TickerQuotes};
 use stock_model::inference::score;
 
-use crate::cli::BacktestArgs;
-use crate::portfolio::{
+use portfolio::{
     self, BacktestConfig, BacktestReport, DayBar, RenderContext, STARTING_CASH, TradingDay,
 };
+
+use crate::cli::BacktestArgs;
 use crate::training::TrainingConfig;
 
 type InferenceBackend = Wgpu;

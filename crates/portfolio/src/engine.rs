@@ -13,6 +13,7 @@ use super::types::{
 /// Run the simulation over `days` (ascending). Each day: run the exit ladder (barriers,
 /// the time stop, a model Sell, the final-day liquidation), rotate the weakest holdings
 /// out for clearly stronger names, buy into open slots, then mark to the closes.
+#[must_use]
 pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     let mut ledger = Ledger {
         cash: config.starting_cash,
@@ -212,7 +213,8 @@ fn holdings_value(holdings: &HashMap<String, Holding>, bars: &HashMap<String, Da
 
 /// Whole-lot shares affordable for `budget`, trimmed until `cash` also covers the
 /// commission. Zero when even one lot is out of reach.
-fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
+#[must_use]
+pub fn affordable_shares(budget: f64, price: f64, cash: f64) -> f64 {
     let mut shares = (budget / (price * LOT)).floor() * LOT;
     while shares > 0.0 {
         let amount = price * shares;

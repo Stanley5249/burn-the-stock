@@ -2,7 +2,6 @@ mod cli;
 mod command;
 mod label;
 mod logging;
-mod portfolio;
 mod training;
 
 use clap::Parser;
