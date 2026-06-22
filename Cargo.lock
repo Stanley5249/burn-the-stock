@@ -7738,6 +7738,7 @@ dependencies = [
  "stock-client",
  "stock-model",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

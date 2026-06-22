@@ -17,6 +17,7 @@ polars = { workspace = true, features = ["dtype-date", "lazy", "parquet"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [features]
 default = ["wgpu"]
