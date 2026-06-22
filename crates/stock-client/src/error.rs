@@ -15,6 +15,10 @@ pub enum Error {
     #[diagnostic(code(stock::url))]
     Url(#[from] url::ParseError),
 
+    #[error(transparent)]
+    #[diagnostic(code(stock::header))]
+    Header(#[from] reqwest::header::InvalidHeaderValue),
+
     #[error("API returned failure: {status}")]
     #[diagnostic(code(stock::api))]
     Api { status: String },

@@ -15,6 +15,7 @@ reqwest = {
 rust_decimal = { workspace = true, features = ["serde", "serde-with-str"] }
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 url.workspace = true
 

@@ -5,7 +5,6 @@
 mod cli;
 mod execute;
 mod plan;
-mod quotes;
 mod rank;
 mod report;
 mod state;
@@ -17,13 +16,12 @@ use chrono::Local;
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result};
 use portfolio::STARTING_CASH;
-use reqwest::header::{HeaderMap, HeaderValue};
+use stock_client::fugle::{client, fetch_quotes};
 use stock_client::sim_stock::SimStockClient;
 
 use crate::cli::Args;
 use crate::execute::execute;
 use crate::plan::{plan_buys, plan_sells};
-use crate::quotes::fetch_quotes;
 use crate::rank::rank;
 use crate::report::report;
 use crate::state::LiveState;
@@ -42,15 +40,7 @@ async fn main() -> Result<()> {
     let api_key = std::env::var("FUGLE_API_KEY")
         .into_diagnostic()
         .wrap_err("FUGLE_API_KEY must be set")?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-API-KEY",
-        HeaderValue::from_str(&api_key).into_diagnostic()?,
-    );
-    let http = reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .into_diagnostic()?;
+    let http = client(&api_key).into_diagnostic()?;
     let sim = SimStockClient::from_env(http.clone()).into_diagnostic()?;
 
     // Positions come from the platform; cash comes from our own ledger.

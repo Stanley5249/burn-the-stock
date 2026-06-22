@@ -4,14 +4,13 @@ use std::collections::HashMap;
 
 use chrono::NaiveDate;
 use portfolio::{
-    ExitReason, Fill, SELL_TAX_RATE, affordable_shares, commission, exit_decision, score_weights,
-    sell_price, tick_ceil,
+    DayBar, ExitReason, Fill, SELL_TAX_RATE, affordable_shares, commission, exit_decision,
+    score_weights, sell_price, tick_ceil,
 };
 use stock_client::fugle::FugleQuote;
 use stock_client::types::UserStock;
 
 use crate::cli::Args;
-use crate::quotes::quote_to_bar;
 
 /// A planned exit: sell the whole position at the quote high.
 pub struct Sell {
@@ -137,6 +136,19 @@ pub fn plan_buys(
     buys
 }
 
+/// Build a one-day bar from a live quote for the exit ladder, or `None` when a price is
+/// still missing before the first trade of the session.
+#[allow(clippy::cast_possible_truncation, reason = "TWSE prices fit f32")]
+fn quote_to_bar(quote: &FugleQuote, score: f32) -> Option<DayBar> {
+    Some(DayBar {
+        score,
+        open: quote.open_price? as f32,
+        low: quote.low_price? as f32,
+        high: quote.high_price? as f32,
+        close: quote.last_price.or(quote.open_price)? as f32,
+    })
+}
+
 /// Trading-day-agnostic days since entry, from the platform's epoch-second timestamp.
 fn days_held(createtime: i64, today: NaiveDate) -> usize {
     let entry =
@@ -144,12 +156,13 @@ fn days_held(createtime: i64, today: NaiveDate) -> usize {
     usize::try_from((today - entry).num_days().max(0)).unwrap_or(0)
 }
 
-/// Whole nonnegative lot count from [`affordable_shares`] as the order quantity.
+/// Order quantity from [`affordable_shares`], which already returns a whole lot multiple, so
+/// this rounds only to absorb float drift before the cast.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "affordable_shares returns whole nonnegative lot multiples"
+    reason = "affordable_shares returns whole nonnegative share counts"
 )]
 fn lots(shares: f64) -> u64 {
-    shares as u64
+    shares.round() as u64
 }

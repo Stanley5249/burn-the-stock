@@ -1,7 +1,42 @@
 use crate::error::Result;
 use crate::urls;
 use chrono::NaiveDate;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
+use std::collections::HashMap;
+
+/// Build an HTTP client carrying the Fugle `X-API-KEY` header on every request. The same
+/// client also drives the sim trading API, which ignores the extra header.
+///
+/// # Errors
+/// If the key is not a valid header value or the client cannot be built.
+pub fn client(api_key: &str) -> Result<reqwest::Client> {
+    let mut headers = HeaderMap::new();
+    headers.insert("X-API-KEY", HeaderValue::from_str(api_key)?);
+    Ok(reqwest::Client::builder()
+        .default_headers(headers)
+        .build()?)
+}
+
+/// Fetch a quote per symbol, sequential and rate-limited by `delay_ms`. A failed symbol is
+/// logged and skipped rather than aborting the batch.
+pub async fn fetch_quotes(
+    http: &reqwest::Client,
+    symbols: &[String],
+    delay_ms: u64,
+) -> HashMap<String, FugleQuote> {
+    let mut quotes = HashMap::with_capacity(symbols.len());
+    for symbol in symbols {
+        match fetch_quote(http, symbol).await {
+            Ok(quote) => {
+                quotes.insert(symbol.clone(), quote);
+            }
+            Err(error) => tracing::warn!(%symbol, %error, "quote failed"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
+    quotes
+}
 
 /// Fetch the list of equity tickers for `market`.
 ///
