@@ -28,14 +28,14 @@ use crate::state::LiveState;
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-    // wgpu/cubecl emit noisy info logs, so default to warnings plus our own crates' info
-    // (the per-order buy/sell confirmations). RUST_LOG overrides.
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("warn,stock_client=info,trader=info")),
         )
         .init();
+
     let args = Args::parse();
     let device = WgpuDevice::default();
 

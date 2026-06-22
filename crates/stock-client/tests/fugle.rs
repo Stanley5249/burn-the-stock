@@ -1,29 +1,11 @@
 use chrono::NaiveDate;
-use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::LazyLock;
 use stock_client::error::Error;
 use stock_client::fugle::{FugleMarket, fetch_candles, fetch_quote, fetch_ticker, fetch_tickers};
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    dotenvy::dotenv().unwrap();
+mod common;
 
-    let api_key = std::env::var("FUGLE_API_KEY").expect("`FUGLE_API_KEY` must be set");
-
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-API-KEY",
-        HeaderValue::from_str(&api_key).expect("invalid API key"),
-    );
-
-    reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .expect("failed to build reqwest client")
-});
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(common::http_client);
 
 fn date(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()

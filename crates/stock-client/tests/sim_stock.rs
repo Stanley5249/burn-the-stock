@@ -1,28 +1,11 @@
-use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::LazyLock;
 use stock_client::sim_stock::SimStockClient;
 
+mod common;
+
 static CLIENT: LazyLock<SimStockClient> = LazyLock::new(|| {
-    dotenvy::dotenv().unwrap();
-
-    let api_key = std::env::var("FUGLE_API_KEY").expect("`FUGLE_API_KEY` must be set");
-
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-API-KEY",
-        HeaderValue::from_str(&api_key).expect("invalid API key"),
-    );
-
-    let client = reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .expect("failed to build reqwest client");
-
-    SimStockClient::from_env(client).expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
+    SimStockClient::from_env(common::http_client())
+        .expect("`STOCK_ACCOUNT` and `STOCK_PASSWORD` must be set")
 });
 
 #[tokio::test]
