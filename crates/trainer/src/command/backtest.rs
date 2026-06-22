@@ -58,7 +58,14 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         .windows_since(config.steps, cutoff)
         .into_diagnostic()?;
 
-    let predictions = score::<InferenceBackend>(&model, &features, &windows, config.steps, &device);
+    let predictions = score::<InferenceBackend>(
+        &model,
+        &features,
+        &windows,
+        config.steps,
+        config.batch_size,
+        &device,
+    );
 
     // Index each predicted score by (ticker, signal date). The score is the z-scored MFE;
     // the engine derives the Buy/Sell signal from it, so a below-average score (z < 0)

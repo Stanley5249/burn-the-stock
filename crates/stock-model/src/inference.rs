@@ -5,8 +5,9 @@ use polars::prelude::Series;
 use crate::data::{Window, gather_windows};
 use crate::model::{StockModel, StockModelConfig};
 
-/// Windows per forward pass, capping device memory on a universe-wide scoring run.
-const SCORE_CHUNK: usize = 1024;
+/// Default GPU batch: windows per inference forward pass, and tickers per training batch. A
+/// run's `config.json` can override it, so inference follows the value the model trained with.
+pub const DEFAULT_BATCH_SIZE: usize = 4096;
 
 /// The inference slice of a run's config. `Config` ignores the extra training-only
 /// fields, so this loads from the same `config.json`.
@@ -14,6 +15,10 @@ const SCORE_CHUNK: usize = 1024;
 pub struct InferenceConfig {
     pub model: StockModelConfig,
     pub steps: usize,
+    /// Windows per forward pass. Read from the run's config when present, so scoring matches
+    /// the training batch; otherwise [`DEFAULT_BATCH_SIZE`].
+    #[config(default = "DEFAULT_BATCH_SIZE")]
+    pub batch_size: usize,
 }
 
 /// One window's model output, with no trading policy applied. Aligned by index to the
@@ -52,11 +57,12 @@ pub fn score<B: Backend>(
     features: &[Series],
     windows: &[Window],
     steps: usize,
+    batch_size: usize,
     device: &B::Device,
 ) -> Vec<Prediction> {
     let mut predictions = Vec::with_capacity(windows.len());
 
-    for chunk in windows.chunks(SCORE_CHUNK) {
+    for chunk in windows.chunks(batch_size) {
         let items: Vec<_> = chunk.iter().map(Window::item).collect();
 
         let technical = gather_windows::<B>(features, &items, steps, device);

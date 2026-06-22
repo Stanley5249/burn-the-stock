@@ -48,7 +48,14 @@ pub fn rank(args: &Args, device: &WgpuDevice) -> Result<Vec<(String, f32)>> {
 
     let windows = store.latest_windows(config.steps).into_diagnostic()?;
     let features = store.feature_series().into_diagnostic()?;
-    let predictions = score::<Backend>(&model, &features, &windows, config.steps, device);
+    let predictions = score::<Backend>(
+        &model,
+        &features,
+        &windows,
+        config.steps,
+        config.batch_size,
+        device,
+    );
 
     let mut ranked: Vec<(String, f32)> = windows
         .into_iter()

@@ -44,7 +44,7 @@ pub struct TrainingConfig {
     #[config(default = 30)]
     pub steps: usize,
     /// Tickers per batch.
-    #[config(default = 64)]
+    #[config(default = "stock_model::inference::DEFAULT_BATCH_SIZE")]
     pub batch_size: usize,
     /// Batches per epoch, setting the validation cadence. Each epoch samples
     /// `epoch_size * batch_size` windows without replacement.
