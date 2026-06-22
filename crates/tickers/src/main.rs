@@ -11,6 +11,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use stock_client::fugle::fetch_ticker;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(about = "Prefetch Fugle ticker industry metadata into parquet")]
@@ -133,7 +134,11 @@ async fn fetch_all(
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
     let args = Args::parse();
 

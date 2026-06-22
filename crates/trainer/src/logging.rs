@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use miette::{IntoDiagnostic, Result};
-use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
@@ -19,9 +19,8 @@ static RELOAD_HANDLE: OnceLock<reload::Handle<BoxedLayer, Registry>> = OnceLock:
 pub fn install() {
     let (layer, handle) = reload::Layer::new(boxed_layer(std::io::stderr, true));
 
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,stock_client=info,trainer=info"));
 
     tracing_subscriber::registry()
         .with(layer)

@@ -10,7 +10,7 @@ use miette::Result;
 use crate::cli::{Cli, Command};
 
 fn main() -> Result<()> {
-    dotenvy::dotenv_override().ok();
+    dotenvy::dotenv().ok();
 
     // Install the global subscriber first; training redirects it to its artifact dir.
     logging::install();
