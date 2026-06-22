@@ -1,40 +1,32 @@
 # burn-the-stock
 
-Taiwan stock trading bot with a burn NN backend. See `pyproject.toml` for Python project config, dependencies, and layout settings.
-
-Workspace: `stock-client` (lib), `trainer` (bin), `trader` (bin).
-
-The course evaluation platform is sim stock (https://ciot.imis.ncku.edu.tw/sim_stock).
-
-## Project Conventions
-
-Define all URLs as `pub const` in `crates/stock-client/src/urls.rs`.
+Taiwan stock trading bot with a Burn neural network backend. The trading platform is sim_stock (https://ciot.imis.ncku.edu.tw/sim_stock).
 
 ## Cargo
 
-Use `cargo add` to add dependencies.
+Always use `cargo add` to add dependencies.
 
 Use `[workspace.dependencies]` for shared dependencies with minimal features and use `.workspace = true` and features in members.
 
-Always scope by `--workspace`, never `--package`/`-p`. A package filter resolves a narrower feature set and forces recompilation, while `--workspace` keeps the unified feature union warm across runs. Use `--all-targets` where it applies.
+Always scope commands by `--workspace`, never `--package`/`-p`. A package filter resolves a narrower feature set and forces recompilation, while `--workspace` keeps the unified feature set active across runs. Use `--all-targets` where it applies.
 
 ```bash
-cargo check  --workspace --all-targets
-cargo build  --workspace --all-targets [--release]
-cargo test   --workspace --all-targets
+cargo check --workspace --all-targets
+cargo build --workspace --all-targets [--release]
+cargo test --workspace --all-targets
 ```
 
-To run a binary or example, select it by `--bin`/`--example` (still no `-p`) so it builds under the same workspace feature union.
+To run a binary or example, use `--bin`/`--example` (not `-p`) to build under the same workspace feature set.
 
 ```bash
-cargo run --bin tickers -- <args>
+cargo run --bin tickers [--release] -- <args>
 ```
 
 Before finishing any task, run clippy and fmt.
 
 ```bash
 cargo clippy --workspace --all-targets
-cargo fmt    --all
+cargo fmt --all
 ```
 
 ## Exports
@@ -43,14 +35,18 @@ Never re-export a module and its members from the same level. Pick one or the ot
 
 ## Variables and Naming
 
-Spell out variable names fully. Avoid common abbreviations and use complete, self-describing names.
+Use complete, self-describing names and avoid abbreviations.
 
-Single-letter loop counters are fine (`i`, `j`, `k`), but prefer meaningful names when the loop is long or complex.
+Single-letter names are fine (`i`, `j`, `k`) in local scope, but prefer meaningful names for long or complex context.
 
 ## Writing
 
-Favor explicit conjunctions and transition words to connect your thoughts. Use natural phrasing instead of colons or semicolons, and limit punctuation to standard ASCII characters.
+Concise style, avoid explanations. Favor explicit conjunctions and transition words to connect your thoughts. Use natural phrasing instead of colons or semicolons, and limit punctuation to standard ASCII characters.
 
-Comments target the surprising. The reader follows ordinary code logic, so a comment earns its place on a genuinely counterintuitive choice and states its why simply and concisely. The default is no comment; when in doubt, leave it out. Keep doc comments and any clippy-required `# Errors` or `# Panics` section in the same simple, concise style.
+## Comments
 
-Commits use conventional commit format. Subject under 50 chars (hard limit 72).
+Add comments only for non-obvious reasons: a workaround, a performance trade-off, a hidden constraint, or why something looks wrong but isn't. Keep them to one line.
+
+## Commits
+
+Conventional commit format. Subject under 50 chars (hard limit 72).
