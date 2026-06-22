@@ -1,9 +1,11 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::urls;
 use chrono::NaiveDate;
+use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// Build an HTTP client carrying the Fugle `X-API-KEY` header on every request. The same
 /// client also drives the sim trading API, which ignores the extra header.
@@ -18,22 +20,47 @@ pub fn client(api_key: &str) -> Result<reqwest::Client> {
         .build()?)
 }
 
-/// Fetch a quote per symbol, sequential and rate-limited by `delay_ms`. A failed symbol is
-/// logged and skipped rather than aborting the batch.
+/// Give up on a rate-limited symbol after this many backoff retries.
+const MAX_QUOTE_RETRIES: u32 = 5;
+
+/// Ceiling on the 429 backoff pace. Raise if the rate limit tightens.
+const MAX_QUOTE_DELAY_MS: u64 = 8_000;
+
+/// Fetch a quote per symbol, sequential and paced by `delay`. On a rate-limit (429) it doubles
+/// the pace up to [`MAX_QUOTE_DELAY_MS`] and retries the same symbol, so the rest of the batch
+/// self-tunes to the limit and coverage stays full. A non-rate-limit failure is logged and
+/// skipped, and a symbol still limited after [`MAX_QUOTE_RETRIES`] backoffs is given up on.
 pub async fn fetch_quotes(
     http: &reqwest::Client,
     symbols: &[String],
-    delay_ms: u64,
+    mut delay: u64,
 ) -> HashMap<String, FugleQuote> {
     let mut quotes = HashMap::with_capacity(symbols.len());
+
     for symbol in symbols {
-        match fetch_quote(http, symbol).await {
-            Ok(quote) => {
-                quotes.insert(symbol.clone(), quote);
+        let mut retries = 0;
+        loop {
+            match fetch_quote(http, symbol).await {
+                Ok(quote) => {
+                    quotes.insert(symbol.clone(), quote);
+                    break;
+                }
+                Err(Error::Http(error))
+                    if retries < MAX_QUOTE_RETRIES
+                        && error.status() == Some(StatusCode::TOO_MANY_REQUESTS) =>
+                {
+                    retries += 1;
+                    delay = delay.saturating_mul(2).min(MAX_QUOTE_DELAY_MS);
+                    tracing::warn!(%symbol, delay, retries, "Fugle rate limit, backing off");
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                Err(error) => {
+                    tracing::warn!(%symbol, %error, "quote failed");
+                    break;
+                }
             }
-            Err(error) => tracing::warn!(%symbol, %error, "quote failed"),
         }
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        tokio::time::sleep(Duration::from_millis(delay)).await;
     }
     quotes
 }
