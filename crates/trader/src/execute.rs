@@ -1,42 +1,46 @@
-//! Place the planned orders against `sim_stock` and update the cash ledger.
+//! Place the planned orders against `sim_stock`. Recording the fills into the cash ledger
+//! happens in `main`, once the network has settled.
 
-use chrono::{Duration, NaiveDate};
+use futures::stream::{StreamExt, TryStreamExt};
 use miette::{Context, IntoDiagnostic, Result};
 use stock_client::sim_stock::SimStockClient;
 
 use crate::plan::{Buy, Sell};
-use crate::state::LiveState;
 
-/// Place the sells then the buys, recording each in `state`. Sale proceeds settle after
-/// `settle_lag` days, so they do not fund today's buys.
+/// Place every sell, up to `concurrency` orders in flight at once. Orders are independent, so
+/// the first rejection fails the batch.
 ///
 /// # Errors
-/// If the platform rejects any order.
-pub async fn execute(
-    sim: &SimStockClient,
-    sells: &[Sell],
-    buys: &[Buy],
-    state: &mut LiveState,
-    today: NaiveDate,
-    settle_lag: i64,
-) -> Result<()> {
-    let settle_date = today + Duration::days(settle_lag);
+/// If the platform rejects any sell.
+#[tracing::instrument(skip_all, fields(orders = sells.len()))]
+pub async fn place_sells(sim: &SimStockClient, sells: &[Sell], concurrency: usize) -> Result<()> {
+    futures::stream::iter(sells)
+        .map(async |sell| {
+            sim.sell(&sell.code, sell.lots, sell.price)
+                .await
+                .into_diagnostic()
+                .wrap_err_with(|| format!("sell {}", sell.code))
+        })
+        .buffer_unordered(concurrency)
+        .try_collect::<()>()
+        .await
+}
 
-    for sell in sells {
-        sim.sell(&sell.code, sell.lots, sell.price)
-            .await
-            .into_diagnostic()
-            .wrap_err_with(|| format!("sell {}", sell.code))?;
-        state.record_sell(sell.proceeds, settle_date);
-    }
-
-    for buy in buys {
-        sim.buy(&buy.code, buy.lots, buy.price)
-            .await
-            .into_diagnostic()
-            .wrap_err_with(|| format!("buy {}", buy.code))?;
-        state.record_buy(buy.cost);
-    }
-
-    Ok(())
+/// Place every buy, up to `concurrency` orders in flight at once. Orders are independent, so
+/// the first rejection fails the batch.
+///
+/// # Errors
+/// If the platform rejects any buy.
+#[tracing::instrument(skip_all, fields(orders = buys.len()))]
+pub async fn place_buys(sim: &SimStockClient, buys: &[Buy], concurrency: usize) -> Result<()> {
+    futures::stream::iter(buys)
+        .map(async |buy| {
+            sim.buy(&buy.code, buy.lots, buy.price)
+                .await
+                .into_diagnostic()
+                .wrap_err_with(|| format!("buy {}", buy.code))
+        })
+        .buffer_unordered(concurrency)
+        .try_collect::<()>()
+        .await
 }

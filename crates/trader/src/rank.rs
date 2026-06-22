@@ -24,6 +24,7 @@ type Backend = Wgpu;
 ///
 /// # Errors
 /// If the artifact config/model cannot be loaded or the parquet cannot be scanned.
+#[tracing::instrument(skip_all)]
 pub fn rank(args: &Args, device: &WgpuDevice) -> Result<Vec<(String, f32)>> {
     let config = InferenceConfig::load(args.artifact_dir.join("config.json")).into_diagnostic()?;
     let model = config
@@ -56,6 +57,22 @@ pub fn rank(args: &Args, device: &WgpuDevice) -> Result<Vec<(String, f32)>> {
         .collect();
     ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
     Ok(ranked)
+}
+
+/// Keep the strongest names scoring above `threshold`, capped at `max`. Daily rotation sells
+/// the whole book, so held names stay eligible and may be rebought.
+#[must_use]
+pub fn select_candidates(
+    ranked: &[(String, f32)],
+    threshold: f32,
+    max: usize,
+) -> Vec<(String, f32)> {
+    ranked
+        .iter()
+        .filter(|(_, score)| *score > threshold)
+        .take(max)
+        .cloned()
+        .collect()
 }
 
 /// Scan only the recent tail of the OHLCV parquet, keeping the last `lookback` calendar

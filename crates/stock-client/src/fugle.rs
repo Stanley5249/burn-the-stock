@@ -30,6 +30,7 @@ const MAX_QUOTE_DELAY_MS: u64 = 8_000;
 /// the pace up to [`MAX_QUOTE_DELAY_MS`] and retries the same symbol, so the rest of the batch
 /// self-tunes to the limit and coverage stays full. A non-rate-limit failure is logged and
 /// skipped, and a symbol still limited after [`MAX_QUOTE_RETRIES`] backoffs is given up on.
+#[tracing::instrument(skip(http, symbols), fields(symbols = symbols.len()))]
 pub async fn fetch_quotes(
     http: &reqwest::Client,
     symbols: &[String],

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(about = "Predict, then place the day's weighted orders on sim_stock")]
 pub struct Args {
     /// Directory holding a training run's `config.json` and `model`.
@@ -41,6 +41,10 @@ pub struct Args {
     /// Delay between Fugle quote requests, to respect the rate limit.
     #[arg(long, default_value_t = 1100)]
     pub quote_delay_ms: u64,
+
+    /// Cap on in-flight order requests placed against the platform at once.
+    #[arg(long, default_value_t = 8)]
+    pub order_concurrency: usize,
 
     /// Plan and print the orders without placing them.
     #[arg(long)]

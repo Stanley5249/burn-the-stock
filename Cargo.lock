@@ -7730,6 +7730,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "futures",
  "miette",
  "polars",
  "portfolio",
@@ -7738,6 +7739,7 @@ dependencies = [
  "stock-client",
  "stock-model",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
