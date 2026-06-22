@@ -92,9 +92,15 @@ pub fn plan_buys(
         let amount = price * shares;
         let cost = amount + commission(amount);
         remaining -= cost;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "share/LOT is a small whole nonnegative lot count"
+        )]
+        let lots = (shares / LOT).round() as u64;
         buys.push(Buy {
             code: (*code).clone(),
-            lots: lots(shares),
+            lots,
             price: *price,
             cost,
         });
@@ -113,15 +119,4 @@ fn quote_to_bar(quote: &FugleQuote) -> Option<DayBar> {
         high: quote.high_price? as f32,
         close: quote.last_price.or(quote.open_price)? as f32,
     })
-}
-
-/// Convert an actual share count from [`affordable_shares`] (a whole multiple of [`LOT`])
-/// into the platform's order unit, 張 (board lots of 1,000 shares).
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "share/LOT is a small whole nonnegative lot count"
-)]
-fn lots(shares: f64) -> u64 {
-    (shares / LOT).round() as u64
 }
