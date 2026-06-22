@@ -36,8 +36,9 @@ pub struct Args {
     #[arg(long, default_value_t = 0.1)]
     pub buffer: f64,
 
-    /// Calendar days until sale proceeds settle into spendable cash.
-    #[arg(long, default_value_t = 2)]
+    /// Calendar days until sale proceeds become spendable. The platform settles at
+    /// 15:30-16:00, after the 13:00 order cutoff, so today's sells fund the next run (0).
+    #[arg(long, default_value_t = 0)]
     pub settle_lag: i64,
 
     /// Use the laddered exits (time / model-sell / barriers) instead of the default, which

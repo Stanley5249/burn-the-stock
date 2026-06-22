@@ -16,6 +16,7 @@ pub struct UserStock {
     pub usid: u64,
     pub stock_name: String,
     pub stock_code_id: String,
+    /// Position size in 張 (board lots of 1,000 shares), the platform's unit.
     pub shares: u64,
     #[serde(with = "rust_decimal::serde::str")]
     pub beginning_price: Decimal,

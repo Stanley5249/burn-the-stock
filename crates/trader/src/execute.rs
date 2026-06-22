@@ -23,7 +23,7 @@ pub async fn execute(
     let settle_date = today + Duration::days(settle_lag);
 
     for sell in sells {
-        sim.sell(&sell.code, sell.shares, sell.price)
+        sim.sell(&sell.code, sell.lots, sell.price)
             .await
             .into_diagnostic()
             .wrap_err_with(|| format!("sell {}", sell.code))?;
@@ -31,7 +31,7 @@ pub async fn execute(
     }
 
     for buy in buys {
-        sim.buy(&buy.code, buy.shares, buy.price)
+        sim.buy(&buy.code, buy.lots, buy.price)
             .await
             .into_diagnostic()
             .wrap_err_with(|| format!("buy {}", buy.code))?;

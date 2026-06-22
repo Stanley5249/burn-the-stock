@@ -123,19 +123,24 @@ impl SimStockClient {
         })
     }
 
+    /// Place a buy order. `lots` is in 張 (board lots of 1,000 shares, the platform's unit),
+    /// `price` is per share.
+    ///
     /// # Errors
     /// Network failure or if the server rejects the order.
-    pub async fn buy(&self, code: &str, shares: u64, price: f64) -> Result<()> {
-        self.order("buy", code, shares, price).await
+    pub async fn buy(&self, code: &str, lots: u64, price: f64) -> Result<()> {
+        self.order("buy", code, lots, price).await
     }
 
+    /// Place a sell order. `lots` is in 張 (board lots of 1,000 shares), `price` is per share.
+    ///
     /// # Errors
     /// Network failure or if the server rejects the order.
-    pub async fn sell(&self, code: &str, shares: u64, price: f64) -> Result<()> {
-        self.order("sell", code, shares, price).await
+    pub async fn sell(&self, code: &str, lots: u64, price: f64) -> Result<()> {
+        self.order("sell", code, lots, price).await
     }
 
-    async fn order(&self, action: &str, code: &str, shares: u64, price: f64) -> Result<()> {
+    async fn order(&self, action: &str, code: &str, lots: u64, price: f64) -> Result<()> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Response {
@@ -150,7 +155,7 @@ impl SimStockClient {
                 ("account", self.account.as_str()),
                 ("password", self.password.as_str()),
                 ("stock_code", code),
-                ("stock_shares", &shares.to_string()),
+                ("stock_shares", &lots.to_string()),
                 ("stock_price", &price.to_string()),
             ])
             .send()

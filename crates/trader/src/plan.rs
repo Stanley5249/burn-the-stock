@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use chrono::NaiveDate;
 use portfolio::{
-    DayBar, ExitReason, Fill, SELL_TAX_RATE, affordable_shares, commission, exit_decision,
+    DayBar, ExitReason, Fill, LOT, SELL_TAX_RATE, affordable_shares, commission, exit_decision,
     score_weights, sell_price, tick_ceil,
 };
 use stock_client::fugle::FugleQuote;
@@ -12,19 +12,20 @@ use stock_client::types::UserStock;
 
 use crate::cli::Args;
 
-/// A planned exit: sell the whole position at the quote high.
+/// A planned exit: sell the whole position at the quote high. `lots` is in 張 (the platform
+/// order unit), `price` is per share.
 pub struct Sell {
     pub code: String,
-    pub shares: u64,
+    pub lots: u64,
     pub price: f64,
     pub proceeds: f64,
     pub reason: ExitReason,
 }
 
-/// A planned entry: buy a whole-lot quantity at the quote low.
+/// A planned entry: buy at the quote low. `lots` is in 張, `price` is per share.
 pub struct Buy {
     pub code: String,
-    pub shares: u64,
+    pub lots: u64,
     pub price: f64,
     pub cost: f64,
 }
@@ -73,15 +74,16 @@ pub fn plan_sells(
         };
 
         let price = sell_price(&bar, Fill::LowHigh);
+        // holding.shares is in 張; the traded value is per-share price times actual shares.
         #[allow(
             clippy::cast_precision_loss,
-            reason = "share counts are small lot multiples"
+            reason = "lot counts are small whole numbers"
         )]
-        let amount = price * holding.shares as f64;
+        let amount = price * holding.shares as f64 * LOT;
         let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
         sells.push(Sell {
             code: holding.stock_code_id.clone(),
-            shares: holding.shares,
+            lots: holding.shares,
             price,
             proceeds,
             reason,
@@ -128,7 +130,7 @@ pub fn plan_buys(
         remaining -= cost;
         buys.push(Buy {
             code: (*code).clone(),
-            shares: lots(shares),
+            lots: lots(shares),
             price: *price,
             cost,
         });
@@ -156,13 +158,13 @@ fn days_held(createtime: i64, today: NaiveDate) -> usize {
     usize::try_from((today - entry).num_days().max(0)).unwrap_or(0)
 }
 
-/// Order quantity from [`affordable_shares`], which already returns a whole lot multiple, so
-/// this rounds only to absorb float drift before the cast.
+/// Convert an actual share count from [`affordable_shares`] (a whole multiple of [`LOT`])
+/// into the platform's order unit, 張 (board lots of 1,000 shares).
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "affordable_shares returns whole nonnegative share counts"
+    reason = "share/LOT is a small whole nonnegative lot count"
 )]
 fn lots(shares: f64) -> u64 {
-    shares.round() as u64
+    (shares / LOT).round() as u64
 }
