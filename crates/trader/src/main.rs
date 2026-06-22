@@ -9,8 +9,6 @@ mod rank;
 mod report;
 mod state;
 
-use std::collections::{HashMap, HashSet};
-
 use burn::backend::wgpu::WgpuDevice;
 use chrono::Local;
 use clap::Parser;
@@ -34,7 +32,6 @@ async fn main() -> Result<()> {
 
     // Rank every ticker from data ending yesterday; today's bar is never read.
     let ranked = rank(&args, &device)?;
-    let score_of: HashMap<String, f32> = ranked.iter().cloned().collect();
 
     // One Fugle-keyed client, shared with the sim client (sim ignores the extra header).
     let api_key = std::env::var("FUGLE_API_KEY")
@@ -45,21 +42,17 @@ async fn main() -> Result<()> {
 
     // Positions come from the platform; cash comes from our own ledger.
     let holdings = sim.user_stocks().await.into_diagnostic()?;
-    let held: HashSet<String> = holdings.iter().map(|h| h.stock_code_id.clone()).collect();
 
     let today = Local::now().date_naive();
     let mut state = LiveState::load_or_seed(&args.state, STARTING_CASH)?;
     state.settle(today);
 
-    // Default daily rotation sells the whole book, so held names are buyable again (rebought
-    // at the low after selling at the high). Laddered-exit mode keeps held names, so they are
-    // excluded from candidates and only the freed slots are filled.
+    // Daily rotation sells the whole book, so held names are buyable again (rebought at the
+    // low after selling at the high) and stay in the candidate list.
     let candidates: Vec<(String, f32)> = ranked
         .iter()
-        .filter(|(ticker, score)| {
-            *score > args.threshold && (!args.exit_ladder || !held.contains(ticker))
-        })
-        .take(args.shortlist)
+        .filter(|(_, score)| *score > args.threshold)
+        .take(args.max_holdings)
         .cloned()
         .collect();
 
@@ -71,17 +64,12 @@ async fn main() -> Result<()> {
     symbols.dedup();
     let quotes = fetch_quotes(&http, &symbols, args.quote_delay_ms).await;
 
-    let sells = plan_sells(&holdings, &quotes, &score_of, &args, today);
+    let sells = plan_sells(&holdings, &quotes);
 
     // ponytail: rotation recycles capital only as fast as sells settle; if settlement lags
     // the order cutoff, a split-capital cadence is the follow-up.
     let budget = state.settled_cash * (1.0 - args.buffer);
-    let open_slots = if args.exit_ladder {
-        args.max_holdings.saturating_sub(holdings.len())
-    } else {
-        args.max_holdings
-    };
-    let buys = plan_buys(&candidates, &quotes, budget, open_slots);
+    let buys = plan_buys(&candidates, &quotes, budget, args.max_holdings);
 
     print!(
         "{}",

@@ -24,13 +24,10 @@ pub struct Args {
     #[arg(long, default_value_t = 0.0)]
     pub threshold: f32,
 
-    /// Target number of positions to hold.
+    /// Target number of positions to hold, which also caps how many ranked candidates get
+    /// quoted.
     #[arg(long, default_value_t = 100)]
     pub max_holdings: usize,
-
-    /// How many top-ranked candidates to fetch quotes for.
-    #[arg(long, default_value_t = 100)]
-    pub shortlist: usize,
 
     /// Fraction of settled cash held back for later days.
     #[arg(long, default_value_t = 0.1)]
@@ -40,23 +37,6 @@ pub struct Args {
     /// 15:30-16:00, after the 13:00 order cutoff, so today's sells fund the next run (0).
     #[arg(long, default_value_t = 0)]
     pub settle_lag: i64,
-
-    /// Use the laddered exits (time / model-sell / barriers) instead of the default, which
-    /// sells the whole book every day to harvest the buy-low/sell-high spread.
-    #[arg(long)]
-    pub exit_ladder: bool,
-
-    /// Trading days to hold before the time exit (laddered-exit mode only).
-    #[arg(long, default_value_t = 20)]
-    pub max_hold: usize,
-
-    /// Take-profit exit as a fraction of price; 1.0 is effectively off.
-    #[arg(long, default_value_t = 1.0)]
-    pub take_profit: f64,
-
-    /// Stop-loss exit as a fraction of price; 1.0 is effectively off.
-    #[arg(long, default_value_t = 1.0)]
-    pub stop_loss: f64,
 
     /// Delay between Fugle quote requests, to respect the rate limit.
     #[arg(long, default_value_t = 1100)]

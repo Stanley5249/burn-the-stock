@@ -29,8 +29,8 @@ pub fn report(
     for sell in sells {
         let _ = writeln!(
             out,
-            "    {:<8} {:>5} 張 @ {:.2}  [{}]",
-            sell.code, sell.lots, sell.price, sell.reason
+            "    {:<8} {:>5} 張 @ {:.2}",
+            sell.code, sell.lots, sell.price
         );
     }
     let _ = writeln!(out, "  Buys ({}), cost {cost:.0}", buys.len());

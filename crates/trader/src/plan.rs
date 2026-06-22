@@ -2,15 +2,12 @@
 
 use std::collections::HashMap;
 
-use chrono::NaiveDate;
 use portfolio::{
-    DayBar, ExitReason, Fill, LOT, SELL_TAX_RATE, affordable_shares, commission, exit_decision,
-    score_weights, sell_price, tick_ceil,
+    DayBar, Fill, LOT, SELL_TAX_RATE, affordable_shares, commission, score_weights, sell_price,
+    tick_ceil,
 };
 use stock_client::fugle::FugleQuote;
 use stock_client::types::UserStock;
-
-use crate::cli::Args;
 
 /// A planned exit: sell the whole position at the quote high. `lots` is in 張 (the platform
 /// order unit), `price` is per share.
@@ -19,7 +16,6 @@ pub struct Sell {
     pub lots: u64,
     pub price: f64,
     pub proceeds: f64,
-    pub reason: ExitReason,
 }
 
 /// A planned entry: buy at the quote low. `lots` is in 張, `price` is per share.
@@ -30,47 +26,16 @@ pub struct Buy {
     pub cost: f64,
 }
 
-/// Plan the day's exits, each sold whole at the quote high. By default (`exit_ladder` off)
-/// every holding is sold to harvest the daily spread; with `exit_ladder` on, only holdings
-/// the shared ladder flags exit. Holdings without a usable quote are left alone.
-pub fn plan_sells(
-    holdings: &[UserStock],
-    quotes: &HashMap<String, FugleQuote>,
-    score_of: &HashMap<String, f32>,
-    args: &Args,
-    today: NaiveDate,
-) -> Vec<Sell> {
+/// Plan the day's exits: sell every holding whole at the quote high to harvest the daily
+/// buy-low/sell-high spread. Holdings without a usable quote are left alone.
+pub fn plan_sells(holdings: &[UserStock], quotes: &HashMap<String, FugleQuote>) -> Vec<Sell> {
     let mut sells = Vec::new();
     for holding in holdings {
         let Some(quote) = quotes.get(&holding.stock_code_id) else {
             continue;
         };
-        let score = score_of.get(&holding.stock_code_id).copied().unwrap_or(0.0);
-        let Some(bar) = quote_to_bar(quote, score) else {
+        let Some(bar) = quote_to_bar(quote) else {
             continue;
-        };
-
-        let reason = if args.exit_ladder {
-            let entry_price = holding
-                .beginning_price
-                .to_string()
-                .parse::<f64>()
-                .unwrap_or(0.0);
-            let days = days_held(holding.createtime, today);
-            match exit_decision(
-                entry_price,
-                days,
-                &bar,
-                args.take_profit,
-                args.stop_loss,
-                args.max_hold,
-                Fill::LowHigh,
-            ) {
-                Some((_, reason)) => reason,
-                None => continue,
-            }
-        } else {
-            ExitReason::Rotate
         };
 
         let price = sell_price(&bar, Fill::LowHigh);
@@ -86,7 +51,6 @@ pub fn plan_sells(
             lots: holding.shares,
             price,
             proceeds,
-            reason,
         });
     }
     sells
@@ -138,24 +102,17 @@ pub fn plan_buys(
     buys
 }
 
-/// Build a one-day bar from a live quote for the exit ladder, or `None` when a price is
-/// still missing before the first trade of the session.
+/// Build a one-day bar from a live quote, or `None` when a price is still missing before the
+/// first trade of the session.
 #[allow(clippy::cast_possible_truncation, reason = "TWSE prices fit f32")]
-fn quote_to_bar(quote: &FugleQuote, score: f32) -> Option<DayBar> {
+fn quote_to_bar(quote: &FugleQuote) -> Option<DayBar> {
     Some(DayBar {
-        score,
+        score: 0.0,
         open: quote.open_price? as f32,
         low: quote.low_price? as f32,
         high: quote.high_price? as f32,
         close: quote.last_price.or(quote.open_price)? as f32,
     })
-}
-
-/// Trading-day-agnostic days since entry, from the platform's epoch-second timestamp.
-fn days_held(createtime: i64, today: NaiveDate) -> usize {
-    let entry =
-        chrono::DateTime::from_timestamp(createtime, 0).map_or(today, |moment| moment.date_naive());
-    usize::try_from((today - entry).num_days().max(0)).unwrap_or(0)
 }
 
 /// Convert an actual share count from [`affordable_shares`] (a whole multiple of [`LOT`])
