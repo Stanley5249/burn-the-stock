@@ -2,7 +2,9 @@
 //! holdings and live Fugle quotes, then place the day's weighted orders. Sells exit on the
 //! same ladder the backtest uses; buys size by score over the usable-cash budget.
 
+mod calendar;
 mod cli;
+mod download;
 mod execute;
 mod plan;
 mod rank;
@@ -11,17 +13,18 @@ mod report;
 use std::collections::HashMap;
 
 use burn::backend::wgpu::WgpuDevice;
-use chrono::Local;
+use chrono::{Datelike, Utc};
 use clap::Parser;
-use miette::{Context, IntoDiagnostic, Result};
+use miette::{Context, IntoDiagnostic, Result, ensure};
 use stock_client::fugle::{FugleClient, FugleQuote};
 use stock_client::sim_stock::SimStockClient;
 use tracing_subscriber::EnvFilter;
 
+use crate::calendar::DayKind;
 use crate::cli::Args;
 use crate::execute::{place_buys, place_sells};
 use crate::plan::{plan_buys, plan_sells};
-use crate::rank::{rank, select_candidates};
+use crate::rank::{data_max_date, rank, select_candidates};
 use crate::report::{report_buys, report_candidates, report_sells};
 
 #[tokio::main]
@@ -36,6 +39,51 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    let datetime = Utc::now().with_timezone(&calendar::TAIPEI_OFFSET);
+
+    ensure!(
+        !calendar::in_maintenance(datetime),
+        help = "re-run after 16:00",
+        "sim_stock is in maintenance (15:30-16:00 Taipei), now {datetime}"
+    );
+
+    // The TWSE calendar decides which session these orders target and the last completed
+    // session the model must have data through.
+    let calendar = calendar::build(datetime.year(), &args.holiday_cache).await?;
+    let today = datetime.date_naive();
+    let today_kind = calendar.day_kind(today);
+    let session = calendar.session(datetime);
+    let target_session = session.target;
+
+    // Reveal the trader's read of the calendar and why the orders land on this session.
+    let reason = if target_session == today {
+        format!("today is a {today_kind}, before the 13:00 cutoff")
+    } else if matches!(today_kind, DayKind::Trading) {
+        "today is past the 13:00 cutoff, so orders queue to the next session".to_string()
+    } else {
+        format!("today is a {today_kind}, so orders queue to the next session")
+    };
+    println!(
+        "{}: {reason}; orders target {target_session}, data required through {}",
+        datetime.format("%Y-%m-%d %H:%M %:z"),
+        session.data_through,
+    );
+
+    // Refresh the OHLCV before scoring so a forgotten download never trades stale data.
+    if !args.no_download {
+        download::run_downloader().await?;
+    }
+
+    let max_date = data_max_date(&args.data).wrap_err("read data max date")?;
+    ensure!(
+        max_date >= session.data_through || args.allow_stale,
+        help =
+            "the latest bar may not be published yet; retry after the close, or pass --allow-stale",
+        "data is current through {max_date} but session {target_session} needs it through {}",
+        session.data_through
+    );
+
     let device = WgpuDevice::default();
 
     let fugle = FugleClient::from_env()?;
@@ -45,8 +93,8 @@ async fn main() -> Result<()> {
     // login is stateful; do it once so the profile scrape below reuses the session cookie.
     sim_stock_client.login().await.wrap_err("login")?;
 
-    // Inference reads local parquet (today's bar is never read) and is the long pole; start it
-    // now on a blocking thread and only await it once candidates are needed for the buys.
+    // Inference reads local parquet (the target session's bar is never read) and is the long
+    // pole; start it now on a blocking thread and only await it once candidates are needed.
     let rank_task = tokio::task::spawn_blocking({
         let args = args.clone();
         let device = device.clone();
@@ -60,8 +108,6 @@ async fn main() -> Result<()> {
         .await
         .wrap_err("fetch holdings")?;
 
-    let today = Local::now().date_naive();
-
     // A dry run only checks the model's picks, so skip the live Fugle quotes (a 110s+ paced
     // sweep) and the whole order flow; just rank and list the candidates.
     if args.dry_run {
@@ -71,7 +117,10 @@ async fn main() -> Result<()> {
             .wrap_err("ranking task panicked")??;
         let candidates = select_candidates(&ranked, args.threshold, args.max_holdings);
 
-        print!("{}", report_candidates(today, holdings.len(), &candidates));
+        print!(
+            "{}",
+            report_candidates(target_session, holdings.len(), &candidates)
+        );
         return Ok(());
     }
 
@@ -88,7 +137,7 @@ async fn main() -> Result<()> {
     let sells = plan_sells(&holdings, &held_quotes);
     print!(
         "{}",
-        report_sells(today, budget, holdings.len(), &profile, &sells)
+        report_sells(target_session, budget, holdings.len(), &profile, &sells)
     );
 
     // Rank has overlapped the held-quote fetch and is almost certainly done; await it now to
@@ -118,7 +167,7 @@ async fn main() -> Result<()> {
     let mut quotes: HashMap<String, FugleQuote> = held_quotes;
     quotes.extend(candidate_quotes);
 
-    let buys = plan_buys(&candidates, &quotes, budget, args.max_holdings);
+    let buys = plan_buys(&candidates, &quotes, budget);
     print!("{}", report_buys(candidates.len(), &buys));
 
     place_buys(&sim_stock_client, &buys, args.order_concurrency).await?;

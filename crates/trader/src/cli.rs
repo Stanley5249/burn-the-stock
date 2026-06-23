@@ -37,6 +37,19 @@ pub struct Args {
     #[arg(long, default_value_t = 8)]
     pub order_concurrency: usize,
 
+    /// Directory holding the per-year TWSE holiday caches.
+    #[arg(long, default_value = "data/twse")]
+    pub holiday_cache: PathBuf,
+
+    /// Skip the pre-trade downloader refresh and score the data as-is.
+    #[arg(long)]
+    pub no_download: bool,
+
+    /// Trade even if the data is not current through the required session. Only for the rare
+    /// long-holiday case where the latest bar is legitimately old.
+    #[arg(long)]
+    pub allow_stale: bool,
+
     /// Plan and print the orders without placing them.
     #[arg(long)]
     pub dry_run: bool,

@@ -62,7 +62,6 @@ pub fn plan_buys(
     candidates: &[(String, f32)],
     quotes: &HashMap<String, FugleQuote>,
     budget: f64,
-    open_slots: usize,
 ) -> Vec<Buy> {
     let priced: Vec<(&String, f32, f64)> = candidates
         .iter()
@@ -71,7 +70,6 @@ pub fn plan_buys(
             let low = quote.low_price.or(quote.open_price)?;
             Some((ticker, *score, tick_ceil(low)))
         })
-        .take(open_slots)
         .collect();
 
     let weights = score_weights(

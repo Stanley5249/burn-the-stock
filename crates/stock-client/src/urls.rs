@@ -18,6 +18,11 @@ pub mod sim_stock {
     pub const PROFILE: &str = "profile/";
 }
 
+pub mod twse {
+    pub const HOLIDAY_SCHEDULE: &str =
+        "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule";
+}
+
 pub mod fugle {
     use url::Url;
 

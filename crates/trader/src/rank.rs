@@ -8,8 +8,8 @@ use burn::backend::wgpu::WgpuDevice;
 use burn::config::Config;
 use burn::module::Module;
 use burn::record::CompactRecorder;
-use chrono::Duration;
-use miette::{Context, IntoDiagnostic, Result};
+use chrono::{Duration, NaiveDate};
+use miette::{Context, IntoDiagnostic, Result, miette};
 use polars::prelude::*;
 use stock_model::data::TickerFrames;
 use stock_model::features::DATE;
@@ -43,7 +43,7 @@ pub fn rank(args: &Args, device: &WgpuDevice) -> Result<Vec<(String, f32)>> {
     let lookback = i64::try_from(config.steps * 2 + 10)
         .into_diagnostic()
         .wrap_err("steps too large for the lookback window")?;
-    let frame = recent_frame(&args.data, lookback).into_diagnostic()?;
+    let frame = recent_frame(&args.data, lookback)?;
     let store = TickerFrames::from_lazy(frame).into_diagnostic()?;
 
     let windows = store.latest_windows(config.steps).into_diagnostic()?;
@@ -85,23 +85,40 @@ pub fn select_candidates(
 /// Scan only the recent tail of the OHLCV parquet, keeping the last `lookback` calendar
 /// days. The per-date z-score is unaffected since each retained date still holds the full
 /// universe.
-fn recent_frame(path: &Path, lookback: i64) -> PolarsResult<LazyFrame> {
-    let frame =
-        LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?
-            .with_column(col(DATE).cast(DataType::Date));
+fn recent_frame(path: &Path, lookback: i64) -> Result<LazyFrame> {
+    let frame = LazyFrame::scan_parquet(
+        PlRefPath::try_from_path(path).into_diagnostic()?,
+        ScanArgsParquet::default(),
+    )
+    .into_diagnostic()?
+    .with_column(col(DATE).cast(DataType::Date));
 
-    let max_date = frame
-        .clone()
-        .select([col(DATE).max()])
-        .collect()?
-        .column(&DATE)?
-        .date()?
-        .as_date_iter()
-        .flatten()
-        .next()
-        .expect("parquet has at least one dated row");
-
-    let cutoff = max_date - Duration::days(lookback);
+    let cutoff = data_max_date(path)? - Duration::days(lookback);
 
     Ok(frame.filter(col(DATE).gt_eq(lit(cutoff))))
+}
+
+/// The most recent dated bar in the OHLCV parquet, used both to anchor the recent-tail scan
+/// and to verify the data is fresh enough for the session being traded.
+///
+/// # Errors
+/// If the parquet cannot be scanned or holds no dated rows.
+pub fn data_max_date(path: &Path) -> Result<NaiveDate> {
+    LazyFrame::scan_parquet(
+        PlRefPath::try_from_path(path).into_diagnostic()?,
+        ScanArgsParquet::default(),
+    )
+    .into_diagnostic()?
+    .with_column(col(DATE).cast(DataType::Date))
+    .select([col(DATE).max()])
+    .collect()
+    .into_diagnostic()?
+    .column(&DATE)
+    .into_diagnostic()?
+    .date()
+    .into_diagnostic()?
+    .as_date_iter()
+    .flatten()
+    .next()
+    .ok_or_else(|| miette!("parquet has no dated rows"))
 }
