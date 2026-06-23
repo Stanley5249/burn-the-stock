@@ -1,15 +1,16 @@
 //! Render the day's plan for the terminal, one block per phase.
 
 use chrono::NaiveDate;
+use stock_client::types::Profile;
 
 use crate::plan::{Buy, Sell};
 
 /// Build the sell phase summary as one string, printed in a single write.
 pub fn report_sells(
     today: NaiveDate,
-    settled_cash: f64,
     budget: f64,
     holdings: usize,
+    profile: &Profile,
     sells: &[Sell],
 ) -> String {
     use std::fmt::Write as _;
@@ -18,7 +19,9 @@ pub fn report_sells(
 
     let mut out = String::new();
     let _ = writeln!(out, "Live plan {today}");
-    let _ = writeln!(out, "  settled cash : {settled_cash:.0}");
+    let _ = writeln!(out, "  usable cash  : {:.0}", profile.usable_cash);
+    let _ = writeln!(out, "  total assets : {:.0}", profile.total_assets);
+    let _ = writeln!(out, "  cum. return  : {:.3}%", profile.cumulative_return);
     let _ = writeln!(out, "  buy budget   : {budget:.0}");
     let _ = writeln!(out, "  holdings     : {holdings}");
     let _ = writeln!(out, "  Sells ({}), proceeds {proceeds:.0}", sells.len());

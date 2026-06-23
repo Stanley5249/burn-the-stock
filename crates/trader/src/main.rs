@@ -1,22 +1,21 @@
 //! Live trading loop on `sim_stock`: rank every ticker from data through yesterday, fetch
 //! holdings and live Fugle quotes, then place the day's weighted orders. Sells exit on the
-//! same ladder the backtest uses; buys size by score over the settled-cash budget.
+//! same ladder the backtest uses; buys size by score over the usable-cash budget.
 
 mod cli;
 mod execute;
 mod plan;
 mod rank;
 mod report;
-mod state;
 
 use std::collections::HashMap;
 
 use burn::backend::wgpu::WgpuDevice;
-use chrono::{Duration, Local};
+use chrono::Local;
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result};
-use portfolio::STARTING_CASH;
-use stock_client::fugle::{FugleQuote, client, fetch_quotes};
+use stock_client::client::default_client;
+use stock_client::fugle::{FugleQuote, fetch_quotes};
 use stock_client::sim_stock::SimStockClient;
 use tracing_subscriber::EnvFilter;
 
@@ -25,7 +24,6 @@ use crate::execute::{place_buys, place_sells};
 use crate::plan::{plan_buys, plan_sells};
 use crate::rank::{rank, select_candidates};
 use crate::report::{report_buys, report_candidates, report_sells};
-use crate::state::LiveState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,8 +43,13 @@ async fn main() -> Result<()> {
     let api_key = std::env::var("FUGLE_API_KEY")
         .into_diagnostic()
         .wrap_err("FUGLE_API_KEY must be set")?;
-    let http = client(&api_key).into_diagnostic()?;
-    let sim = SimStockClient::from_env(http.clone()).into_diagnostic()?;
+
+    let client = default_client(true, Some(&api_key))?;
+
+    let sim_stock_client = SimStockClient::from_env(Some(client.clone()), None)?;
+
+    // login is stateful; do it once so the profile scrape below reuses the session cookie.
+    sim_stock_client.login().await.wrap_err("login")?;
 
     // Inference reads local parquet (today's bar is never read) and is the long pole; start it
     // now on a blocking thread and only await it once candidates are needed for the buys.
@@ -56,12 +59,11 @@ async fn main() -> Result<()> {
         move || rank(&args, &device)
     });
 
-    // Positions come from the platform; cash from our own ledger. The sim_stock holdings
-    // fetch is fast, unlike the paced Fugle quote sweep below.
-    let holdings = sim
+    // Positions come from the platform. The sim_stock holdings fetch is fast, unlike the
+    // paced Fugle quote sweep below.
+    let holdings = sim_stock_client
         .user_stocks()
         .await
-        .into_diagnostic()
         .wrap_err("fetch holdings")?;
 
     let today = Local::now().date_naive();
@@ -82,20 +84,17 @@ async fn main() -> Result<()> {
     // Sells depend only on held names, never on the ranking, so quote them first and overlap
     // that fetch with `rank`.
     let held_symbols: Vec<String> = holdings.iter().map(|h| h.stock_code_id.clone()).collect();
-    let held_quotes = fetch_quotes(&http, &held_symbols, args.quote_delay_ms).await;
+    let held_quotes = fetch_quotes(&client, &held_symbols, args.quote_delay_ms).await;
 
-    let mut state = LiveState::load_or_seed(&args.state, STARTING_CASH)?;
-    state.settle(today);
-
-    // ponytail: rotation recycles capital only as fast as sells settle; if settlement lags
-    // the order cutoff, a split-capital cadence is the follow-up. Sells settle later, so the
-    // budget reads settled cash once here and is unaffected by today's sells.
-    let budget = state.settled_cash * (1.0 - args.buffer);
+    // The platform's usable balance is the source of truth for the budget; a failed scrape
+    // stops the run rather than trading on a guess.
+    let profile = sim_stock_client.profile().await.wrap_err("fetch profile")?;
+    let budget = profile.usable_cash * (1.0 - args.buffer);
 
     let sells = plan_sells(&holdings, &held_quotes);
     print!(
         "{}",
-        report_sells(today, state.settled_cash, budget, holdings.len(), &sells)
+        report_sells(today, budget, holdings.len(), &profile, &sells)
     );
 
     // Rank has overlapped the held-quote fetch and is almost certainly done; await it now to
@@ -116,8 +115,8 @@ async fn main() -> Result<()> {
 
     // Fire the sells (sim POSTs) while the candidate quote sweep runs on Fugle; the two hit
     // different hosts, so they overlap cleanly.
-    let sell_future = place_sells(&sim, &sells, args.order_concurrency);
-    let quote_future = fetch_quotes(&http, &candidate_symbols, args.quote_delay_ms);
+    let sell_future = place_sells(&sim_stock_client, &sells, args.order_concurrency);
+    let quote_future = fetch_quotes(&client, &candidate_symbols, args.quote_delay_ms);
 
     let (sell_result, candidate_quotes) = tokio::join!(sell_future, quote_future);
     sell_result?;
@@ -128,17 +127,8 @@ async fn main() -> Result<()> {
     let buys = plan_buys(&candidates, &quotes, budget, args.max_holdings);
     print!("{}", report_buys(candidates.len(), &buys));
 
-    place_buys(&sim, &buys, args.order_concurrency).await?;
+    place_buys(&sim_stock_client, &buys, args.order_concurrency).await?;
 
-    let settle_date = today + Duration::days(args.settle_lag);
-    for sell in &sells {
-        state.record_sell(sell.proceeds, settle_date);
-    }
-    for buy in &buys {
-        state.record_buy(buy.cost);
-    }
-    state.last_run = Some(today);
-    state.save(&args.state)?;
     println!("placed {} sells and {} buys", sells.len(), buys.len());
 
     Ok(())

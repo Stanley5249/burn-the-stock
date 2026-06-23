@@ -2,7 +2,7 @@
 //! happens in `main`, once the network has settled.
 
 use futures::stream::{StreamExt, TryStreamExt};
-use miette::{Context, IntoDiagnostic, Result};
+use miette::{Context, Result};
 use stock_client::sim_stock::SimStockClient;
 
 use crate::plan::{Buy, Sell};
@@ -18,7 +18,6 @@ pub async fn place_sells(sim: &SimStockClient, sells: &[Sell], concurrency: usiz
         .map(async |sell| {
             sim.sell(&sell.code, sell.lots, sell.price)
                 .await
-                .into_diagnostic()
                 .wrap_err_with(|| format!("sell {}", sell.code))
         })
         .buffer_unordered(concurrency)
@@ -37,7 +36,6 @@ pub async fn place_buys(sim: &SimStockClient, buys: &[Buy], concurrency: usize) 
         .map(async |buy| {
             sim.buy(&buy.code, buy.lots, buy.price)
                 .await
-                .into_diagnostic()
                 .wrap_err_with(|| format!("buy {}", buy.code))
         })
         .buffer_unordered(concurrency)

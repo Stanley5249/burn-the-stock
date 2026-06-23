@@ -1,5 +1,5 @@
-use crate::error::{Error, Result};
 use chrono::NaiveDate;
+use miette::{Result, bail};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,19 @@ pub struct UserStock {
     pub user_uid_id: u64,
 }
 
+/// The account dashboard's headline numbers, scraped from the sim server's `profile/` page.
+#[derive(Debug, Clone)]
+pub struct Profile {
+    /// Spendable cash (可用餘額), already net of unsettled proceeds.
+    pub usable_cash: f64,
+    /// Total account value (資產總額): cash plus the marked value of holdings.
+    pub total_assets: f64,
+    /// Cumulative return (累積報酬率) as a percentage, e.g. `1.906` for 1.906%.
+    pub cumulative_return: f64,
+    /// Count of successful trades (交易成功次數).
+    pub trade_count: u64,
+}
+
 /// OHLCV row shared by all market sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OhlcvRow {
@@ -41,7 +54,7 @@ pub struct OhlcvRow {
 
 impl OhlcvRow {
     /// # Errors
-    /// Returns `InvalidRow` if `stock_code_id` is empty or any price field is negative.
+    /// If `stock_code_id` is empty or any price field is negative.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         date: NaiveDate,
@@ -56,7 +69,7 @@ impl OhlcvRow {
         transaction_volume: u64,
     ) -> Result<Self> {
         if stock_code_id.is_empty() {
-            return Err(Error::InvalidRow("empty stock_code_id".to_owned()));
+            bail!("empty stock_code_id");
         }
         for (name, value) in [
             ("open", open),
@@ -65,7 +78,7 @@ impl OhlcvRow {
             ("close", close),
         ] {
             if value.is_some_and(f64::is_sign_negative) {
-                return Err(Error::InvalidRow(format!("{name} is negative")));
+                bail!("{name} is negative");
             }
         }
         Ok(Self {

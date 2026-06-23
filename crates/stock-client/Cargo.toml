@@ -10,9 +10,10 @@ dotenvy.workspace = true
 miette.workspace = true
 reqwest = {
   workspace = true,
-  features = ["default-tls", "form", "json", "query"]
+  features = ["default-tls", "cookies", "form", "json", "query"]
 }
 rust_decimal = { workspace = true, features = ["serde", "serde-with-str"] }
+scraper = "0.27.0"
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }

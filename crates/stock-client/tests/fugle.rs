@@ -5,7 +5,7 @@ use stock_client::fugle::{FugleMarket, fetch_candles, fetch_quote, fetch_ticker,
 
 mod common;
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(common::http_client);
+static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(common::fugle_client);
 
 fn date(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
@@ -14,7 +14,7 @@ fn date(s: &str) -> NaiveDate {
 #[tokio::test]
 #[ignore = "requires network access and FUGLE_API_KEY"]
 async fn test_fugle_tickers_tse() {
-    let response = fetch_tickers(&HTTP, FugleMarket::Tse).await.unwrap();
+    let response = fetch_tickers(&CLIENT, FugleMarket::Tse).await.unwrap();
     let tickers = response.data;
 
     tracing::info!(count = tickers.len(), "TSE tickers");
@@ -29,7 +29,7 @@ async fn test_fugle_tickers_tse() {
 #[tokio::test]
 #[ignore = "requires network access and FUGLE_API_KEY"]
 async fn test_fugle_tickers_otc() {
-    let response = fetch_tickers(&HTTP, FugleMarket::Otc).await.unwrap();
+    let response = fetch_tickers(&CLIENT, FugleMarket::Otc).await.unwrap();
     let tickers = response.data;
 
     tracing::info!(count = tickers.len(), "OTC tickers");
@@ -42,7 +42,7 @@ async fn test_fugle_tickers_otc() {
 async fn test_fugle_ticker_industry() {
     // A general stock and an ETF, both expected to carry an industry.
     for symbol in ["2330", "0050"] {
-        let detail = fetch_ticker(&HTTP, symbol).await.unwrap();
+        let detail = fetch_ticker(&CLIENT, symbol).await.unwrap();
 
         tracing::info!(
             symbol = detail.symbol,
@@ -64,7 +64,7 @@ async fn test_fugle_ticker_industry() {
 async fn test_fugle_candles_tsmc() {
     let from = date("2024-01-01");
     let to = date("2024-12-31");
-    let response = fetch_candles(&HTTP, "2330", from, to).await.unwrap();
+    let response = fetch_candles(&CLIENT, "2330", from, to).await.unwrap();
 
     tracing::info!(
         symbol = response.symbol,
@@ -101,7 +101,7 @@ async fn test_fugle_candles_tsmc() {
 #[tokio::test]
 #[ignore = "requires network access, FUGLE_API_KEY, and an open market session"]
 async fn test_fugle_quote_tsmc() {
-    let quote = fetch_quote(&HTTP, "2330").await.unwrap();
+    let quote = fetch_quote(&CLIENT, "2330").await.unwrap();
 
     tracing::info!(
         symbol = quote.symbol,
@@ -126,7 +126,7 @@ async fn test_fugle_candles_ten_years() {
     let from = date("2016-01-01");
     let to = chrono::Local::now().date_naive();
 
-    let error = fetch_candles(&HTTP, "2330", from, to).await.unwrap_err();
+    let error = fetch_candles(&CLIENT, "2330", from, to).await.unwrap_err();
 
     tracing::info!(?error, "got expected error for >1-year range");
 
@@ -136,6 +136,6 @@ async fn test_fugle_candles_ten_years() {
             let is_4xx = status.is_some_and(|s| s.is_client_error());
             assert!(is_4xx, "expected 4xx status, got {status:?}");
         }
-        other => panic!("expected HTTP error, got {other:?}"),
+        Error::Url(_) => panic!("expected HTTP error, got {error:?}"),
     }
 }

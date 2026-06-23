@@ -16,10 +16,6 @@ pub struct Args {
     #[arg(long, default_value = "data/yfinance/stocks.parquet")]
     pub data: PathBuf,
 
-    /// Cash ledger path; tracks settled cash and unsettled sale proceeds across runs.
-    #[arg(long, default_value = "data/live-state.json")]
-    pub state: PathBuf,
-
     /// Minimum predicted score (per-date z-scored MFE) to buy.
     #[arg(long, default_value_t = 0.0)]
     pub threshold: f32,
@@ -32,11 +28,6 @@ pub struct Args {
     /// Fraction of settled cash held back for later days.
     #[arg(long, default_value_t = 0.1)]
     pub buffer: f64,
-
-    /// Calendar days until sale proceeds become spendable. The platform settles at
-    /// 15:30-16:00, after the 13:00 order cutoff, so today's sells fund the next run (0).
-    #[arg(long, default_value_t = 0)]
-    pub settle_lag: i64,
 
     /// Delay between Fugle quote requests, to respect the rate limit.
     #[arg(long, default_value_t = 1100)]

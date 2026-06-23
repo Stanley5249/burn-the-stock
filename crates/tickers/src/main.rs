@@ -104,7 +104,7 @@ struct TickerColumns {
 /// Fetch metadata for every `(market, code)`, sleeping `delay` between requests.
 /// A failed lookup is logged and skipped so one bad symbol does not abort the run.
 async fn fetch_all(
-    http: &reqwest::Client,
+    client: &reqwest::Client,
     universe: &[(String, String)],
     delay: Duration,
 ) -> TickerColumns {
@@ -115,7 +115,7 @@ async fn fetch_all(
             tokio::time::sleep(delay).await;
         }
 
-        match fetch_ticker(http, symbol).await {
+        match fetch_ticker(client, symbol).await {
             Ok(detail) => {
                 tracing::info!(market = %market, symbol = %symbol, industry = ?detail.industry, "fetched");
                 columns.markets.push(market.clone());
@@ -151,14 +151,14 @@ fn main() -> Result<()> {
 
     tracing::info!(total = universe.len(), "fetching ticker metadata");
 
-    let http = build_client()?;
+    let client = build_client()?;
     let delay = Duration::from_millis(args.delay_ms);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .into_diagnostic()?;
-    let columns = runtime.block_on(fetch_all(&http, &universe, delay));
+    let columns = runtime.block_on(fetch_all(&client, &universe, delay));
 
     let mut frame = df!(
         "market" => columns.markets,

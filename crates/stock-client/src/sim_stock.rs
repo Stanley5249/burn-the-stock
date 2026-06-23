@@ -1,68 +1,83 @@
-use crate::error::{Error, Result};
-use crate::types::{MarketType, StockInfo, UserStock};
-use crate::urls;
+use miette::{Context, IntoDiagnostic, Result, bail, miette};
+use scraper::{Element, Html, Selector};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::str::FromStr;
+use tracing::instrument;
 use url::Url;
 
+use crate::client::default_client;
+use crate::types::{MarketType, Profile, StockInfo, UserStock};
+use crate::urls::sim_stock as urls;
+
 pub struct SimStockClient {
-    http: reqwest::Client,
-    base: Url,
-    account: String,
-    password: String,
+    pub client: reqwest::Client,
+    pub base: Url,
+    pub account: String,
+    pub password: String,
 }
 
 impl SimStockClient {
-    #[must_use]
-    pub fn http(&self) -> &reqwest::Client {
-        &self.http
-    }
-
-    /// Load credentials from `STOCK_ACCOUNT` and `STOCK_PASSWORD`, and the trading API base
-    /// from `SIM_STOCK_BASE` (default [`urls::SIM_STOCK_API_BASE`]). Call
-    /// `dotenvy::dotenv().ok()` first if using a `.env` file. A trailing slash is added so
-    /// endpoint joins keep the `trading_api` segment.
+    /// Build a client, defaulting `client` to a cookie-storing [`default_client`] and `base`
+    /// to [`urls::base`].
     ///
     /// # Errors
-    /// If a credential env var is missing or the base URL does not parse.
-    pub fn from_env(http: reqwest::Client) -> Result<Self> {
-        let account = std::env::var("STOCK_ACCOUNT")?;
-        let password = std::env::var("STOCK_PASSWORD")?;
+    /// If the default client fails to build.
+    pub fn new(
+        client: Option<reqwest::Client>,
+        base: Option<Url>,
+        account: String,
+        password: String,
+    ) -> Result<Self> {
+        let client = match client {
+            Some(client) => client,
+            None => default_client(true, None)?,
+        };
 
-        let mut base = std::env::var("SIM_STOCK_BASE")
-            .unwrap_or_else(|_| urls::SIM_STOCK_API_BASE.to_string());
-        if !base.ends_with('/') {
-            base.push('/');
-        }
-        let base = Url::parse(&base)?;
+        let base = base.unwrap_or(urls::base());
 
         Ok(Self {
-            http,
+            client,
             base,
             account,
             password,
         })
     }
 
+    /// Load credentials from `STOCK_ACCOUNT` and `STOCK_PASSWORD`.
+    ///
+    /// # Errors
+    /// If a credential env var is missing.
+    pub fn from_env(client: Option<reqwest::Client>, base: Option<Url>) -> Result<Self> {
+        let account = std::env::var("STOCK_ACCOUNT").into_diagnostic()?;
+        let password = std::env::var("STOCK_PASSWORD").into_diagnostic()?;
+
+        Self::new(client, base, account, password)
+    }
+
     /// # Errors
     /// Network or deserialization failure.
+    #[instrument(skip_all, err)]
     pub async fn stock_list(&self) -> Result<HashMap<String, StockInfo>> {
         let list = self
-            .http
-            .get(self.base.join("stock_list")?)
+            .client
+            .get(self.base.join(urls::STOCK_LIST).into_diagnostic()?)
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?
             .json()
-            .await?;
-
-        tracing::info!("stock_list");
+            .await
+            .into_diagnostic()
+            .wrap_err("decode stock_list")?;
 
         Ok(list)
     }
 
     /// # Errors
-    /// Network or deserialization failure.
+    /// Network or deserialization failure, or if the platform rejects the request.
+    #[instrument(skip_all, err)]
     pub async fn stock_market(&self, code: &str) -> Result<MarketType> {
         #[derive(Debug, Deserialize)]
         #[serde(tag = "result", deny_unknown_fields)]
@@ -78,49 +93,60 @@ impl SimStockClient {
         }
 
         let response: Response = self
-            .http
-            .get(self.base.join("stock_type")?)
+            .client
+            .get(self.base.join(urls::STOCK_TYPE).into_diagnostic()?)
             .query(&[("stock_code", code)])
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?
             .json()
-            .await?;
-
-        tracing::info!(?response, "stock_type");
+            .await
+            .into_diagnostic()
+            .wrap_err("decode stock_market")?;
 
         match response {
             Response::Success { r#type, .. } => Ok(r#type),
-            Response::Failed { status } => Err(Error::Api { status }),
+            Response::Failed { status } => bail!("sim_stock rejected request: {status}"),
         }
     }
 
     /// # Errors
-    /// Network or deserialization failure.
+    /// Network or deserialization failure, or if the platform rejects the request.
+    #[instrument(skip_all, err)]
     pub async fn user_stocks(&self) -> Result<Vec<UserStock>> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Response {
-            result: String,
-            status: String,
-            data: Option<Vec<UserStock>>,
+        #[serde(tag = "result", deny_unknown_fields)]
+        enum Response {
+            #[serde(rename = "success")]
+            Success {
+                #[allow(dead_code)]
+                status: String,
+                data: Vec<UserStock>,
+            },
+            #[serde(rename = "failed")]
+            Failed { status: String },
         }
 
         let response: Response = self
-            .http
-            .post(self.base.join("get_user_stocks")?)
+            .client
+            .post(self.base.join(urls::USER_STOCKS).into_diagnostic()?)
             .form(&[("account", &self.account), ("password", &self.password)])
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?
             .json()
-            .await?;
+            .await
+            .into_diagnostic()
+            .wrap_err("decode user_stocks")?;
 
-        tracing::info!(response.result, response.status, "get_user_stocks");
-
-        response.data.ok_or_else(|| Error::Api {
-            status: response.status,
-        })
+        match response {
+            Response::Success { data, .. } => Ok(data),
+            Response::Failed { status } => bail!("sim_stock rejected request: {status}"),
+        }
     }
 
     /// Place a buy order. `lots` is in 張 (board lots of 1,000 shares, the platform's unit),
@@ -128,19 +154,21 @@ impl SimStockClient {
     ///
     /// # Errors
     /// Network failure or if the server rejects the order.
+    #[instrument(skip_all, err)]
     pub async fn buy(&self, code: &str, lots: u64, price: f64) -> Result<()> {
-        self.order("buy", code, lots, price).await
+        self.order(urls::BUY, code, lots, price).await
     }
 
     /// Place a sell order. `lots` is in 張 (board lots of 1,000 shares), `price` is per share.
     ///
     /// # Errors
     /// Network failure or if the server rejects the order.
+    #[instrument(skip_all, err)]
     pub async fn sell(&self, code: &str, lots: u64, price: f64) -> Result<()> {
-        self.order("sell", code, lots, price).await
+        self.order(urls::SELL, code, lots, price).await
     }
 
-    async fn order(&self, action: &str, code: &str, lots: u64, price: f64) -> Result<()> {
+    async fn order(&self, path: &str, code: &str, lots: u64, price: f64) -> Result<()> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Response {
@@ -149,8 +177,8 @@ impl SimStockClient {
         }
 
         let response: Response = self
-            .http
-            .post(self.base.join(action)?)
+            .client
+            .post(self.base.join(path).into_diagnostic()?)
             .form(&[
                 ("account", self.account.as_str()),
                 ("password", self.password.as_str()),
@@ -159,21 +187,139 @@ impl SimStockClient {
                 ("stock_price", &price.to_string()),
             ])
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?
             .json()
-            .await?;
-
-        tracing::info!(response.result, response.status, "{action}");
+            .await
+            .into_diagnostic()
+            .wrap_err("decode order")?;
 
         if response.result != "success" {
-            return Err(Error::Api {
-                status: response.status,
-            });
+            bail!("sim_stock rejected order: {}", response.status);
         }
 
         Ok(())
     }
+
+    /// Establish a session: fetch the login page for its csrf token, then POST credentials.
+    /// The cookie store keeps the session for later scrapes.
+    ///
+    /// # Errors
+    /// Network failure, a missing csrf token, or a rejected login.
+    #[instrument(skip_all, err)]
+    pub async fn login(&self) -> Result<()> {
+        let url = self.base.join(urls::LOGIN).into_diagnostic()?;
+
+        let login_page = self
+            .client
+            .get(url.clone())
+            .send()
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?
+            .text()
+            .await
+            .into_diagnostic()?;
+
+        let login_page = Html::parse_document(&login_page);
+
+        let token =
+            parse_csrf(&login_page).ok_or_else(|| miette!("login page missing csrf token"))?;
+
+        // Django rejects the HTTPS POST without a Referer matching the host.
+        self.client
+            .post(url.clone())
+            .header(reqwest::header::REFERER, url.as_str())
+            .form(&[
+                ("csrfmiddlewaretoken", token),
+                ("account", self.account.as_str()),
+                ("password", self.password.as_str()),
+                ("next", ""),
+            ])
+            .send()
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?;
+
+        Ok(())
+    }
+
+    /// Scrape the account dashboard for cash and headline figures. The trading API has no
+    /// balance endpoint, so this reads the `profile/` page. Call [`login`](Self::login) first
+    /// to establish the session.
+    ///
+    /// # Errors
+    /// Network failure or a missing field on the page.
+    #[instrument(skip_all, err)]
+    pub async fn profile(&self) -> Result<Profile> {
+        let profile_page = self
+            .client
+            .get(self.base.join(urls::PROFILE).into_diagnostic()?)
+            .send()
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?
+            .text()
+            .await
+            .into_diagnostic()?;
+
+        let profile_page = Html::parse_document(&profile_page);
+
+        parse_profile(&profile_page)
+    }
+}
+
+fn parse_csrf(html: &Html) -> Option<&str> {
+    let selector = Selector::parse(r#"input[name="csrfmiddlewaretoken"]"#).ok()?;
+
+    html.select(&selector)
+        .find_map(|input| input.value().attr("value"))
+}
+
+fn parse_profile(html: &Html) -> Result<Profile> {
+    Ok(Profile {
+        usable_cash: field_after(html, "可用餘額")?,
+        total_assets: field_after(html, "資產總額")?,
+        cumulative_return: field_after(html, "累積報酬率")?,
+        trade_count: field_after(html, "交易成功次數")?,
+    })
+}
+
+/// Read the number in the element that follows the one whose text is `label`. The dashboard
+/// renders each metric as a label div immediately followed by a value div, with no stable ids.
+fn field_after<T: FromStr>(html: &Html, label: &str) -> Result<T> {
+    let text =
+        label_sibling_text(html, label).ok_or_else(|| miette!("field not found: {label}"))?;
+
+    // Drop everything but the number: currency `$`, thousands commas, `%`, and surrounding
+    // whitespace and newlines the page wraps values in.
+    let cleaned: String = text
+        .chars()
+        .filter(|character| character.is_ascii_digit() || *character == '.' || *character == '-')
+        .collect();
+
+    cleaned
+        .parse()
+        .map_err(|_| miette!("field {label}: {text:?} is not a number"))
+}
+
+fn label_sibling_text(html: &Html, label: &str) -> Option<String> {
+    let div = Selector::parse("div").ok()?;
+
+    html.select(&div).find_map(|element| {
+        if element.text().collect::<String>().trim() != label {
+            return None;
+        }
+
+        let text = element.next_sibling_element()?.text().collect();
+
+        Some(text)
+    })
 }
 
 #[cfg(test)]
@@ -182,27 +328,45 @@ mod tests {
 
     #[test]
     fn default_base_joins_to_full_endpoints() {
-        let base = Url::parse(urls::SIM_STOCK_API_BASE).unwrap();
+        let base = urls::base();
         assert_eq!(
-            base.join("buy").unwrap().as_str(),
-            "https://ciot.imis.ncku.edu.tw/stock/trading_api/buy"
+            base.join(urls::STOCK_LIST).unwrap().as_str(),
+            "https://ciot.imis.ncku.edu.tw/stock/trading_api/stock_list"
         );
         assert_eq!(
-            base.join("get_user_stocks").unwrap().as_str(),
+            base.join(urls::USER_STOCKS).unwrap().as_str(),
             "https://ciot.imis.ncku.edu.tw/stock/trading_api/get_user_stocks"
+        );
+        assert_eq!(
+            base.join(urls::LOGIN).unwrap().as_str(),
+            "https://ciot.imis.ncku.edu.tw/stock/login/"
+        );
+        assert_eq!(
+            base.join(urls::PROFILE).unwrap().as_str(),
+            "https://ciot.imis.ncku.edu.tw/stock/profile/"
         );
     }
 
     #[test]
-    fn base_without_trailing_slash_keeps_the_trading_api_segment() {
-        let mut base = "https://example.com/stock/trading_api".to_string();
-        if !base.ends_with('/') {
-            base.push('/');
-        }
-        let base = Url::parse(&base).unwrap();
-        assert_eq!(
-            base.join("sell").unwrap().as_str(),
-            "https://example.com/stock/trading_api/sell"
+    fn parse_csrf_reads_hidden_input() {
+        let html = Html::parse_document(
+            r#"<input type="hidden" name="csrfmiddlewaretoken" value="abc123">"#,
         );
+        assert_eq!(parse_csrf(&html), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_profile_extracts_all_fields() {
+        let html = Html::parse_document(
+            r"<div><div>可用餘額</div><div>$22,606,117</div></div>
+            <div><div>資產總額</div><div>$ 101,906,017</div></div>
+            <div><div>累積報酬率</div><div>1.906%</div></div>
+            <div><div>交易成功次數</div><div>61</div></div>",
+        );
+        let profile = parse_profile(&html).unwrap();
+        assert!((profile.usable_cash - 22_606_117.0).abs() < 1e-6);
+        assert!((profile.total_assets - 101_906_017.0).abs() < 1e-6);
+        assert!((profile.cumulative_return - 1.906).abs() < 1e-9);
+        assert_eq!(profile.trade_count, 61);
     }
 }

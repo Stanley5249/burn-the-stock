@@ -1,24 +1,11 @@
-use crate::error::{Error, Result};
-use crate::urls;
 use chrono::NaiveDate;
 use reqwest::StatusCode;
-use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Build an HTTP client carrying the Fugle `X-API-KEY` header on every request. The same
-/// client also drives the sim trading API, which ignores the extra header.
-///
-/// # Errors
-/// If the key is not a valid header value or the client cannot be built.
-pub fn client(api_key: &str) -> Result<reqwest::Client> {
-    let mut headers = HeaderMap::new();
-    headers.insert("X-API-KEY", HeaderValue::from_str(api_key)?);
-    Ok(reqwest::Client::builder()
-        .default_headers(headers)
-        .build()?)
-}
+use crate::error::{Error, Result};
+use crate::urls::fugle as urls;
 
 /// Give up on a rate-limited symbol after this many backoff retries.
 const MAX_QUOTE_RETRIES: u32 = 5;
@@ -30,9 +17,9 @@ const MAX_QUOTE_DELAY_MS: u64 = 8_000;
 /// the pace up to [`MAX_QUOTE_DELAY_MS`] and retries the same symbol, so the rest of the batch
 /// self-tunes to the limit and coverage stays full. A non-rate-limit failure is logged and
 /// skipped, and a symbol still limited after [`MAX_QUOTE_RETRIES`] backoffs is given up on.
-#[tracing::instrument(skip(http, symbols), fields(symbols = symbols.len()))]
+#[tracing::instrument(skip_all, fields(symbols = symbols.len(), delay))]
 pub async fn fetch_quotes(
-    http: &reqwest::Client,
+    client: &reqwest::Client,
     symbols: &[String],
     mut delay: u64,
 ) -> HashMap<String, FugleQuote> {
@@ -41,7 +28,7 @@ pub async fn fetch_quotes(
     for symbol in symbols {
         let mut retries = 0;
         loop {
-            match fetch_quote(http, symbol).await {
+            match fetch_quote(client, symbol).await {
                 Ok(quote) => {
                     quotes.insert(symbol.clone(), quote);
                     break;
@@ -71,11 +58,11 @@ pub async fn fetch_quotes(
 /// # Errors
 /// Network or deserialization failure.
 pub async fn fetch_tickers(
-    http: &reqwest::Client,
+    client: &reqwest::Client,
     market: FugleMarket,
 ) -> Result<FugleTickersResponse> {
-    let response: FugleTickersResponse = http
-        .get(urls::FUGLE_INTRADAY_TICKERS)
+    let response: FugleTickersResponse = client
+        .get(urls::base().join(urls::INTRADAY_TICKERS)?)
         .query(&[
             ("type", "EQUITY"),
             ("exchange", market.exchange()),
@@ -94,10 +81,10 @@ pub async fn fetch_tickers(
 ///
 /// # Errors
 /// Network or deserialization failure.
-pub async fn fetch_ticker(http: &reqwest::Client, symbol: &str) -> Result<FugleTickerDetail> {
-    let url = format!("{}/{}", urls::FUGLE_INTRADAY_TICKER, symbol);
+pub async fn fetch_ticker(client: &reqwest::Client, symbol: &str) -> Result<FugleTickerDetail> {
+    let url = urls::base().join(urls::INTRADAY_TICKER)?.join(symbol)?;
 
-    let response = http
+    let response = client
         .get(url)
         .send()
         .await?
@@ -114,14 +101,14 @@ pub async fn fetch_ticker(http: &reqwest::Client, symbol: &str) -> Result<FugleT
 /// # Errors
 /// Network or deserialization failure.
 pub async fn fetch_candles(
-    http: &reqwest::Client,
+    client: &reqwest::Client,
     symbol: &str,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<FugleCandlesResponse> {
-    let url = format!("{}/{}", urls::FUGLE_HISTORICAL_CANDLES, symbol);
+    let url = urls::base().join(urls::HISTORICAL_CANDLES)?.join(symbol)?;
 
-    let response = http
+    let response = client
         .get(url)
         .query(&[
             ("timeframe", "D"),
@@ -144,10 +131,10 @@ pub async fn fetch_candles(
 ///
 /// # Errors
 /// Network or deserialization failure.
-pub async fn fetch_quote(http: &reqwest::Client, symbol: &str) -> Result<FugleQuote> {
-    let url = format!("{}/{}", urls::FUGLE_INTRADAY_QUOTE, symbol);
+pub async fn fetch_quote(client: &reqwest::Client, symbol: &str) -> Result<FugleQuote> {
+    let url = urls::base().join(urls::INTRADAY_QUOTE)?.join(symbol)?;
 
-    let response = http
+    let response = client
         .get(url)
         .send()
         .await?
@@ -272,4 +259,22 @@ pub struct FugleCandleBar {
     pub volume: Option<f64>,
     pub turnover: Option<f64>,
     pub change: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_joins_symbol_endpoint() {
+        let url = urls::base()
+            .join(urls::INTRADAY_QUOTE)
+            .unwrap()
+            .join("2330")
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/2330"
+        );
+    }
 }
