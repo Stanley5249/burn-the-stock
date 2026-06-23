@@ -29,6 +29,8 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
+Then run the `style-check` agent over the diff to catch naming, writing, and comment violations before wrapping up.
+
 ## Exports
 
 Never re-export a module and its members from the same level. Pick one or the other. If flat access is needed, use a `prelude` module.
