@@ -5,12 +5,11 @@
 //! meant to run once.
 
 use clap::Parser;
-use miette::{Context, IntoDiagnostic, Result, miette};
+use miette::{IntoDiagnostic, Result, miette};
 use polars::prelude::*;
-use reqwest::header::{HeaderMap, HeaderValue};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use stock_client::fugle::fetch_ticker;
+use stock_client::fugle::FugleClient;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -74,24 +73,6 @@ fn load_universe(input: &Path) -> Result<Vec<(String, String)>> {
     Ok(universe)
 }
 
-/// Build a Fugle HTTP client with the `X-API-KEY` header from the environment.
-fn build_client() -> Result<reqwest::Client> {
-    let api_key = std::env::var("FUGLE_API_KEY")
-        .into_diagnostic()
-        .wrap_err("`FUGLE_API_KEY` must be set")?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-API-KEY",
-        HeaderValue::from_str(&api_key).into_diagnostic()?,
-    );
-
-    reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .into_diagnostic()
-}
-
 /// Columns accumulated from per-ticker fetches, ready to become a frame.
 #[derive(Default)]
 struct TickerColumns {
@@ -104,7 +85,7 @@ struct TickerColumns {
 /// Fetch metadata for every `(market, code)`, sleeping `delay` between requests.
 /// A failed lookup is logged and skipped so one bad symbol does not abort the run.
 async fn fetch_all(
-    client: &reqwest::Client,
+    client: &FugleClient,
     universe: &[(String, String)],
     delay: Duration,
 ) -> TickerColumns {
@@ -115,7 +96,7 @@ async fn fetch_all(
             tokio::time::sleep(delay).await;
         }
 
-        match fetch_ticker(client, symbol).await {
+        match client.ticker(symbol).await {
             Ok(detail) => {
                 tracing::info!(market = %market, symbol = %symbol, industry = ?detail.industry, "fetched");
                 columns.markets.push(market.clone());
@@ -151,7 +132,7 @@ fn main() -> Result<()> {
 
     tracing::info!(total = universe.len(), "fetching ticker metadata");
 
-    let client = build_client()?;
+    let client = FugleClient::from_env()?;
     let delay = Duration::from_millis(args.delay_ms);
 
     let runtime = tokio::runtime::Builder::new_current_thread()

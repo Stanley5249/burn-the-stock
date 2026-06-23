@@ -14,8 +14,7 @@ use burn::backend::wgpu::WgpuDevice;
 use chrono::Local;
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result};
-use stock_client::client::default_client;
-use stock_client::fugle::{FugleQuote, fetch_quotes};
+use stock_client::fugle::{FugleClient, FugleQuote};
 use stock_client::sim_stock::SimStockClient;
 use tracing_subscriber::EnvFilter;
 
@@ -39,14 +38,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let device = WgpuDevice::default();
 
-    // One Fugle-keyed client, shared with the sim client (sim ignores the extra header).
-    let api_key = std::env::var("FUGLE_API_KEY")
-        .into_diagnostic()
-        .wrap_err("FUGLE_API_KEY must be set")?;
+    let fugle = FugleClient::from_env()?;
 
-    let client = default_client(true, Some(&api_key))?;
-
-    let sim_stock_client = SimStockClient::from_env(Some(client.clone()), None)?;
+    let sim_stock_client = SimStockClient::from_env(None, None)?;
 
     // login is stateful; do it once so the profile scrape below reuses the session cookie.
     sim_stock_client.login().await.wrap_err("login")?;
@@ -84,7 +78,7 @@ async fn main() -> Result<()> {
     // Sells depend only on held names, never on the ranking, so quote them first and overlap
     // that fetch with `rank`.
     let held_symbols: Vec<String> = holdings.iter().map(|h| h.stock_code_id.clone()).collect();
-    let held_quotes = fetch_quotes(&client, &held_symbols, args.quote_delay_ms).await;
+    let held_quotes = fugle.quotes(&held_symbols, args.quote_delay_ms).await;
 
     // The platform's usable balance is the source of truth for the budget; a failed scrape
     // stops the run rather than trading on a guess.
@@ -116,7 +110,7 @@ async fn main() -> Result<()> {
     // Fire the sells (sim POSTs) while the candidate quote sweep runs on Fugle; the two hit
     // different hosts, so they overlap cleanly.
     let sell_future = place_sells(&sim_stock_client, &sells, args.order_concurrency);
-    let quote_future = fetch_quotes(&client, &candidate_symbols, args.quote_delay_ms);
+    let quote_future = fugle.quotes(&candidate_symbols, args.quote_delay_ms);
 
     let (sell_result, candidate_quotes) = tokio::join!(sell_future, quote_future);
     sell_result?;

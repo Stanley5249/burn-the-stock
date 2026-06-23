@@ -1,48 +1,16 @@
-use chrono::NaiveDate;
 use std::sync::LazyLock;
-use stock_client::error::Error;
-use stock_client::fugle::{FugleMarket, fetch_candles, fetch_quote, fetch_ticker, fetch_tickers};
+use stock_client::fugle::FugleClient;
 
 mod common;
 
-static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(common::fugle_client);
-
-fn date(s: &str) -> NaiveDate {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
-}
-
-#[tokio::test]
-#[ignore = "requires network access and FUGLE_API_KEY"]
-async fn test_fugle_tickers_tse() {
-    let response = fetch_tickers(&CLIENT, FugleMarket::Tse).await.unwrap();
-    let tickers = response.data;
-
-    tracing::info!(count = tickers.len(), "TSE tickers");
-
-    assert!(!tickers.is_empty(), "expected at least one TSE ticker");
-
-    let tsmc = tickers.iter().find(|t| t.symbol == "2330");
-    assert!(tsmc.is_some(), "TSMC (2330) not found in TSE tickers");
-    tracing::info!(name = tsmc.unwrap().name, "TSMC");
-}
-
-#[tokio::test]
-#[ignore = "requires network access and FUGLE_API_KEY"]
-async fn test_fugle_tickers_otc() {
-    let response = fetch_tickers(&CLIENT, FugleMarket::Otc).await.unwrap();
-    let tickers = response.data;
-
-    tracing::info!(count = tickers.len(), "OTC tickers");
-
-    assert!(!tickers.is_empty(), "expected at least one OTC ticker");
-}
+static CLIENT: LazyLock<FugleClient> = LazyLock::new(common::fugle_client);
 
 #[tokio::test]
 #[ignore = "requires network access and FUGLE_API_KEY"]
 async fn test_fugle_ticker_industry() {
     // A general stock and an ETF, both expected to carry an industry.
     for symbol in ["2330", "0050"] {
-        let detail = fetch_ticker(&CLIENT, symbol).await.unwrap();
+        let detail = CLIENT.ticker(symbol).await.unwrap();
 
         tracing::info!(
             symbol = detail.symbol,
@@ -60,48 +28,9 @@ async fn test_fugle_ticker_industry() {
 }
 
 #[tokio::test]
-#[ignore = "requires network access and FUGLE_API_KEY"]
-async fn test_fugle_candles_tsmc() {
-    let from = date("2024-01-01");
-    let to = date("2024-12-31");
-    let response = fetch_candles(&CLIENT, "2330", from, to).await.unwrap();
-
-    tracing::info!(
-        symbol = response.symbol,
-        market = response.market,
-        bars = response.data.len(),
-        "TSMC candles"
-    );
-
-    assert_eq!(response.symbol, "2330");
-    assert!(!response.data.is_empty(), "expected at least one candle");
-
-    let first = &response.data[0];
-    assert!(first.date >= from, "first bar date before requested from");
-    assert!(first.close > 0.0, "expected close price");
-    assert!(first.volume.is_some(), "expected volume");
-
-    // Bars should be in ascending date order.
-    for window in response.data.windows(2) {
-        assert!(
-            window[0].date < window[1].date,
-            "candles not in ascending order"
-        );
-    }
-
-    tracing::info!(
-        date = %first.date,
-        open = ?first.open,
-        close = ?first.close,
-        volume = ?first.volume,
-        "first bar"
-    );
-}
-
-#[tokio::test]
 #[ignore = "requires network access, FUGLE_API_KEY, and an open market session"]
 async fn test_fugle_quote_tsmc() {
-    let quote = fetch_quote(&CLIENT, "2330").await.unwrap();
+    let quote = CLIENT.quote("2330").await.unwrap();
 
     tracing::info!(
         symbol = quote.symbol,
@@ -116,26 +45,5 @@ async fn test_fugle_quote_tsmc() {
     // During a session the high is at or above the low.
     if let (Some(high), Some(low)) = (quote.high_price, quote.low_price) {
         assert!(high >= low, "high below low");
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires network access and FUGLE_API_KEY"]
-async fn test_fugle_candles_ten_years() {
-    // The Fugle API rejects date ranges longer than 1 year with HTTP 400.
-    let from = date("2016-01-01");
-    let to = chrono::Local::now().date_naive();
-
-    let error = fetch_candles(&CLIENT, "2330", from, to).await.unwrap_err();
-
-    tracing::info!(?error, "got expected error for >1-year range");
-
-    match &error {
-        Error::Http(error) => {
-            let status = error.status();
-            let is_4xx = status.is_some_and(|s| s.is_client_error());
-            assert!(is_4xx, "expected 4xx status, got {status:?}");
-        }
-        Error::Url(_) => panic!("expected HTTP error, got {error:?}"),
     }
 }

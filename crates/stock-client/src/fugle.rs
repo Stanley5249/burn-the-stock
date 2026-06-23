@@ -1,11 +1,12 @@
-use chrono::NaiveDate;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
+use url::Url;
 
-use crate::error::{Error, Result};
+use crate::client::default_client;
 use crate::urls::fugle as urls;
+use miette::{IntoDiagnostic, Result, WrapErr};
 
 /// Give up on a rate-limited symbol after this many backoff retries.
 const MAX_QUOTE_RETRIES: u32 = 5;
@@ -13,198 +14,131 @@ const MAX_QUOTE_RETRIES: u32 = 5;
 /// Ceiling on the 429 backoff pace. Raise if the rate limit tightens.
 const MAX_QUOTE_DELAY_MS: u64 = 8_000;
 
-/// Fetch a quote per symbol, sequential and paced by `delay`. On a rate-limit (429) it doubles
-/// the pace up to [`MAX_QUOTE_DELAY_MS`] and retries the same symbol, so the rest of the batch
-/// self-tunes to the limit and coverage stays full. A non-rate-limit failure is logged and
-/// skipped, and a symbol still limited after [`MAX_QUOTE_RETRIES`] backoffs is given up on.
-#[tracing::instrument(skip_all, fields(symbols = symbols.len(), delay))]
-pub async fn fetch_quotes(
-    client: &reqwest::Client,
-    symbols: &[String],
-    mut delay: u64,
-) -> HashMap<String, FugleQuote> {
-    let mut quotes = HashMap::with_capacity(symbols.len());
+/// Fugle market data client. Owns a `reqwest::Client` carrying the `X-API-KEY` header.
+pub struct FugleClient {
+    pub client: reqwest::Client,
+}
 
-    for symbol in symbols {
-        let mut retries = 0;
-        loop {
-            match fetch_quote(client, symbol).await {
-                Ok(quote) => {
-                    quotes.insert(symbol.clone(), quote);
-                    break;
-                }
-                Err(Error::Http(error))
-                    if retries < MAX_QUOTE_RETRIES
-                        && error.status() == Some(StatusCode::TOO_MANY_REQUESTS) =>
-                {
-                    retries += 1;
-                    delay = delay.saturating_mul(2).min(MAX_QUOTE_DELAY_MS);
-                    tracing::warn!(%symbol, delay, retries, "Fugle rate limit, backing off");
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                }
+impl FugleClient {
+    #[must_use]
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
+    }
+
+    /// Build a client from `FUGLE_API_KEY`.
+    ///
+    /// # Errors
+    /// If the env var is missing or the client fails to build.
+    pub fn from_env() -> Result<Self> {
+        let api_key = std::env::var("FUGLE_API_KEY")
+            .into_diagnostic()
+            .wrap_err("FUGLE_API_KEY must be set")?;
+        let client = default_client(false, Some(&api_key))?;
+        Ok(Self::new(client))
+    }
+
+    /// Fetch a quote per symbol, sequential and paced by `delay`. On a rate-limit (429) it
+    /// doubles the pace up to [`MAX_QUOTE_DELAY_MS`] and retries the same symbol, so the rest of
+    /// the batch self-tunes to the limit and coverage stays full. A non-rate-limit failure is
+    /// logged and skipped, and a symbol still limited after [`MAX_QUOTE_RETRIES`] backoffs is
+    /// given up on.
+    #[tracing::instrument(skip_all, fields(symbols = symbols.len(), delay))]
+    pub async fn quotes(&self, symbols: &[String], mut delay: u64) -> HashMap<String, FugleQuote> {
+        let mut quotes = HashMap::with_capacity(symbols.len());
+
+        for symbol in symbols {
+            let url = match quote_url(symbol) {
+                Ok(url) => url,
                 Err(error) => {
-                    tracing::warn!(%symbol, %error, "quote failed");
-                    break;
+                    tracing::warn!(%symbol, %error, "bad quote url");
+                    continue;
+                }
+            };
+
+            let mut retries = 0;
+            loop {
+                match self.request_quote(url.clone()).await {
+                    Ok(quote) => {
+                        quotes.insert(symbol.clone(), quote);
+                        break;
+                    }
+                    Err(error)
+                        if retries < MAX_QUOTE_RETRIES
+                            && error.status() == Some(StatusCode::TOO_MANY_REQUESTS) =>
+                    {
+                        retries += 1;
+                        delay = delay.saturating_mul(2).min(MAX_QUOTE_DELAY_MS);
+                        tracing::warn!(%symbol, delay, retries, "Fugle rate limit, backing off");
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%symbol, %error, "quote failed");
+                        break;
+                    }
                 }
             }
+            tokio::time::sleep(Duration::from_millis(delay)).await;
         }
-        tokio::time::sleep(Duration::from_millis(delay)).await;
-    }
-    quotes
-}
-
-/// Fetch the list of equity tickers for `market`.
-///
-/// # Errors
-/// Network or deserialization failure.
-pub async fn fetch_tickers(
-    client: &reqwest::Client,
-    market: FugleMarket,
-) -> Result<FugleTickersResponse> {
-    let response: FugleTickersResponse = client
-        .get(urls::base().join(urls::INTRADAY_TICKERS)?)
-        .query(&[
-            ("type", "EQUITY"),
-            ("exchange", market.exchange()),
-            ("market", market.as_str()),
-        ])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    Ok(response)
-}
-
-/// Fetch the static metadata for a single `symbol`.
-///
-/// # Errors
-/// Network or deserialization failure.
-pub async fn fetch_ticker(client: &reqwest::Client, symbol: &str) -> Result<FugleTickerDetail> {
-    let url = urls::base().join(urls::INTRADAY_TICKER)?.join(symbol)?;
-
-    let response = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    Ok(response)
-}
-
-/// Fetch adjusted daily candles for `symbol` over `[from, to]`, at most
-/// [`CANDLE_CHUNK_DAYS`] days.
-///
-/// # Errors
-/// Network or deserialization failure.
-pub async fn fetch_candles(
-    client: &reqwest::Client,
-    symbol: &str,
-    from: NaiveDate,
-    to: NaiveDate,
-) -> Result<FugleCandlesResponse> {
-    let url = urls::base().join(urls::HISTORICAL_CANDLES)?.join(symbol)?;
-
-    let response = client
-        .get(url)
-        .query(&[
-            ("timeframe", "D"),
-            ("adjusted", "true"),
-            ("sort", "asc"),
-            ("from", from.to_string().as_str()),
-            ("to", to.to_string().as_str()),
-        ])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    Ok(response)
-}
-
-/// Fetch the live intraday quote for `symbol`, the morning range and last trade the live
-/// trader sets limit prices from.
-///
-/// # Errors
-/// Network or deserialization failure.
-pub async fn fetch_quote(client: &reqwest::Client, symbol: &str) -> Result<FugleQuote> {
-    let url = urls::base().join(urls::INTRADAY_QUOTE)?.join(symbol)?;
-
-    let response = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    Ok(response)
-}
-
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
-pub enum FugleMarket {
-    Tse,
-    Otc,
-    Esb,
-    Tib,
-    Psb,
-}
-
-impl FugleMarket {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FugleMarket::Tse => "TSE",
-            FugleMarket::Otc => "OTC",
-            FugleMarket::Esb => "ESB",
-            FugleMarket::Tib => "TIB",
-            FugleMarket::Psb => "PSB",
-        }
+        quotes
     }
 
-    #[must_use]
-    pub fn exchange(self) -> &'static str {
-        match self {
-            FugleMarket::Tse => "TWSE",
-            FugleMarket::Otc | FugleMarket::Esb | FugleMarket::Tib | FugleMarket::Psb => "TPEx",
-        }
+    /// Fetch the live intraday quote for `symbol`, the morning range and last trade the live
+    /// trader sets limit prices from.
+    ///
+    /// # Errors
+    /// Network or deserialization failure.
+    pub async fn quote(&self, symbol: &str) -> Result<FugleQuote> {
+        let url = quote_url(symbol)?;
+        self.request_quote(url)
+            .await
+            .into_diagnostic()
+            .wrap_err("fetch quote")
+    }
+
+    /// Fetch the static metadata for a single `symbol`.
+    ///
+    /// # Errors
+    /// Network or deserialization failure.
+    pub async fn ticker(&self, symbol: &str) -> Result<FugleTickerDetail> {
+        let url = urls::base()
+            .join(&format!("{}/{symbol}", urls::INTRADAY_TICKER))
+            .into_diagnostic()
+            .wrap_err("build ticker url")?;
+
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?
+            .json()
+            .await
+            .into_diagnostic()
+            .wrap_err("decode ticker")?;
+
+        Ok(response)
+    }
+
+    /// Inner quote request kept at the reqwest level so [`quotes`](Self::quotes) can read the
+    /// HTTP status for the 429 backoff.
+    async fn request_quote(&self, url: Url) -> reqwest::Result<FugleQuote> {
+        self.client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
     }
 }
 
-impl std::fmt::Display for FugleMarket {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FugleTickersResponse {
-    pub date: String,
-    pub r#type: String,
-    pub exchange: String,
-    pub market: Option<String>,
-    #[serde(rename = "isNormal")]
-    pub is_normal: Option<bool>,
-    #[serde(rename = "isAttention")]
-    pub is_attention: Option<bool>,
-    #[serde(rename = "isDisposition")]
-    pub is_disposition: Option<bool>,
-    #[serde(rename = "isHalted")]
-    pub is_halted: Option<bool>,
-    pub data: Vec<FugleTickerItem>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FugleTickerItem {
-    pub symbol: String,
-    pub name: String,
-    pub industry: Option<String>,
+fn quote_url(symbol: &str) -> Result<Url> {
+    urls::base()
+        .join(&format!("{}/{symbol}", urls::INTRADAY_QUOTE))
+        .into_diagnostic()
+        .wrap_err("build quote url")
 }
 
 /// Static metadata for a single ticker. No `deny_unknown_fields`: the endpoint
@@ -235,45 +169,14 @@ pub struct FugleQuote {
     pub last_price: Option<f64>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FugleCandlesResponse {
-    pub symbol: String,
-    pub r#type: String,
-    pub exchange: String,
-    pub market: String,
-    pub timeframe: String,
-    pub sort: Option<String>,
-    pub adjusted: Option<bool>,
-    pub data: Vec<FugleCandleBar>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FugleCandleBar {
-    pub date: NaiveDate,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub volume: Option<f64>,
-    pub turnover: Option<f64>,
-    pub change: Option<f64>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn base_joins_symbol_endpoint() {
-        let url = urls::base()
-            .join(urls::INTRADAY_QUOTE)
-            .unwrap()
-            .join("2330")
-            .unwrap();
+    fn quote_url_appends_symbol() {
         assert_eq!(
-            url.as_str(),
+            quote_url("2330").unwrap().as_str(),
             "https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/2330"
         );
     }

@@ -7104,14 +7104,12 @@ name = "stock-client"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "chrono-tz",
  "dotenvy",
  "miette",
  "reqwest 0.13.4",
  "rust_decimal",
  "scraper",
  "serde",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",

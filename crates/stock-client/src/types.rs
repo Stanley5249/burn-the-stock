@@ -3,13 +3,6 @@ use miette::{Result, bail};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-/// One entry from the sim server's `stock_list` endpoint.
-#[derive(Debug, Deserialize)]
-pub struct StockInfo {
-    pub name: String,
-    pub r#type: MarketType,
-}
-
 /// One position as returned by the sim server's `get_user_stocks` endpoint.
 #[derive(Debug, Deserialize)]
 pub struct UserStock {

@@ -1,13 +1,12 @@
 use miette::{Context, IntoDiagnostic, Result, bail, miette};
 use scraper::{Element, Html, Selector};
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::instrument;
 use url::Url;
 
 use crate::client::default_client;
-use crate::types::{MarketType, Profile, StockInfo, UserStock};
+use crate::types::{Profile, UserStock};
 use crate::urls::sim_stock as urls;
 
 pub struct SimStockClient {
@@ -53,63 +52,6 @@ impl SimStockClient {
         let password = std::env::var("STOCK_PASSWORD").into_diagnostic()?;
 
         Self::new(client, base, account, password)
-    }
-
-    /// # Errors
-    /// Network or deserialization failure.
-    #[instrument(skip_all, err)]
-    pub async fn stock_list(&self) -> Result<HashMap<String, StockInfo>> {
-        let list = self
-            .client
-            .get(self.base.join(urls::STOCK_LIST).into_diagnostic()?)
-            .send()
-            .await
-            .into_diagnostic()?
-            .error_for_status()
-            .into_diagnostic()?
-            .json()
-            .await
-            .into_diagnostic()
-            .wrap_err("decode stock_list")?;
-
-        Ok(list)
-    }
-
-    /// # Errors
-    /// Network or deserialization failure, or if the platform rejects the request.
-    #[instrument(skip_all, err)]
-    pub async fn stock_market(&self, code: &str) -> Result<MarketType> {
-        #[derive(Debug, Deserialize)]
-        #[serde(tag = "result", deny_unknown_fields)]
-        enum Response {
-            #[serde(rename = "success")]
-            Success {
-                #[allow(dead_code)]
-                stock_code: String,
-                r#type: MarketType,
-            },
-            #[serde(rename = "failed")]
-            Failed { status: String },
-        }
-
-        let response: Response = self
-            .client
-            .get(self.base.join(urls::STOCK_TYPE).into_diagnostic()?)
-            .query(&[("stock_code", code)])
-            .send()
-            .await
-            .into_diagnostic()?
-            .error_for_status()
-            .into_diagnostic()?
-            .json()
-            .await
-            .into_diagnostic()
-            .wrap_err("decode stock_market")?;
-
-        match response {
-            Response::Success { r#type, .. } => Ok(r#type),
-            Response::Failed { status } => bail!("sim_stock rejected request: {status}"),
-        }
     }
 
     /// # Errors
@@ -330,12 +272,12 @@ mod tests {
     fn default_base_joins_to_full_endpoints() {
         let base = urls::base();
         assert_eq!(
-            base.join(urls::STOCK_LIST).unwrap().as_str(),
-            "https://ciot.imis.ncku.edu.tw/stock/trading_api/stock_list"
-        );
-        assert_eq!(
             base.join(urls::USER_STOCKS).unwrap().as_str(),
             "https://ciot.imis.ncku.edu.tw/stock/trading_api/get_user_stocks"
+        );
+        assert_eq!(
+            base.join(urls::BUY).unwrap().as_str(),
+            "https://ciot.imis.ncku.edu.tw/stock/trading_api/buy"
         );
         assert_eq!(
             base.join(urls::LOGIN).unwrap().as_str(),

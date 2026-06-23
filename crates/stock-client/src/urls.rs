@@ -10,8 +10,6 @@ pub mod sim_stock {
 
     pub const BASE: &str = "https://ciot.imis.ncku.edu.tw/stock/";
 
-    pub const STOCK_LIST: &str = "trading_api/stock_list";
-    pub const STOCK_TYPE: &str = "trading_api/stock_type";
     pub const USER_STOCKS: &str = "trading_api/get_user_stocks";
     pub const BUY: &str = "trading_api/buy";
     pub const SELL: &str = "trading_api/sell";
@@ -32,8 +30,6 @@ pub mod fugle {
 
     pub const BASE: &str = "https://api.fugle.tw/marketdata/v1.0/stock/";
 
-    pub const INTRADAY_TICKERS: &str = "intraday/tickers";
     pub const INTRADAY_TICKER: &str = "intraday/ticker";
     pub const INTRADAY_QUOTE: &str = "intraday/quote";
-    pub const HISTORICAL_CANDLES: &str = "historical/candles";
 }

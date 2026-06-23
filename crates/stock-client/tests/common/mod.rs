@@ -5,7 +5,7 @@
 
 use std::sync::LazyLock;
 
-use stock_client::client::default_client;
+use stock_client::fugle::FugleClient;
 use stock_client::sim_stock::SimStockClient;
 
 static INIT: LazyLock<()> = LazyLock::new(|| {
@@ -15,11 +15,10 @@ static INIT: LazyLock<()> = LazyLock::new(|| {
         .init();
 });
 
-/// Fugle-keyed client, no cookie store.
-pub fn fugle_client() -> reqwest::Client {
+/// Fugle-keyed client (no cookie store) from env.
+pub fn fugle_client() -> FugleClient {
     LazyLock::force(&INIT);
-    let api_key = std::env::var("FUGLE_API_KEY").expect("FUGLE_API_KEY must be set");
-    default_client(false, Some(&api_key)).expect("build fugle client")
+    FugleClient::from_env().expect("build fugle client")
 }
 
 /// `sim_stock` client (cookie store) from env credentials.
