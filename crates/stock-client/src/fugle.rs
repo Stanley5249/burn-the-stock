@@ -1,10 +1,10 @@
 use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
 use url::Url;
 
-use crate::client::default_client;
 use crate::urls::fugle as urls;
 use miette::{IntoDiagnostic, Result, WrapErr};
 
@@ -20,21 +20,32 @@ pub struct FugleClient {
 }
 
 impl FugleClient {
-    #[must_use]
-    pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
-    }
-
-    /// Build a client from `FUGLE_API_KEY`.
+    /// Build a client from `FUGLE_API_KEY`. The key rides on the `X-API-KEY` header; no cookie
+    /// store, since Fugle is stateless.
     ///
     /// # Errors
-    /// If the env var is missing or the client fails to build.
+    /// If the env var is missing, the key is not a valid header value, or the client fails to
+    /// build.
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("FUGLE_API_KEY")
             .into_diagnostic()
             .wrap_err("FUGLE_API_KEY must be set")?;
-        let client = default_client(false, Some(&api_key))?;
-        Ok(Self::new(client))
+
+        let value = HeaderValue::from_str(&api_key)
+            .into_diagnostic()
+            .wrap_err("invalid api key")?;
+
+        let mut headers = HeaderMap::new();
+        // `from_static` panics on uppercase; header names are case-insensitive on the wire.
+        headers.insert(HeaderName::from_static("x-api-key"), value);
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .into_diagnostic()
+            .wrap_err("build fugle client")?;
+
+        Ok(Self { client })
     }
 
     /// Fetch a quote per symbol, sequential and paced by `delay`. On a rate-limit (429) it

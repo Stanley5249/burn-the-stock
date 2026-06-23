@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
 
     let fugle = FugleClient::from_env()?;
 
-    let sim_stock_client = SimStockClient::from_env(None, None)?;
+    let sim_stock_client = SimStockClient::from_env(None)?;
 
     // login is stateful; do it once so the profile scrape below reuses the session cookie.
     sim_stock_client.login().await.wrap_err("login")?;

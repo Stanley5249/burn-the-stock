@@ -5,7 +5,6 @@ use std::str::FromStr;
 use tracing::instrument;
 use url::Url;
 
-use crate::client::default_client;
 use crate::types::{Profile, UserStock};
 use crate::urls::sim_stock as urls;
 
@@ -17,21 +16,17 @@ pub struct SimStockClient {
 }
 
 impl SimStockClient {
-    /// Build a client, defaulting `client` to a cookie-storing [`default_client`] and `base`
-    /// to [`urls::base`].
+    /// Build a client with a cookie-storing reqwest client (the login session needs it) and
+    /// `base` defaulting to [`urls::base`].
     ///
     /// # Errors
-    /// If the default client fails to build.
-    pub fn new(
-        client: Option<reqwest::Client>,
-        base: Option<Url>,
-        account: String,
-        password: String,
-    ) -> Result<Self> {
-        let client = match client {
-            Some(client) => client,
-            None => default_client(true, None)?,
-        };
+    /// If the client fails to build.
+    pub fn new(base: Option<Url>, account: String, password: String) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .into_diagnostic()
+            .wrap_err("build sim client")?;
 
         let base = base.unwrap_or(urls::base());
 
@@ -47,11 +42,11 @@ impl SimStockClient {
     ///
     /// # Errors
     /// If a credential env var is missing.
-    pub fn from_env(client: Option<reqwest::Client>, base: Option<Url>) -> Result<Self> {
+    pub fn from_env(base: Option<Url>) -> Result<Self> {
         let account = std::env::var("STOCK_ACCOUNT").into_diagnostic()?;
         let password = std::env::var("STOCK_PASSWORD").into_diagnostic()?;
 
-        Self::new(client, base, account, password)
+        Self::new(base, account, password)
     }
 
     /// # Errors
