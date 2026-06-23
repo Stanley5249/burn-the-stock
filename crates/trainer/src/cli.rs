@@ -35,7 +35,7 @@ pub struct TrainArgs {
     /// Aggregated OHLCV history.
     #[arg(
         long,
-        default_value = "data/yfinance/stocks.parquet",
+        default_value = "data/yfinance/stock_history.parquet",
         help_heading = "Data"
     )]
     pub data: PathBuf,
@@ -186,7 +186,7 @@ pub struct BacktestArgs {
 
     /// OHLCV history to backtest over. Must hold the full ticker universe so the
     /// cross-sectional features match training.
-    #[arg(long, default_value = "data/yfinance/stocks.parquet")]
+    #[arg(long, default_value = "data/yfinance/stock_history.parquet")]
     pub data: PathBuf,
 
     /// Train/valid boundary to score from; the lookback reaches before it, so tradeable

@@ -10,6 +10,7 @@ use burn::prelude::*;
 use chrono::NaiveDate;
 use miette::{IntoDiagnostic, Result, ensure};
 use polars::prelude::*;
+use stock_data::read::History;
 
 use crate::features::{
     CLOSE, DATE, FEATURE, HIGH, LOW, NUM_FEATURES, OPEN, TICKER, feature_array,
@@ -60,10 +61,8 @@ impl TickerFrames {
     ///
     /// # Errors
     /// If the parquet cannot be scanned.
-    pub fn standardized_long(path: &Path) -> PolarsResult<LazyFrame> {
-        let raw =
-            LazyFrame::scan_parquet(PlRefPath::try_from_path(path)?, ScanArgsParquet::default())?;
-        Ok(standardize(raw))
+    pub fn standardized_long(path: &Path) -> Result<LazyFrame> {
+        Ok(standardize(History::scan(path)?.lazy()))
     }
 
     /// Partition a standardized long frame into the per-ticker store. The single place
@@ -82,8 +81,9 @@ impl TickerFrames {
     ///
     /// # Errors
     /// If the parquet cannot be scanned or standardized.
-    pub fn load(path: &Path) -> PolarsResult<Self> {
-        Self::partition_long(&Self::standardized_long(path)?.collect()?)
+    pub fn load(path: &Path) -> Result<Self> {
+        let long = Self::standardized_long(path)?.collect().into_diagnostic()?;
+        Self::partition_long(&long).into_diagnostic()
     }
 
     /// Each ticker's flattened f32 `FEATURE` values as one contiguous `Series`
@@ -234,11 +234,13 @@ impl TickerFrames {
         let mut valid = Vec::with_capacity(self.frames.len());
 
         for frame in &self.frames {
-            let dates = date_buffer(frame).into_diagnostic()?;
-            // Dates ascend, so this is the count of rows before the cutoff.
-            let split = dates.partition_point(|&day| day < cutoff);
-            let left = frame.head(Some(split));
-            let right = frame.tail(Some(frame.height() - split));
+            // until is exclusive and since inclusive, so they partition cleanly at cutoff.
+            let left = History::from_lazy(frame.clone().lazy())
+                .until(cutoff)
+                .collect()?;
+            let right = History::from_lazy(frame.clone().lazy())
+                .since(cutoff)
+                .collect()?;
 
             if left.height() >= steps {
                 train.push(left);
@@ -498,6 +500,13 @@ mod tests {
         assert_eq!(valid.frames.len(), 3);
         assert_eq!(train.frames[0].height(), 10);
         assert_eq!(valid.frames[0].height(), 10);
+
+        // Guard the until/since boundary: train ends before cutoff, valid starts at it.
+        let (train_lo, train_hi) = date_endpoints(&train.frames[0]).unwrap().unwrap();
+        let (valid_lo, _) = date_endpoints(&valid.frames[0]).unwrap().unwrap();
+        assert_eq!(train_lo, NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+        assert_eq!(train_hi, NaiveDate::from_ymd_opt(1970, 1, 10).unwrap());
+        assert_eq!(valid_lo, cutoff);
     }
 
     #[test]

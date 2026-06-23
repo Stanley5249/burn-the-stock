@@ -1,0 +1,40 @@
+[package]
+name = "stock-data"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { workspace = true, features = ["clock"] }
+clap = { workspace = true, features = ["derive"], optional = true }
+dotenvy = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+miette = { workspace = true }
+polars = {
+  workspace = true,
+  features = ["dtype-date", "lazy", "parquet", "strings"]
+}
+stock-client = { path = "../stock-client", optional = true }
+tokio = {
+  workspace = true,
+  features = ["macros", "rt-multi-thread"],
+  optional = true
+}
+tracing = { workspace = true }
+tracing-subscriber = {
+  workspace = true,
+  features = ["env-filter", "fmt"],
+  optional = true
+}
+
+[features]
+fetch = [
+  "dep:clap",
+  "dep:dotenvy",
+  "dep:futures",
+  "dep:stock-client",
+  "dep:tokio",
+  "dep:tracing-subscriber",
+]
+
+[lints]
+workspace = true

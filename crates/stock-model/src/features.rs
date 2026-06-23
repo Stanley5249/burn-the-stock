@@ -7,18 +7,12 @@ use std::f64::consts::E;
 
 use polars::prelude::*;
 
+/// Raw source columns the transform reads, owned by the data-layer schema.
+pub use stock_data::schema::{CLOSE, CODE, DATE, HIGH, LOW, OPEN, VOLUME};
+
 /// Ticker code after the rename, and the packed feature array column name.
 pub const TICKER: PlSmallStr = PlSmallStr::from_static("ticker");
 pub const FEATURE: PlSmallStr = PlSmallStr::from_static("feature");
-
-/// Raw source columns the transform reads.
-pub const CODE: PlSmallStr = PlSmallStr::from_static("code");
-pub const DATE: PlSmallStr = PlSmallStr::from_static("date");
-pub const OPEN: PlSmallStr = PlSmallStr::from_static("open");
-pub const HIGH: PlSmallStr = PlSmallStr::from_static("high");
-pub const LOW: PlSmallStr = PlSmallStr::from_static("low");
-pub const CLOSE: PlSmallStr = PlSmallStr::from_static("close");
-pub const VOLUME: PlSmallStr = PlSmallStr::from_static("volume");
 
 const OPEN_RETURN: PlSmallStr = PlSmallStr::from_static("open_return");
 const HIGH_RETURN: PlSmallStr = PlSmallStr::from_static("high_return");

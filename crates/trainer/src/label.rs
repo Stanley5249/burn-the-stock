@@ -22,8 +22,7 @@ const RAW_MFE: PlSmallStr = PlSmallStr::from_static("raw_mfe");
 /// # Errors
 /// If the parquet cannot be scanned or the label frame cannot be built.
 pub fn load_labeled(path: &Path, horizon: usize) -> Result<TickerFrames> {
-    let long = TickerFrames::standardized_long(path)
-        .into_diagnostic()?
+    let long = TickerFrames::standardized_long(path)?
         .with_columns([forward_mfe_expr(horizon)])
         .with_columns([zscore_label_expr()])
         // The only null labels are each ticker's trailing `horizon` rows.

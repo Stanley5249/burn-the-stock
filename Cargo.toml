@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/portfolio",
   "crates/stock-client",
+  "crates/stock-data",
   "crates/stock-model",
   "crates/tickers",
   "crates/trader",

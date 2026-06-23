@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 #[command(about = "Prefetch Fugle ticker industry metadata into parquet")]
 struct Args {
     /// Price parquet to read the (market, code) universe from.
-    #[arg(long, default_value = "data/yfinance/stocks.parquet")]
+    #[arg(long, default_value = "data/yfinance/stock_history.parquet")]
     input: PathBuf,
 
     /// Output parquet path.

@@ -20,6 +20,7 @@ polars = {
     "strings"
   ]
 }
+stock-data = { path = "../stock-data" }
 tracing = { workspace = true }
 
 [dev-dependencies]

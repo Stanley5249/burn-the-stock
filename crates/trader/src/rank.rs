@@ -8,11 +8,11 @@ use burn::backend::wgpu::WgpuDevice;
 use burn::config::Config;
 use burn::module::Module;
 use burn::record::CompactRecorder;
-use chrono::{Duration, NaiveDate};
-use miette::{Context, IntoDiagnostic, Result, miette};
-use polars::prelude::*;
+use chrono::NaiveDate;
+use miette::{Context, IntoDiagnostic, Result};
+use polars::prelude::LazyFrame;
+use stock_data::read::History;
 use stock_model::data::TickerFrames;
-use stock_model::features::DATE;
 use stock_model::inference::{InferenceConfig, score};
 
 use crate::cli::Args;
@@ -86,39 +86,14 @@ pub fn select_candidates(
 /// days. The per-date z-score is unaffected since each retained date still holds the full
 /// universe.
 fn recent_frame(path: &Path, lookback: i64) -> Result<LazyFrame> {
-    let frame = LazyFrame::scan_parquet(
-        PlRefPath::try_from_path(path).into_diagnostic()?,
-        ScanArgsParquet::default(),
-    )
-    .into_diagnostic()?
-    .with_column(col(DATE).cast(DataType::Date));
-
-    let cutoff = data_max_date(path)? - Duration::days(lookback);
-
-    Ok(frame.filter(col(DATE).gt_eq(lit(cutoff))))
+    Ok(History::scan(path)?.recent(lookback)?.lazy())
 }
 
-/// The most recent dated bar in the OHLCV parquet, used both to anchor the recent-tail scan
-/// and to verify the data is fresh enough for the session being traded.
+/// The most recent dated bar in the OHLCV parquet, used to verify the data is fresh enough
+/// for the session being traded.
 ///
 /// # Errors
 /// If the parquet cannot be scanned or holds no dated rows.
 pub fn data_max_date(path: &Path) -> Result<NaiveDate> {
-    LazyFrame::scan_parquet(
-        PlRefPath::try_from_path(path).into_diagnostic()?,
-        ScanArgsParquet::default(),
-    )
-    .into_diagnostic()?
-    .with_column(col(DATE).cast(DataType::Date))
-    .select([col(DATE).max()])
-    .collect()
-    .into_diagnostic()?
-    .column(&DATE)
-    .into_diagnostic()?
-    .date()
-    .into_diagnostic()?
-    .as_date_iter()
-    .flatten()
-    .next()
-    .ok_or_else(|| miette!("parquet has no dated rows"))
+    History::scan(path)?.last_date()
 }

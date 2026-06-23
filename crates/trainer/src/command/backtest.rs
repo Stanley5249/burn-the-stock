@@ -41,7 +41,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         .into_diagnostic()?;
 
     // Every row is loaded, so the most recent bars stay tradeable.
-    let store = TickerFrames::load(&args.data).into_diagnostic()?;
+    let store = TickerFrames::load(&args.data)?;
 
     // The split boundary is the run's stored `valid_from`, so the held-out window matches
     // training exactly even if the parquet grew since. An explicit flag still overrides.

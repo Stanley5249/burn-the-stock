@@ -7119,6 +7119,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "stock-data"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "dotenvy",
+ "futures",
+ "miette",
+ "polars",
+ "stock-client",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "stock-model"
 version = "0.1.0"
 dependencies = [
@@ -7126,6 +7142,7 @@ dependencies = [
  "chrono",
  "miette",
  "polars",
+ "stock-data",
  "tracing",
 ]
 
@@ -7995,6 +8012,7 @@ dependencies = [
  "portfolio",
  "serde_json",
  "stock-client",
+ "stock-data",
  "stock-model",
  "tokio",
  "tracing",

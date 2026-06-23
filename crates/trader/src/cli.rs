@@ -13,7 +13,7 @@ pub struct Args {
 
     /// OHLCV parquet to score; only its recent tail is read. Must be current through
     /// yesterday's close, so refresh it with the downloader before running.
-    #[arg(long, default_value = "data/yfinance/stocks.parquet")]
+    #[arg(long, default_value = "data/yfinance/stock_history.parquet")]
     pub data: PathBuf,
 
     /// Minimum predicted score (per-date z-scored MFE) to buy.
