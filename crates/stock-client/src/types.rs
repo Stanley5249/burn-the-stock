@@ -89,6 +89,13 @@ impl OhlcvRow {
     }
 }
 
+/// One symbol from the sim server's `stock_list` universe.
+#[derive(Debug, Clone)]
+pub struct StockListEntry {
+    pub code: String,
+    pub market_type: MarketType,
+}
+
 /// Market label as returned by the sim server's `/stock_type` endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum MarketType {

@@ -3,6 +3,10 @@ name = "stock-data"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "refresh"
+required-features = ["fetch"]
+
 [dependencies]
 chrono = { workspace = true, features = ["clock"] }
 clap = { workspace = true, features = ["derive"], optional = true }

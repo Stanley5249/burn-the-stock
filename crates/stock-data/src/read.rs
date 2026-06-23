@@ -64,14 +64,6 @@ impl History {
         Ok(self.since(cutoff))
     }
 
-    /// Append or replace columns, e.g. label or `code`/`market` tags.
-    #[must_use]
-    pub fn with(self, exprs: Vec<Expr>) -> Self {
-        Self {
-            lazy: self.lazy.with_columns(exprs),
-        }
-    }
-
     /// The accumulated lazy frame.
     pub fn lazy(self) -> LazyFrame {
         self.lazy
