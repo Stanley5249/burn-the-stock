@@ -23,6 +23,17 @@ pub mod twse {
         "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule";
 }
 
+pub mod yahoo {
+    /// Chart API base; the symbol is appended.
+    pub const CHART_BASE: &str = "https://query1.finance.yahoo.com/v8/finance/chart/";
+
+    /// Priming GET seeds the consent cookie some regions require.
+    pub const CONSENT: &str = "https://fc.yahoo.com/consent";
+
+    /// Desktop browser UA avoids trivial bot blocking.
+    pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+}
+
 pub mod fugle {
     use url::Url;
 

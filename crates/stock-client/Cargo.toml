@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 chrono = { workspace = true, features = ["clock", "serde", "std"] }
 dotenvy.workspace = true
+futures.workspace = true
 miette.workspace = true
+polars = { workspace = true, features = ["dtype-date", "lazy"] }
 reqwest = {
   workspace = true,
   features = ["default-tls", "cookies", "form", "json"]

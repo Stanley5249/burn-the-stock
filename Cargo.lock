@@ -7105,7 +7105,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dotenvy",
+ "futures",
  "miette",
+ "polars",
  "reqwest 0.13.4",
  "rust_decimal",
  "scraper",
