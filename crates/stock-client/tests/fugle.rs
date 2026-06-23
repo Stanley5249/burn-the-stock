@@ -30,7 +30,8 @@ async fn test_fugle_ticker_industry() {
 #[tokio::test]
 #[ignore = "requires network access, FUGLE_API_KEY, and an open market session"]
 async fn test_fugle_quote_tsmc() {
-    let quote = CLIENT.quote("2330").await.unwrap();
+    let quotes = CLIENT.quotes(&["2330".to_string()], 0).await;
+    let quote = quotes.get("2330").expect("quote for 2330");
 
     tracing::info!(
         symbol = quote.symbol,

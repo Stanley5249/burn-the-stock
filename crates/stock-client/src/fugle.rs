@@ -93,19 +93,6 @@ impl FugleClient {
         quotes
     }
 
-    /// Fetch the live intraday quote for `symbol`, the morning range and last trade the live
-    /// trader sets limit prices from.
-    ///
-    /// # Errors
-    /// Network or deserialization failure.
-    pub async fn quote(&self, symbol: &str) -> Result<FugleQuote> {
-        let url = quote_url(symbol)?;
-        self.request_quote(url)
-            .await
-            .into_diagnostic()
-            .wrap_err("fetch quote")
-    }
-
     /// Fetch the static metadata for a single `symbol`.
     ///
     /// # Errors

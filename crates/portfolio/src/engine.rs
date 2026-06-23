@@ -64,11 +64,10 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
 }
 
 /// Exit price and reason for a position today, or `None` to keep holding. Take-profit wins
-/// a both-touch bar; then stop-loss, the time barrier, then a model Sell. The shared ladder
-/// the backtest and the live trader both sell on, so the two never drift. `days_held` is
+/// a both-touch bar; then stop-loss, the time barrier, then a model Sell. `days_held` is
 /// trading days since entry.
 #[must_use]
-pub fn exit_decision(
+fn exit_decision(
     entry_price: f64,
     days_held: usize,
     bar: &DayBar,

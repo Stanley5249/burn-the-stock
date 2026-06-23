@@ -1,4 +1,4 @@
-"""Quick lazy preview of a tabular data file (parquet, CSV, or TSV)."""
+"""Quick lazy preview of a tabular data file (parquet or CSV)."""
 
 import argparse
 import sys
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 def lazy_preview(file_path: str, rows: int = 10) -> None:
-    """Print the first rows of a parquet, CSV, or TSV file using a lazy scan.
+    """Print the first rows of a parquet or CSV file using a lazy scan.
 
     Raises:
         PolarsError: If the file cannot be scanned or collected.
@@ -26,7 +26,6 @@ def lazy_preview(file_path: str, rows: int = 10) -> None:
     scanners: dict[str, Callable[[str], LazyFrame]] = {
         ".parquet": pl.scan_parquet,
         ".csv": pl.scan_csv,
-        ".tsv": pl.scan_csv,
     }
 
     if ext not in scanners:

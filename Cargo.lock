@@ -7990,8 +7990,6 @@ dependencies = [
  "miette",
  "polars",
  "portfolio",
- "serde",
- "serde_json",
  "stock-client",
  "stock-model",
  "tokio",
