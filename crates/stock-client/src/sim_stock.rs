@@ -256,39 +256,40 @@ impl SimStockClient {
 
         parse_profile(&profile_page)
     }
-}
 
-/// Fetch the full symbol universe. Unauthenticated, so it is a free function like
-/// [`crate::twse::fetch_holidays`] rather than a [`SimStockClient`] method.
-///
-/// # Errors
-/// Network or deserialization failure.
-#[instrument(err)]
-pub async fn fetch_stock_list() -> Result<Vec<StockListEntry>> {
-    /// One value in the `{code: {type, ...}}` response map.
-    #[derive(Deserialize)]
-    struct Entry {
-        #[serde(rename = "type")]
-        market_type: MarketType,
+    /// Fetch the full symbol universe. Unauthenticated, so it is a free function like
+    /// [`crate::twse::fetch_holidays`] rather than a [`SimStockClient`] method.
+    ///
+    /// # Errors
+    /// Network or deserialization failure.
+    #[instrument(skip_all, err)]
+    pub async fn stock_list(&self) -> Result<Vec<StockListEntry>> {
+        #[derive(Deserialize)]
+        struct Entry {
+            r#type: MarketType,
+        }
+
+        let url = self.base.join(urls::STOCK_LIST).into_diagnostic()?;
+
+        let map: HashMap<String, Entry> = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .into_diagnostic()?
+            .json()
+            .await
+            .into_diagnostic()
+            .wrap_err("decode sim stock list")?;
+
+        Ok(map
+            .into_iter()
+            .map(|(code, entry)| StockListEntry {
+                code,
+                market_type: entry.r#type,
+            })
+            .collect())
     }
-
-    let map: HashMap<String, Entry> = reqwest::get(urls::STOCK_LIST)
-        .await
-        .into_diagnostic()?
-        .error_for_status()
-        .into_diagnostic()?
-        .json()
-        .await
-        .into_diagnostic()
-        .wrap_err("decode sim stock list")?;
-
-    Ok(map
-        .into_iter()
-        .map(|(code, entry)| StockListEntry {
-            code,
-            market_type: entry.market_type,
-        })
-        .collect())
 }
 
 fn parse_csrf(html: &Html) -> Option<&str> {

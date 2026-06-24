@@ -35,12 +35,12 @@ type Backend = Wgpu;
 /// Guard the session and confirm the OHLCV is fresh enough to trade. Logs in to sim along the
 /// way so the login round trip overlaps the calendar fetch.
 async fn preflight(
-    sim: &SimStockClient,
+    sim_client: &SimStockClient,
     args: &Args,
     datetime: DateTime<FixedOffset>,
 ) -> Result<Session> {
     let (calendar, ()) = tokio::try_join!(TradingCalendar::build(&args.holiday_cache), async {
-        sim.login().await.wrap_err("login to sim stock")
+        sim_client.login().await.wrap_err("login to sim stock")
     },)?;
 
     let today = datetime.date_naive();
@@ -53,7 +53,7 @@ async fn preflight(
         let floor: NaiveDate = stock_data::schema::DEFAULT_FLOOR
             .parse()
             .into_diagnostic()?;
-        stock_data::refresh::refresh(&args.data, floor).await?;
+        stock_data::refresh::refresh(sim_client, &args.data, floor).await?;
     }
 
     let last_date = History::scan(&args.data)?

@@ -8,7 +8,7 @@ use std::path::Path;
 use chrono::{Duration, Local, NaiveDate};
 use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
-use stock_client::sim_stock::fetch_stock_list;
+use stock_client::sim_stock::SimStockClient;
 use stock_client::types::{MarketType, StockListEntry};
 use stock_client::yahoo::{ChartBars, YahooClient};
 
@@ -112,8 +112,8 @@ fn consolidate(frames: Vec<LazyFrame>) -> PolarsResult<LazyFrame> {
 ///
 /// # Errors
 /// Network, parse, or parquet failure.
-pub async fn refresh(output: &Path, floor: NaiveDate) -> Result<()> {
-    let symbols = classify(fetch_stock_list().await?);
+pub async fn refresh(sim_client: &SimStockClient, output: &Path, floor: NaiveDate) -> Result<()> {
+    let symbols = classify(sim_client.stock_list().await?);
 
     let exists = output.exists();
     let start = if exists {

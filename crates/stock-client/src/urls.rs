@@ -13,12 +13,10 @@ pub mod sim_stock {
     pub const USER_STOCKS: &str = "trading_api/get_user_stocks";
     pub const BUY: &str = "trading_api/buy";
     pub const SELL: &str = "trading_api/sell";
+    pub const STOCK_LIST: &str = "trading_api/stock_list";
 
     pub const LOGIN: &str = "login/";
     pub const PROFILE: &str = "profile/";
-
-    /// Absolute: the symbol universe lives under `/sim_stock/`, not the client's `/stock/` base.
-    pub const STOCK_LIST: &str = "https://ciot.imis.ncku.edu.tw/sim_stock/trading_api/stock_list";
 }
 
 pub mod twse {

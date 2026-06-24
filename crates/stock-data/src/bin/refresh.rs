@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 use clap::Parser;
 use miette::Result;
+use stock_client::sim_stock::SimStockClient;
 use stock_data::refresh::refresh;
 use stock_data::schema::{DEFAULT_FLOOR, DEFAULT_PATH};
 use tracing_subscriber::EnvFilter;
@@ -31,5 +32,6 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    refresh(&args.output, args.floor).await
+    let sim_client = SimStockClient::from_env(None, None)?;
+    refresh(&sim_client, &args.output, args.floor).await
 }
