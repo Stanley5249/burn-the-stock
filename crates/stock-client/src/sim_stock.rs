@@ -15,6 +15,12 @@ use crate::urls::sim_stock as urls;
 /// hung request would otherwise block forever (`reqwest` has no default timeout).
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
+/// Give up establishing a session after this many retries against the flaky platform.
+const MAX_LOGIN_RETRIES: u32 = 3;
+
+/// Pause between login attempts.
+const LOGIN_RETRY_DELAY_MS: u64 = 2_000;
+
 pub struct SimStockClient {
     pub client: reqwest::Client,
     pub base: Url,
@@ -154,12 +160,29 @@ impl SimStockClient {
     }
 
     /// Establish a session: fetch the login page for its csrf token, then POST credentials.
-    /// The cookie store keeps the session for later scrapes.
+    /// The cookie store keeps the session for later scrapes. The whole flow is idempotent, so a
+    /// flaky-platform failure (often a 500) is retried up to [`MAX_LOGIN_RETRIES`] times.
     ///
     /// # Errors
-    /// Network failure, a missing csrf token, or a rejected login.
+    /// Network failure, a missing csrf token, or a rejected login, after retries are exhausted.
     #[instrument(skip_all, err)]
     pub async fn login(&self) -> Result<()> {
+        // Login is idempotent, so retry every error rather than inspect the status.
+        let mut retries = 0;
+        loop {
+            match self.login_once().await {
+                Ok(()) => return Ok(()),
+                Err(error) if retries < MAX_LOGIN_RETRIES => {
+                    retries += 1;
+                    tracing::warn!(%error, retries, "login failed, retrying");
+                    tokio::time::sleep(Duration::from_millis(LOGIN_RETRY_DELAY_MS)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn login_once(&self) -> Result<()> {
         let url = self.base.join(urls::LOGIN).into_diagnostic()?;
 
         let login_page = self
