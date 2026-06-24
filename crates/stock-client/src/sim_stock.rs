@@ -15,11 +15,31 @@ use crate::urls::sim_stock as urls;
 /// hung request would otherwise block forever (`reqwest` has no default timeout).
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
-/// Give up establishing a session after this many retries against the flaky platform.
-const MAX_LOGIN_RETRIES: u32 = 3;
+/// Give up on an idempotent request after this many retries against the flaky platform.
+const MAX_RETRIES: u32 = 3;
 
-/// Pause between login attempts.
-const LOGIN_RETRY_DELAY_MS: u64 = 2_000;
+/// Pause between retries.
+const RETRY_DELAY_MS: u64 = 2_000;
+
+/// Retry an idempotent HTTP request past the flaky platform's transient transport and 5xx
+/// failures. Only `reqwest` errors retry, so an app-level rejection or a decode error surfaces
+/// at once. The caller wraps only requests that are safe to repeat (never orders).
+async fn retry(
+    send: impl AsyncFn() -> reqwest::Result<reqwest::Response>,
+) -> reqwest::Result<reqwest::Response> {
+    let mut tries = 0;
+    loop {
+        match send().await {
+            Ok(response) => return Ok(response),
+            Err(error) if tries < MAX_RETRIES => {
+                tries += 1;
+                tracing::warn!(%error, tries, "sim_stock request failed, retrying");
+                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 pub struct SimStockClient {
     pub client: reqwest::Client,
@@ -85,19 +105,21 @@ impl SimStockClient {
             Failed { status: String },
         }
 
-        let response: Response = self
-            .client
-            .post(self.base.join(urls::USER_STOCKS).into_diagnostic()?)
-            .form(&[("account", &self.account), ("password", &self.password)])
-            .send()
-            .await
-            .into_diagnostic()?
-            .error_for_status()
-            .into_diagnostic()?
-            .json()
-            .await
-            .into_diagnostic()
-            .wrap_err("decode user_stocks")?;
+        let url = self.base.join(urls::USER_STOCKS).into_diagnostic()?;
+        let response: Response = retry(async || {
+            self.client
+                .post(url.clone())
+                .form(&[("account", &self.account), ("password", &self.password)])
+                .send()
+                .await?
+                .error_for_status()
+        })
+        .await
+        .into_diagnostic()?
+        .json()
+        .await
+        .into_diagnostic()
+        .wrap_err("decode user_stocks")?;
 
         match response {
             Response::Success { data, .. } => Ok(data),
@@ -160,42 +182,27 @@ impl SimStockClient {
     }
 
     /// Establish a session: fetch the login page for its csrf token, then POST credentials.
-    /// The cookie store keeps the session for later scrapes. The whole flow is idempotent, so a
-    /// flaky-platform failure (often a 500) is retried up to [`MAX_LOGIN_RETRIES`] times.
+    /// The cookie store keeps the session for later scrapes. Both requests retry past the flaky
+    /// platform's transient HTTP failures.
     ///
     /// # Errors
-    /// Network failure, a missing csrf token, or a rejected login, after retries are exhausted.
+    /// Network failure, a missing csrf token, or a rejected login.
     #[instrument(skip_all, err)]
     pub async fn login(&self) -> Result<()> {
-        // Login is idempotent, so retry every error rather than inspect the status.
-        let mut retries = 0;
-        loop {
-            match self.login_once().await {
-                Ok(()) => return Ok(()),
-                Err(error) if retries < MAX_LOGIN_RETRIES => {
-                    retries += 1;
-                    tracing::warn!(%error, retries, "login failed, retrying");
-                    tokio::time::sleep(Duration::from_millis(LOGIN_RETRY_DELAY_MS)).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    async fn login_once(&self) -> Result<()> {
         let url = self.base.join(urls::LOGIN).into_diagnostic()?;
 
-        let login_page = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .into_diagnostic()?
-            .error_for_status()
-            .into_diagnostic()?
-            .text()
-            .await
-            .into_diagnostic()?;
+        let login_page = retry(async || {
+            self.client
+                .get(url.clone())
+                .send()
+                .await?
+                .error_for_status()
+        })
+        .await
+        .into_diagnostic()?
+        .text()
+        .await
+        .into_diagnostic()?;
 
         let login_page = Html::parse_document(&login_page);
 
@@ -203,20 +210,22 @@ impl SimStockClient {
             parse_csrf(&login_page).ok_or_else(|| miette!("login page missing csrf token"))?;
 
         // Django rejects the HTTPS POST without a Referer matching the host.
-        self.client
-            .post(url.clone())
-            .header(reqwest::header::REFERER, url.as_str())
-            .form(&[
-                ("csrfmiddlewaretoken", token),
-                ("account", self.account.as_str()),
-                ("password", self.password.as_str()),
-                ("next", ""),
-            ])
-            .send()
-            .await
-            .into_diagnostic()?
-            .error_for_status()
-            .into_diagnostic()?;
+        retry(async || {
+            self.client
+                .post(url.clone())
+                .header(reqwest::header::REFERER, url.as_str())
+                .form(&[
+                    ("csrfmiddlewaretoken", token),
+                    ("account", self.account.as_str()),
+                    ("password", self.password.as_str()),
+                    ("next", ""),
+                ])
+                .send()
+                .await?
+                .error_for_status()
+        })
+        .await
+        .into_diagnostic()?;
 
         Ok(())
     }
@@ -229,17 +238,19 @@ impl SimStockClient {
     /// Network failure or a missing field on the page.
     #[instrument(skip_all, err)]
     pub async fn profile(&self) -> Result<Profile> {
-        let profile_page = self
-            .client
-            .get(self.base.join(urls::PROFILE).into_diagnostic()?)
-            .send()
-            .await
-            .into_diagnostic()?
-            .error_for_status()
-            .into_diagnostic()?
-            .text()
-            .await
-            .into_diagnostic()?;
+        let url = self.base.join(urls::PROFILE).into_diagnostic()?;
+        let profile_page = retry(async || {
+            self.client
+                .get(url.clone())
+                .send()
+                .await?
+                .error_for_status()
+        })
+        .await
+        .into_diagnostic()?
+        .text()
+        .await
+        .into_diagnostic()?;
 
         let profile_page = Html::parse_document(&profile_page);
 
