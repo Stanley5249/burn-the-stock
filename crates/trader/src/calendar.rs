@@ -117,6 +117,7 @@ impl TradingCalendar {
     ///
     /// # Errors
     /// TWSE fetch, cache read/write.
+    #[tracing::instrument(skip_all, fields(cache = %cache_dir.display()))]
     pub async fn build(cache_dir: &Path) -> Result<Self> {
         let dir = cache_dir.join("twse").join("holidays");
 

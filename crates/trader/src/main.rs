@@ -34,6 +34,7 @@ type Backend = Wgpu;
 
 /// Guard the session and confirm the OHLCV is fresh enough to trade. Logs in to sim along the
 /// way so the login round trip overlaps the calendar fetch.
+#[tracing::instrument(skip_all, fields(%datetime))]
 async fn preflight(
     sim_client: &SimStockClient,
     args: &Args,
