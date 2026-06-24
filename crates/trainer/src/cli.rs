@@ -23,7 +23,7 @@ pub struct Cli {
 pub enum Command {
     /// Train the model and write the run's artifacts.
     Train(TrainArgs),
-    /// Simulate a long-only portfolio over the held-out window under `sim_stock`
+    /// Simulate a long-only portfolio over the held-out window under sim stock
     /// rules, reporting cumulative return, win rate, and more.
     Backtest(BacktestArgs),
 }
@@ -173,7 +173,7 @@ impl TrainArgs {
     }
 }
 
-/// Long-only portfolio backtest over the held-out window under `sim_stock` rules.
+/// Long-only portfolio backtest over the held-out window under sim stock rules.
 /// Defaults to the winning setup: barriers off so positions ride to a 20-day time exit.
 /// The split still comes from the saved `config.json`; the buy gate, fill, exits, and
 /// window are flags here.

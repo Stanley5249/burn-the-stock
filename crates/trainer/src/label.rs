@@ -36,7 +36,7 @@ pub fn load_labeled(path: &Path, horizon: usize) -> Result<TickerFrames> {
 }
 
 /// Forward maximum favorable excursion per ticker: for entry `low[t+1]`, the best peak
-/// `max(high[t+1..=t+horizon]) / low[t+1] - 1`, matching `sim_stock`'s buy-low/sell-high
+/// `max(high[t+1..=t+horizon]) / low[t+1] - 1`, matching sim stock's buy-low/sell-high
 /// fills. A forward window is a reversed trailing window, and `min_periods = horizon`
 /// leaves the last `horizon` rows null so [`load_labeled`] drops them.
 fn forward_mfe_expr(horizon: usize) -> Expr {

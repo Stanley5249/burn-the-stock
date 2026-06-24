@@ -8004,7 +8004,6 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
- "futures",
  "miette",
  "polars",
  "portfolio",
@@ -8015,6 +8014,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]

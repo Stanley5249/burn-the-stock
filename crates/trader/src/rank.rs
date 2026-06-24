@@ -1,23 +1,14 @@
 //! Model inference: score every ticker and rank them strongest first. The same path the
 //! backtest uses, run over the latest window per ticker.
 
-use std::path::Path;
-
-use burn::backend::Wgpu;
-use burn::backend::wgpu::WgpuDevice;
-use burn::config::Config;
-use burn::module::Module;
+use burn::prelude::*;
 use burn::record::CompactRecorder;
-use chrono::NaiveDate;
 use miette::{Context, IntoDiagnostic, Result};
-use polars::prelude::LazyFrame;
 use stock_data::read::History;
 use stock_model::data::TickerFrames;
 use stock_model::inference::{InferenceConfig, score};
 
 use crate::cli::Args;
-
-type Backend = Wgpu;
 
 /// Score every ticker on its latest window and return `(ticker, score)` sorted strongest
 /// first.
@@ -25,11 +16,12 @@ type Backend = Wgpu;
 /// # Errors
 /// If the artifact config/model cannot be loaded or the parquet cannot be scanned.
 #[tracing::instrument(skip_all)]
-pub fn rank(args: &Args, device: &WgpuDevice) -> Result<Vec<(String, f32)>> {
+pub fn rank<B: Backend>(args: &Args, device: &B::Device) -> Result<Vec<(String, f32)>> {
     let config = InferenceConfig::load(args.artifact_dir.join("config.json")).into_diagnostic()?;
+
     let model = config
         .model
-        .init::<Backend>(device)
+        .init::<B>(device)
         .load_file(
             args.artifact_dir.join("model"),
             &CompactRecorder::new(),
@@ -43,12 +35,13 @@ pub fn rank(args: &Args, device: &WgpuDevice) -> Result<Vec<(String, f32)>> {
     let lookback = i64::try_from(config.steps * 2 + 10)
         .into_diagnostic()
         .wrap_err("steps too large for the lookback window")?;
-    let frame = recent_frame(&args.data, lookback)?;
+    let frame = History::scan(&args.data)?.recent(lookback)?.lazy();
+
     let store = TickerFrames::from_lazy(frame).into_diagnostic()?;
 
     let windows = store.latest_windows(config.steps).into_diagnostic()?;
     let features = store.feature_series().into_diagnostic()?;
-    let predictions = score::<Backend>(
+    let predictions = score(
         &model,
         &features,
         &windows,
@@ -80,20 +73,4 @@ pub fn select_candidates(
         .take(max)
         .cloned()
         .collect()
-}
-
-/// Scan only the recent tail of the OHLCV parquet, keeping the last `lookback` calendar
-/// days. The per-date z-score is unaffected since each retained date still holds the full
-/// universe.
-fn recent_frame(path: &Path, lookback: i64) -> Result<LazyFrame> {
-    Ok(History::scan(path)?.recent(lookback)?.lazy())
-}
-
-/// The most recent dated bar in the OHLCV parquet, used to verify the data is fresh enough
-/// for the session being traded.
-///
-/// # Errors
-/// If the parquet cannot be scanned or holds no dated rows.
-pub fn data_max_date(path: &Path) -> Result<NaiveDate> {
-    History::scan(path)?.last_date()
 }

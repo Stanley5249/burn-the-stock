@@ -1,4 +1,4 @@
-//! Refresh the consolidated history parquet from Yahoo Finance: fetch the `sim_stock`
+//! Refresh the consolidated history parquet from Yahoo Finance: fetch the sim stock
 //! universe, pull bars since the last stored date, append, dedup, and sink. The pure-Rust
 //! replacement for the Python downloader.
 
@@ -22,7 +22,7 @@ struct Symbol {
     market: &'static str,
 }
 
-/// Map the `sim_stock` universe to Yahoo symbols, dropping ESB names Yahoo does not carry.
+/// Map the sim stock universe to Yahoo symbols, dropping ESB names Yahoo does not carry.
 fn classify(entries: Vec<StockListEntry>) -> Vec<Symbol> {
     entries
         .into_iter()

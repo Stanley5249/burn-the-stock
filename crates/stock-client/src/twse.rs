@@ -13,7 +13,7 @@ use crate::urls::twse as urls;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Holiday {
     pub date: NaiveDate,
-    pub name: String,
+    pub desc: String,
     pub closed: bool,
 }
 
@@ -51,7 +51,7 @@ impl HolidayEntry {
         Some(Holiday {
             date: self.parse_date()?,
             closed: self.is_closed(),
-            name: self.name,
+            desc: self.name,
         })
     }
 }

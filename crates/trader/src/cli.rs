@@ -26,16 +26,12 @@ pub struct Args {
     pub max_holdings: usize,
 
     /// Fraction of settled cash held back for later days.
-    #[arg(long, default_value_t = 0.1)]
+    #[arg(long, default_value_t = 0.0)]
     pub buffer: f64,
 
     /// Delay between Fugle quote requests, to respect the rate limit.
-    #[arg(long, default_value_t = 1100)]
+    #[arg(long, default_value_t = 1000)]
     pub quote_delay_ms: u64,
-
-    /// Cap on in-flight order requests placed against the platform at once.
-    #[arg(long, default_value_t = 8)]
-    pub order_concurrency: usize,
 
     /// Directory holding the per-year TWSE holiday caches.
     #[arg(long, default_value = "data/twse")]

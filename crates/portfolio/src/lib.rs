@@ -1,4 +1,4 @@
-//! Stateful long-only portfolio simulation under the `sim_stock` rules. The engine
+//! Stateful long-only portfolio simulation under the sim stock rules. The engine
 //! walks one trading day at a time over a pre-built [`TradingDay`] stream, realizing
 //! profit only on a sell. Pure: signals and prices in, a [`BacktestReport`] out.
 //!
