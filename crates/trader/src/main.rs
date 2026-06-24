@@ -10,6 +10,7 @@ mod rank;
 mod report;
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use burn::backend::Wgpu;
 use burn::backend::wgpu::WgpuDevice;
@@ -95,7 +96,7 @@ async fn main() -> Result<()> {
 
     let device = WgpuDevice::default();
     let fugle = FugleClient::from_env()?;
-    let sim = SimStockClient::from_env(None)?;
+    let sim = SimStockClient::from_env(None, Some(Duration::from_millis(args.timeout_ms)))?;
 
     let session = preflight(&sim, &args, datetime).await?;
 

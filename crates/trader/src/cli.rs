@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use stock_client::sim_stock::DEFAULT_TIMEOUT_MS;
 
 #[derive(Parser, Debug, Clone)]
 #[command(about = "Predict, then place the day's weighted orders on sim_stock")]
@@ -36,6 +37,10 @@ pub struct Args {
     /// Directory holding the per-year TWSE holiday caches.
     #[arg(long, default_value = "data/twse")]
     pub holiday_cache: PathBuf,
+
+    /// Per-request timeout in milliseconds for `sim_stock`, which is flaky and can hang.
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
 
     /// Skip the pre-trade refresh and score the data as-is.
     #[arg(long)]

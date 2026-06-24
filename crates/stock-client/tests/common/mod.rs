@@ -24,5 +24,5 @@ pub fn fugle_client() -> FugleClient {
 /// sim stock client (cookie store) from env credentials.
 pub fn sim_client() -> SimStockClient {
     LazyLock::force(&INIT);
-    SimStockClient::from_env(None).expect("build sim client")
+    SimStockClient::from_env(None, None).expect("build sim client")
 }

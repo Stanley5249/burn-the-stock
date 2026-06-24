@@ -2,6 +2,7 @@ use miette::{Context, IntoDiagnostic, Result, bail, miette};
 use scraper::{Element, Html, Selector};
 use serde::Deserialize;
 use std::str::FromStr;
+use std::time::Duration;
 use tracing::instrument;
 use url::Url;
 
@@ -9,6 +10,10 @@ use std::collections::HashMap;
 
 use crate::types::{MarketType, Profile, StockListEntry, UserStock};
 use crate::urls::sim_stock as urls;
+
+/// Per-request timeout for `sim_stock` when callers do not set one. The platform is flaky and a
+/// hung request would otherwise block forever (`reqwest` has no default timeout).
+pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
 pub struct SimStockClient {
     pub client: reqwest::Client,
@@ -18,14 +23,20 @@ pub struct SimStockClient {
 }
 
 impl SimStockClient {
-    /// Build a client with a cookie-storing reqwest client (the login session needs it) and
-    /// `base` defaulting to [`urls::base`].
+    /// Build a client with a cookie-storing reqwest client (the login session needs it),
+    /// `base` defaulting to [`urls::base`], and `timeout` defaulting to [`DEFAULT_TIMEOUT_MS`].
     ///
     /// # Errors
     /// If the client fails to build.
-    pub fn new(base: Option<Url>, account: String, password: String) -> Result<Self> {
+    pub fn new(
+        base: Option<Url>,
+        account: String,
+        password: String,
+        timeout: Option<Duration>,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .cookie_store(true)
+            .timeout(timeout.unwrap_or(Duration::from_millis(DEFAULT_TIMEOUT_MS)))
             .build()
             .into_diagnostic()
             .wrap_err("build sim client")?;
@@ -44,11 +55,11 @@ impl SimStockClient {
     ///
     /// # Errors
     /// If a credential env var is missing.
-    pub fn from_env(base: Option<Url>) -> Result<Self> {
+    pub fn from_env(base: Option<Url>, timeout: Option<Duration>) -> Result<Self> {
         let account = std::env::var("STOCK_ACCOUNT").into_diagnostic()?;
         let password = std::env::var("STOCK_PASSWORD").into_diagnostic()?;
 
-        Self::new(base, account, password)
+        Self::new(base, account, password, timeout)
     }
 
     /// # Errors
