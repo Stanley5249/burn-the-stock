@@ -4,7 +4,6 @@
 
 mod calendar;
 mod cli;
-mod download;
 mod execute;
 mod plan;
 mod rank;
@@ -13,7 +12,7 @@ mod report;
 use std::collections::HashMap;
 
 use burn::backend::wgpu::WgpuDevice;
-use chrono::{Datelike, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, ensure};
 use stock_client::fugle::{FugleClient, FugleQuote};
@@ -70,9 +69,12 @@ async fn main() -> Result<()> {
         session.data_through,
     );
 
-    // Refresh the OHLCV before scoring so a forgotten download never trades stale data.
+    // Refresh the OHLCV before scoring so a forgotten refresh never trades stale data.
     if !args.no_download {
-        download::run_downloader().await?;
+        let floor: NaiveDate = stock_data::schema::DEFAULT_FLOOR
+            .parse()
+            .into_diagnostic()?;
+        stock_data::refresh::refresh(&args.data, floor).await?;
     }
 
     let max_date = data_max_date(&args.data).wrap_err("read data max date")?;

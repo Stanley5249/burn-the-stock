@@ -12,7 +12,7 @@ pub struct Args {
     pub artifact_dir: PathBuf,
 
     /// OHLCV parquet to score; only its recent tail is read. Must be current through
-    /// yesterday's close, so refresh it with the downloader before running.
+    /// yesterday's close, so the pre-trade refresh updates it before running.
     #[arg(long, default_value = "data/yfinance/stock_history.parquet")]
     pub data: PathBuf,
 
@@ -41,7 +41,7 @@ pub struct Args {
     #[arg(long, default_value = "data/twse")]
     pub holiday_cache: PathBuf,
 
-    /// Skip the pre-trade downloader refresh and score the data as-is.
+    /// Skip the pre-trade refresh and score the data as-is.
     #[arg(long)]
     pub no_download: bool,
 

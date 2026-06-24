@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 portfolio = { path = "../portfolio" }
 stock-client = { path = "../stock-client" }
-stock-data = { path = "../stock-data" }
+stock-data = { path = "../stock-data", features = ["fetch"] }
 stock-model = { path = "../stock-model" }
 
 burn = { workspace = true, features = ["std"] }
@@ -17,10 +17,7 @@ futures = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 polars = { workspace = true, features = ["dtype-date", "lazy", "parquet"] }
 serde_json = "1.0.150"
-tokio = {
-  workspace = true,
-  features = ["macros", "process", "rt-multi-thread"]
-}
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 

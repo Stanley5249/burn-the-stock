@@ -1,4 +1,4 @@
-//! Manual OHLCV refresh, replacing `python -m burn_the_stock.downloader`.
+//! Manual OHLCV refresh from Yahoo Finance into the consolidated history parquet.
 
 use std::path::PathBuf;
 
@@ -6,7 +6,7 @@ use chrono::NaiveDate;
 use clap::Parser;
 use miette::Result;
 use stock_data::refresh::refresh;
-use stock_data::schema::DEFAULT_PATH;
+use stock_data::schema::{DEFAULT_FLOOR, DEFAULT_PATH};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -17,7 +17,7 @@ struct Args {
     output: PathBuf,
 
     /// First bar to fetch when the parquet does not exist yet.
-    #[arg(long, default_value = "2016-01-01")]
+    #[arg(long, default_value = DEFAULT_FLOOR)]
     floor: NaiveDate,
 }
 

@@ -14,3 +14,6 @@ pub const MARKET: PlSmallStr = PlSmallStr::from_static("market");
 
 /// Default on-disk location of the consolidated history parquet.
 pub const DEFAULT_PATH: &str = "data/yfinance/stock_history.parquet";
+
+/// First bar to fetch when the history parquet does not exist yet.
+pub const DEFAULT_FLOOR: &str = "2016-01-01";
