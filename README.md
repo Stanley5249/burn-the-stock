@@ -13,8 +13,8 @@ Profit is measured as total asset value at close on 2026-06-26 minus the 100,000
 
 ## How it works
 
-The `trainer` binary fetches ten years of daily OHLCV history, trains a neural network,
-and saves the model weights to disk.
+The `refresh` binary pulls daily OHLCV history from Yahoo Finance into a parquet, which the
+`trainer` binary reads to train a neural network and save the model weights to disk.
 
 The `trader` binary loads those weights and runs as a daemon. Each Taiwan trading day it
 wakes around market open (09:00 CST), runs inference on recent price data, and places

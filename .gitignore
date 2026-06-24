@@ -1,12 +1,6 @@
 # rust build output
 /target/
 
-# python
-__pycache__/
-.venv/
-.pytest_cache/
-.ruff_cache/
-
 # credentials
 .env
 
