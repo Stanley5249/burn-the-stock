@@ -10,7 +10,7 @@ use miette::{IntoDiagnostic, Result};
 use polars::prelude::*;
 use stock_client::sim_stock::fetch_stock_list;
 use stock_client::types::{MarketType, StockListEntry};
-use stock_client::yahoo::YahooClient;
+use stock_client::yahoo::{ChartBars, YahooClient};
 
 use crate::read::History;
 use crate::schema::{CLOSE, CODE, DATE, HIGH, LOW, MARKET, OPEN, VOLUME};
@@ -39,6 +39,38 @@ fn classify(entries: Vec<StockListEntry>) -> Vec<Symbol> {
             })
         })
         .collect()
+}
+
+/// Assemble unadjusted bars into a frame, then fold the split/dividend adjustment in column-wise:
+/// scale OHLC by `adjclose / close`, keep volume raw, drop rows with no usable close, and rename
+/// adjclose to close.
+fn adjusted_frame(bars: ChartBars) -> PolarsResult<LazyFrame> {
+    let raw = df!(
+        DATE => bars.dates,
+        OPEN => bars.open,
+        HIGH => bars.high,
+        LOW => bars.low,
+        CLOSE => bars.close,
+        VOLUME => bars.volume,
+        "adjclose" => bars.adjclose,
+    )?;
+
+    let usable = col(CLOSE)
+        .is_not_null()
+        .and(col(CLOSE).is_not_nan())
+        .and(col("adjclose").is_not_null())
+        .and(col("adjclose").is_not_nan());
+    let factor = col("adjclose") / col(CLOSE);
+
+    Ok(raw.lazy().filter(usable).select([
+        col(DATE),
+        (col(OPEN) * factor.clone()).alias(OPEN),
+        (col(HIGH) * factor.clone()).alias(HIGH),
+        (col(LOW) * factor).alias(LOW),
+        // adjusted close is just adjclose (close * adjclose / close).
+        col("adjclose").alias(CLOSE),
+        col(VOLUME),
+    ]))
 }
 
 /// Project a frame onto the canonical column order so strict vertical concat lines up.
@@ -115,11 +147,12 @@ pub async fn refresh(output: &Path, floor: NaiveDate) -> Result<()> {
     if exists {
         frames.push(canonical(History::scan(output)?.lazy()));
     }
-    for (yahoo, frame) in fetched {
+    for (yahoo, bars) in fetched {
         let Some(symbol) = by_yahoo.get(yahoo.as_str()) else {
             continue;
         };
-        frames.push(canonical(frame.lazy().with_columns([
+        let frame = adjusted_frame(bars).into_diagnostic()?;
+        frames.push(canonical(frame.with_columns([
             lit(symbol.code.as_str()).alias(CODE),
             lit(symbol.market).alias(MARKET),
         ])));
@@ -164,6 +197,41 @@ mod tests {
                 ("6488", "6488.TWO", "otc"),
             ]
         );
+    }
+
+    #[test]
+    fn adjusted_frame_scales_ohlc_keeps_volume_drops_null() {
+        let bars = ChartBars {
+            dates: vec![
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            ],
+            open: vec![Some(100.0), None],
+            high: vec![Some(110.0), Some(50.0)],
+            low: vec![Some(90.0), Some(40.0)],
+            close: vec![Some(100.0), None],
+            volume: vec![Some(1000.0), Some(500.0)],
+            adjclose: vec![Some(90.0), None],
+        };
+
+        let out = adjusted_frame(bars).unwrap().collect().unwrap();
+
+        // Null-close row is dropped, adjclose column is gone.
+        assert_eq!(out.height(), 1);
+        assert_eq!(
+            out.get_column_names(),
+            [&DATE, &OPEN, &HIGH, &LOW, &CLOSE, &VOLUME]
+        );
+
+        // factor = 90/100 = 0.9 applied to OHLC, volume untouched.
+        let close = out.column(&CLOSE).unwrap().f64().unwrap().get(0).unwrap();
+        let open = out.column(&OPEN).unwrap().f64().unwrap().get(0).unwrap();
+        let high = out.column(&HIGH).unwrap().f64().unwrap().get(0).unwrap();
+        let volume = out.column(&VOLUME).unwrap().f64().unwrap().get(0).unwrap();
+        assert!((close - 90.0).abs() < 1e-9);
+        assert!((open - 90.0).abs() < 1e-9);
+        assert!((high - 99.0).abs() < 1e-9);
+        assert!((volume - 1000.0).abs() < 1e-9);
     }
 
     fn bar(code: &str, day: u32, close: f64) -> LazyFrame {

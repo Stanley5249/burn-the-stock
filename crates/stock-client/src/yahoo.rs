@@ -3,7 +3,6 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate};
 use futures::stream::{self, StreamExt};
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
-use polars::prelude::*;
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
@@ -28,6 +27,18 @@ pub struct YahooClient {
     client: reqwest::Client,
 }
 
+/// Flat, unadjusted daily bars decoded from a chart response. Dates are local to the exchange.
+/// `adjclose` is kept so the caller can fold the split/dividend adjustment into OHLC.
+pub struct ChartBars {
+    pub dates: Vec<NaiveDate>,
+    pub open: Vec<Option<f64>>,
+    pub high: Vec<Option<f64>>,
+    pub low: Vec<Option<f64>>,
+    pub close: Vec<Option<f64>>,
+    pub volume: Vec<Option<f64>>,
+    pub adjclose: Vec<Option<f64>>,
+}
+
 impl YahooClient {
     /// Build a cookie-storing client and prime the consent cookie.
     ///
@@ -50,14 +61,14 @@ impl YahooClient {
         Ok(Self { client })
     }
 
-    /// Fetch adjusted daily bars for one `symbol`, named after the `/v8/finance/chart` endpoint.
+    /// Fetch unadjusted daily bars for one `symbol`, named after the `/v8/finance/chart` endpoint.
     /// `end` is inclusive. On a 429 it doubles the backoff up to [`MAX_CHART_DELAY_MS`] and retries
     /// the same request.
     ///
     /// # Errors
     /// Network, deserialization, or empty/missing chart data.
     #[tracing::instrument(skip(self))]
-    pub async fn chart(&self, symbol: &str, start: NaiveDate, end: NaiveDate) -> Result<DataFrame> {
+    pub async fn chart(&self, symbol: &str, start: NaiveDate, end: NaiveDate) -> Result<ChartBars> {
         let url = chart_url(symbol, start, end)?;
 
         let mut delay = INITIAL_DELAY_MS;
@@ -78,8 +89,7 @@ impl YahooClient {
             }
         };
 
-        let raw = raw_frame(symbol, response)?;
-        adjust(raw).into_diagnostic().wrap_err("adjust chart")
+        bars(symbol, response)
     }
 
     /// Fetch many symbols concurrently. A failed symbol is logged and dropped, so the returned
@@ -90,11 +100,11 @@ impl YahooClient {
         symbols: &[String],
         start: NaiveDate,
         end: NaiveDate,
-    ) -> Vec<(String, DataFrame)> {
+    ) -> Vec<(String, ChartBars)> {
         stream::iter(symbols.iter().cloned())
             .map(|symbol| async move {
                 match self.chart(&symbol, start, end).await {
-                    Ok(frame) => Some((symbol, frame)),
+                    Ok(bars) => Some((symbol, bars)),
                     Err(error) => {
                         tracing::warn!(%symbol, %error, "chart failed");
                         None
@@ -146,10 +156,10 @@ fn day_start_epoch(date: NaiveDate) -> i64 {
         .timestamp()
 }
 
-/// Build the unadjusted frame from the response: `date`, OHLC, `volume`, plus `adjclose` for
-/// [`adjust`] to consume. Timestamps are shifted by the exchange offset so the calendar date is
-/// local, not UTC.
-fn raw_frame(symbol: &str, response: ChartResponse) -> Result<DataFrame> {
+/// Decode the response into flat unadjusted columns: `date`, OHLC, `volume`, plus `adjclose` so
+/// the caller can fold the adjustment in. Timestamps are shifted by the exchange offset so the
+/// calendar date is local, not UTC.
+fn bars(symbol: &str, response: ChartResponse) -> Result<ChartBars> {
     let result = response
         .chart
         .result
@@ -182,41 +192,15 @@ fn raw_frame(symbol: &str, response: ChartResponse) -> Result<DataFrame> {
         })
         .collect::<Result<_>>()?;
 
-    df!(
-        "date" => dates,
-        "open" => quote.open,
-        "high" => quote.high,
-        "low" => quote.low,
-        "close" => quote.close,
-        "volume" => quote.volume,
-        "adjclose" => adjclose,
-    )
-    .into_diagnostic()
-    .wrap_err("assemble chart frame")
-}
-
-/// Apply the split/dividend adjustment column-wise: scale OHLC by `adjclose / close`, keep volume
-/// raw, and drop rows with no usable close. The pure core, exercised by the unit test.
-fn adjust(raw: DataFrame) -> PolarsResult<DataFrame> {
-    let usable = col("close")
-        .is_not_null()
-        .and(col("close").is_not_nan())
-        .and(col("adjclose").is_not_null())
-        .and(col("adjclose").is_not_nan());
-    let factor = col("adjclose") / col("close");
-
-    raw.lazy()
-        .filter(usable)
-        .select([
-            col("date"),
-            (col("open") * factor.clone()).alias("open"),
-            (col("high") * factor.clone()).alias("high"),
-            (col("low") * factor).alias("low"),
-            // adjusted close is just adjclose (close * adjclose / close).
-            col("adjclose").alias("close"),
-            col("volume"),
-        ])
-        .collect()
+    Ok(ChartBars {
+        dates,
+        open: quote.open,
+        high: quote.high,
+        low: quote.low,
+        close: quote.close,
+        volume: quote.volume,
+        adjclose,
+    })
 }
 
 #[derive(Deserialize)]
@@ -280,52 +264,14 @@ mod tests {
         assert!(url.as_str().contains("period2=1704240000"));
     }
 
-    #[test]
-    fn adjust_scales_ohlc_keeps_volume_drops_null() {
-        let raw = df!(
-            "date" => &[
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
-            ],
-            "open" => &[Some(100.0), None],
-            "high" => &[Some(110.0), Some(50.0)],
-            "low" => &[Some(90.0), Some(40.0)],
-            "close" => &[Some(100.0), None],
-            "volume" => &[Some(1000.0), Some(500.0)],
-            "adjclose" => &[Some(90.0), None],
-        )
-        .unwrap();
-
-        let out = adjust(raw).unwrap();
-
-        // Null-close row is dropped, adjclose column is gone.
-        assert_eq!(out.height(), 1);
-        assert_eq!(
-            out.get_column_names(),
-            ["date", "open", "high", "low", "close", "volume"]
-        );
-
-        // factor = 90/100 = 0.9 applied to OHLC, volume untouched.
-        let close = out.column("close").unwrap().f64().unwrap().get(0).unwrap();
-        let open = out.column("open").unwrap().f64().unwrap().get(0).unwrap();
-        let high = out.column("high").unwrap().f64().unwrap().get(0).unwrap();
-        let volume = out.column("volume").unwrap().f64().unwrap().get(0).unwrap();
-        assert!((close - 90.0).abs() < 1e-9);
-        assert!((open - 90.0).abs() < 1e-9);
-        assert!((high - 99.0).abs() < 1e-9);
-        assert!((volume - 1000.0).abs() < 1e-9);
-    }
-
-    // multi_thread: polars collect routes through its async engine inside a tokio runtime.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     #[ignore = "hits live Yahoo Finance"]
     async fn live_chart_returns_bars() {
         let client = YahooClient::new().await.unwrap();
         let end = chrono::Local::now().date_naive();
         let start = end - ChronoDuration::days(30);
-        let frame = client.chart("2330.TW", start, end).await.unwrap();
-        assert!(frame.height() > 0);
-        let close = frame.column("close").unwrap().f64().unwrap();
-        assert!(close.iter().flatten().all(|value| value > 0.0));
+        let bars = client.chart("2330.TW", start, end).await.unwrap();
+        assert!(!bars.dates.is_empty());
+        assert!(bars.adjclose.iter().flatten().all(|value| *value > 0.0));
     }
 }

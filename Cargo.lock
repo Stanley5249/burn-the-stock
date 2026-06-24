@@ -7107,7 +7107,6 @@ dependencies = [
  "dotenvy",
  "futures",
  "miette",
- "polars",
  "reqwest 0.13.4",
  "rust_decimal",
  "scraper",
