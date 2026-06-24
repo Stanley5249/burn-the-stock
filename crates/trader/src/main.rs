@@ -89,11 +89,12 @@ async fn main() -> Result<()> {
 
     let datetime = Utc::now().with_timezone(&calendar::TAIPEI_OFFSET);
 
-    ensure!(
-        !calendar::in_maintenance(datetime),
-        help = "re-run after 16:00",
-        "sim stock is in maintenance (15:30-16:00 Taipei), now {datetime}"
-    );
+    if calendar::in_maintenance(datetime) {
+        tracing::warn!(
+            "sim stock might be in maintenance (15:30-16:00 Taipei), now {}",
+            datetime.naive_local()
+        );
+    }
 
     let device = WgpuDevice::default();
     let fugle = FugleClient::from_env()?;
