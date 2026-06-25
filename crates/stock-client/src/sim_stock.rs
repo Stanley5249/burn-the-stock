@@ -282,7 +282,7 @@ impl SimStockClient {
     }
 
     /// Fetch the full symbol universe. Unauthenticated, so it is a free function like
-    /// [`crate::twse::fetch_holidays`] rather than a [`SimStockClient`] method.
+    /// [`crate::twse::fetch_holidays`].
     ///
     /// # Errors
     /// Network or deserialization failure.
