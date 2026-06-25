@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// One position as returned by the sim server's `get_user_stocks` endpoint.
 #[derive(Debug, Deserialize)]
@@ -9,10 +9,17 @@ pub struct UserStock {
     pub stock_code_id: String,
     /// Position size in 張 (board lots of 1,000 shares), the platform's unit.
     pub shares: u64,
+    #[serde(deserialize_with = "f64_from_str")]
     pub beginning_price: f64,
     #[serde(with = "chrono::serde::ts_seconds")]
     pub createtime: DateTime<Utc>,
     pub user_uid_id: u64,
+}
+
+/// The sim server sends prices as quoted strings like "34.40000", so parse to f64.
+fn f64_from_str<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    raw.parse().map_err(serde::de::Error::custom)
 }
 
 /// The account dashboard's headline numbers, scraped from the sim server's `profile/` page.
