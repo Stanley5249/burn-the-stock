@@ -9,6 +9,7 @@ use stock_client::sim_stock::SimStockClient;
 use stock_data::refresh::refresh;
 use stock_data::schema::{DEFAULT_FLOOR, DEFAULT_PATH};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Parser)]
 #[command(about = "Refresh the OHLCV history parquet from Yahoo Finance")]
@@ -30,6 +31,7 @@ async fn main() -> Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,stock=info")),
         )
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .init();
 
     let args = Args::parse();
