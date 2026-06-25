@@ -1,7 +1,11 @@
 [package]
 name = "stock-client"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+description = "HTTP clients for Taiwan stock data sources and the sim_stock platform"
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 chrono = { workspace = true, features = ["clock", "serde", "std"] }

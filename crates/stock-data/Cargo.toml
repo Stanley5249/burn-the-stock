@@ -1,7 +1,11 @@
 [package]
 name = "stock-data"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+description = "Parquet OHLCV storage and refresh for Taiwan stock history"
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "refresh"

@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use portfolio::{
-    DayBar, Fill, LOT, SELL_TAX_RATE, affordable_shares, commission, sell_price, tick_ceil,
-};
 use stock_client::fugle::FugleQuote;
 use stock_client::types::UserStock;
+use stock_portfolio::{
+    DayBar, Fill, LOT, SELL_TAX_RATE, affordable_shares, commission, sell_price, tick_ceil,
+};
 
 /// A planned exit: sell the whole position at the quote high. `lots` is in 張 (the platform
 /// order unit), `price` is per share.

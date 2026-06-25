@@ -1,11 +1,15 @@
 [package]
 name = "trainer"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+description = "Train and backtest the stock ranking model"
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
-portfolio = { path = "../portfolio" }
 stock-model = { path = "../stock-model" }
+stock-portfolio = { path = "../stock-portfolio" }
 
 burn = {
   workspace = true,

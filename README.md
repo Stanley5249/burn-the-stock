@@ -6,23 +6,26 @@ daily buy and sell orders.
 ## Goal
 
 Starting from NT$100,000,000 in virtual funds, the bot trades Taiwan listed stocks
-(TWSE, TPEX, ESB) and aims to maximize total asset value by market close on June 26, 2026.
-At least 100 executed trades are required over the trading period.
+(TWSE, TPEX, ESB) to maximize total asset value by market close on 2026-06-26.
+The trading period requires at least 100 executed trades.
 
 Profit is measured as total asset value at close on 2026-06-26 minus the 100,000,000 starting capital.
 
 ## How it works
 
-The `refresh` binary pulls daily OHLCV history from Yahoo Finance into a parquet, which the
-`trainer` binary reads to train a neural network and save the model weights to disk.
+The `refresh` binary pulls daily OHLCV history from Yahoo Finance into a
+parquet. The `trainer` binary reads that parquet to train a neural network and
+save the model weights to disk.
 
-The `trader` binary loads those weights and runs as a daemon. Each Taiwan trading day it
-wakes around market open (09:00 CST), runs inference on recent price data, and places
-buy or sell orders through the sim-server API.
+The `trader` binary is a CLI you run once during a trading session. It refreshes
+the OHLCV through the prior session, loads the weights, ranks every ticker, then
+places the day's buy and sell orders through the sim-server API and exits.
+
+Schedule it externally if you want it to run daily.
 
 ## Crates
 
-- `portfolio` - long-only portfolio simulation under sim stock rules, the backtest engine
+- `stock-portfolio` - the backtest engine, a long-only portfolio simulation under sim stock rules
 - `stock-client` - HTTP clients for the sim trading API, Fugle quotes, Yahoo OHLCV, and TWSE holidays
 - `stock-data` - OHLCV parquet store plus the `refresh` binary that fetches history
 - `stock-model` - shared model architecture, feature transform, and inference path
@@ -57,3 +60,7 @@ Backtest a run over its held-out window.
 ```
 cargo run --release --bin trainer -- backtest --artifact-dir artifacts/run
 ```
+
+## License
+
+Licensed under either of MIT or Apache-2.0 at your option.

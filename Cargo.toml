@@ -1,13 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/portfolio",
   "crates/stock-client",
   "crates/stock-data",
   "crates/stock-model",
+  "crates/stock-portfolio",
   "crates/trader",
   "crates/trainer",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/Stanley5249/burn-the-stock"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [workspace.dependencies]
 burn = { version = "0.21.0", default-features = false }

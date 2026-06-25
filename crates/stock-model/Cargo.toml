@@ -1,7 +1,11 @@
 [package]
 name = "stock-model"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+description = "Burn neural network model and feature engineering for stock ranking"
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 burn = { workspace = true, features = ["std"] }

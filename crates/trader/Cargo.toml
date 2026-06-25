@@ -1,13 +1,17 @@
 [package]
 name = "trader"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+description = "Live Taiwan stock trading bot for the sim_stock platform"
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
-portfolio = { path = "../portfolio" }
 stock-client = { path = "../stock-client" }
 stock-data = { path = "../stock-data", features = ["fetch"] }
 stock-model = { path = "../stock-model" }
+stock-portfolio = { path = "../stock-portfolio" }
 
 burn = { workspace = true, features = ["std"] }
 chrono = { workspace = true, features = ["clock", "serde"] }

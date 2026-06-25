@@ -1,0 +1,15 @@
+[package]
+name = "stock-portfolio"
+version.workspace = true
+edition.workspace = true
+description = "Portfolio backtest and simulation engine under sim_stock trading rules"
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

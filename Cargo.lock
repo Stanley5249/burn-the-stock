@@ -5694,14 +5694,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "portfolio"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
-]
-
-[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7133,6 +7125,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stock-portfolio"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+]
+
+[[package]]
 name = "streaming-decompression"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7989,11 +7989,11 @@ dependencies = [
  "dotenvy",
  "miette",
  "polars",
- "portfolio",
  "serde_json",
  "stock-client",
  "stock-data",
  "stock-model",
+ "stock-portfolio",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -8011,8 +8011,8 @@ dependencies = [
  "fastrand",
  "miette",
  "polars",
- "portfolio",
  "stock-model",
+ "stock-portfolio",
  "tracing",
  "tracing-subscriber",
 ]

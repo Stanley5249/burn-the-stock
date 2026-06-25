@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use stock_model::model::StockModelConfig;
 
 use crate::training::{RunOptions, TrainingConfig};
-use portfolio::{Fill, Weighting};
+use stock_portfolio::{Fill, Weighting};
 
 #[derive(Parser, Debug)]
 #[command(about = "Stock MFE-rank regressor: train a model or backtest a run")]

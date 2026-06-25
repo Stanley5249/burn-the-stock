@@ -12,7 +12,7 @@ use polars::prelude::*;
 use stock_model::data::{TickerFrames, TickerQuotes};
 use stock_model::inference::score;
 
-use portfolio::{
+use stock_portfolio::{
     self, BacktestConfig, BacktestReport, DayBar, RenderContext, STARTING_CASH, TradingDay,
 };
 
@@ -93,7 +93,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         max_hold_days: args.max_hold,
         rotate: args.rotate,
     };
-    let report = portfolio::run(&days, &backtest_config);
+    let report = stock_portfolio::run(&days, &backtest_config);
 
     let context = RenderContext {
         tickers: store.frames.len(),
@@ -101,7 +101,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
     };
     print!(
         "{}",
-        portfolio::summary(&report, &backtest_config, &context)
+        stock_portfolio::summary(&report, &backtest_config, &context)
     );
 
     let equity_path = args
