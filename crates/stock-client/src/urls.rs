@@ -47,6 +47,5 @@ pub mod fugle {
 
     pub const BASE: &str = "https://api.fugle.tw/marketdata/v1.0/stock/";
 
-    pub const INTRADAY_TICKER: &str = "intraday/ticker";
     pub const INTRADAY_QUOTE: &str = "intraday/quote";
 }

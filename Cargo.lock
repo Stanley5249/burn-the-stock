@@ -7093,7 +7093,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dotenvy",
- "futures",
  "miette",
  "reqwest 0.13.4",
  "scraper",

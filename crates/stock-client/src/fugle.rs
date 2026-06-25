@@ -122,32 +122,6 @@ impl FugleClient {
         quotes
     }
 
-    /// Fetch the static metadata for a single `symbol`.
-    ///
-    /// # Errors
-    /// Network or deserialization failure.
-    pub async fn ticker(&self, symbol: &str) -> Result<FugleTickerDetail> {
-        let url = urls::base()
-            .join(&format!("{}/{symbol}", urls::INTRADAY_TICKER))
-            .into_diagnostic()
-            .wrap_err("build ticker url")?;
-
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .into_diagnostic()?
-            .error_for_status()
-            .into_diagnostic()?
-            .json()
-            .await
-            .into_diagnostic()
-            .wrap_err("decode ticker")?;
-
-        Ok(response)
-    }
-
     /// Inner quote request kept at the reqwest level so [`quotes`](Self::quotes) can read the
     /// HTTP status for the 429 backoff.
     async fn request_quote(&self, url: Url) -> reqwest::Result<FugleQuote> {
@@ -166,20 +140,6 @@ fn quote_url(symbol: &str) -> Result<Url> {
         .join(&format!("{}/{symbol}", urls::INTRADAY_QUOTE))
         .into_diagnostic()
         .wrap_err("build quote url")
-}
-
-/// Static metadata for a single ticker. No `deny_unknown_fields`: the endpoint
-/// returns extra warrant and index fields we do not model.
-#[derive(Clone, Debug, Deserialize)]
-pub struct FugleTickerDetail {
-    pub symbol: String,
-    pub name: String,
-    pub r#type: String,
-    pub exchange: String,
-    pub market: String,
-    pub industry: Option<String>,
-    #[serde(rename = "securityType")]
-    pub security_type: Option<String>,
 }
 
 /// Live intraday quote. No `deny_unknown_fields`: the endpoint returns deep bid/ask,
