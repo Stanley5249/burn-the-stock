@@ -5,7 +5,6 @@ members = [
   "crates/stock-client",
   "crates/stock-data",
   "crates/stock-model",
-  "crates/tickers",
   "crates/trader",
   "crates/trainer",
 ]

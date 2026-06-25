@@ -7544,21 +7544,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tickers"
-version = "0.1.0"
-dependencies = [
- "clap",
- "dotenvy",
- "miette",
- "polars",
- "reqwest 0.13.4",
- "stock-client",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "tiff"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
