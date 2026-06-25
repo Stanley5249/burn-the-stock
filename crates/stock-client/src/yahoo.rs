@@ -5,18 +5,20 @@ use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
+use tokio_retry::RetryIf;
+use tokio_retry::strategy::ExponentialBackoff;
 use url::Url;
 
 use crate::urls::yahoo as urls;
 
-/// Give up on a rate-limited symbol after this many backoff retries.
-const MAX_CHART_RETRIES: u32 = 5;
+/// Give up on a rate-limited chart after this many backoff retries.
+pub const CHART_RETRIES: usize = 5;
 
-/// First 429 backoff, doubled each retry.
-const INITIAL_DELAY_MS: u64 = 500;
+/// Backoff factor in ms; the nth retry waits `CHART_BACKOFF_MS * 2^n`, doubling from 500.
+pub const CHART_BACKOFF_MS: u64 = 250;
 
 /// Ceiling on the 429 backoff pace. Raise if the rate limit tightens.
-const MAX_CHART_DELAY_MS: u64 = 8_000;
+pub const CHART_MAX_DELAY_MS: u64 = 8_000;
 
 /// Yahoo Finance chart client. Owns a cookie-storing `reqwest::Client` with a browser UA.
 pub struct YahooClient {
@@ -29,8 +31,9 @@ impl YahooClient {
     /// # Errors
     /// If the client fails to build.
     pub async fn new() -> Result<Self> {
-        let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static(urls::USER_AGENT));
+        let user_agent = (USER_AGENT, HeaderValue::from_static(urls::USER_AGENT));
+
+        let headers = HeaderMap::from_iter([user_agent]);
 
         let client = reqwest::Client::builder()
             .cookie_store(true)
@@ -41,7 +44,7 @@ impl YahooClient {
 
         let client = Self { client };
 
-        client.consent().await.ok();
+        let _ = client.consent().await;
 
         Ok(client)
     }
@@ -61,7 +64,7 @@ impl YahooClient {
     }
 
     /// Fetch unadjusted daily bars for one `symbol`, named after the `/v8/finance/chart` endpoint.
-    /// `end` is inclusive. On a 429 it doubles the backoff up to [`MAX_CHART_DELAY_MS`] and retries
+    /// `end` is inclusive. On a 429 it doubles the backoff up to [`CHART_MAX_DELAY_MS`] and retries
     /// the same request.
     ///
     /// # Errors
@@ -70,34 +73,35 @@ impl YahooClient {
     pub async fn chart(&self, symbol: &str, start: NaiveDate, end: NaiveDate) -> Result<ChartBars> {
         let url = chart_url(symbol, start, end)?;
 
-        let mut delay = INITIAL_DELAY_MS;
-        let mut retries = 0;
-
-        let response = loop {
-            match self
-                .client
-                .get(url.clone())
-                .send()
-                .await
-                .into_diagnostic()?
-                .error_for_status()
-                .into_diagnostic()?
-                .json()
-                .await
-            {
-                Ok(response) => break response,
-                Err(error)
-                    if retries < MAX_CHART_RETRIES
-                        && error.status() == Some(StatusCode::TOO_MANY_REQUESTS) =>
-                {
-                    retries += 1;
-                    delay = delay.saturating_mul(2).min(MAX_CHART_DELAY_MS);
-                    tracing::warn!(symbol, delay, retries, "Yahoo rate limit, backing off");
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
+        // Transport errors carry no status, so they fail the 429 condition and surface at once.
+        let response: ChartResponse = RetryIf::start(
+            ExponentialBackoff::from_millis(2)
+                .factor(CHART_BACKOFF_MS)
+                .max_delay(Duration::from_millis(CHART_MAX_DELAY_MS))
+                .take(CHART_RETRIES),
+            || {
+                let url = url.clone();
+                async move {
+                    self.client
+                        .get(url)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json()
+                        .await
                 }
-                Err(error) => return Err(error).into_diagnostic().wrap_err("fetch chart"),
-            }
-        };
+            },
+            |error: &reqwest::Error| {
+                let limited = error.status() == Some(StatusCode::TOO_MANY_REQUESTS);
+                if limited {
+                    tracing::warn!(symbol, "Yahoo rate limit, backing off");
+                }
+                limited
+            },
+        )
+        .await
+        .into_diagnostic()
+        .wrap_err("fetch chart")?;
 
         bars(symbol, response)
     }

@@ -3,6 +3,8 @@ use scraper::{Element, Html, Selector};
 use serde::Deserialize;
 use std::str::FromStr;
 use std::time::Duration;
+use tokio_retry::RetryIf;
+use tokio_retry::strategy::FixedInterval;
 use tracing::instrument;
 use url::Url;
 
@@ -15,30 +17,21 @@ use crate::urls::sim_stock as urls;
 /// hung request would otherwise block forever (`reqwest` has no default timeout).
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
-/// Give up on an idempotent request after this many retries against the flaky platform.
-const MAX_RETRIES: u32 = 3;
+/// Fixed pause between retries, a property of the flaky platform shared by every endpoint.
+pub const RETRY_DELAY_MS: u64 = 2_000;
 
-/// Pause between retries.
-const RETRY_DELAY_MS: u64 = 2_000;
+/// Per-endpoint retry budgets against the flaky platform. Orders never retry, to avoid
+/// duplicate fills.
+pub const USER_STOCKS_RETRIES: usize = 3;
+pub const LOGIN_RETRIES: usize = 3;
+pub const PROFILE_RETRIES: usize = 3;
+pub const STOCK_LIST_RETRIES: usize = 3;
 
-/// Retry an idempotent HTTP request past the flaky platform's transient transport and 5xx
-/// failures. Only `reqwest` errors retry, so an app-level rejection or a decode error surfaces
-/// at once. The caller wraps only requests that are safe to repeat (never orders).
-async fn retry(
-    send: impl AsyncFn() -> reqwest::Result<reqwest::Response>,
-) -> reqwest::Result<reqwest::Response> {
-    let mut tries = 0;
-    loop {
-        match send().await {
-            Ok(response) => return Ok(response),
-            Err(error) if tries < MAX_RETRIES => {
-                tries += 1;
-                tracing::warn!(%error, tries, "sim stock request failed, retrying");
-                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+/// Log and retry past any transient failure. The caller wraps only requests that are safe to
+/// repeat (never orders).
+fn retry_any(error: &reqwest::Error) -> bool {
+    tracing::warn!(%error, "sim stock request failed, retrying");
+    true
 }
 
 pub struct SimStockClient {
@@ -106,14 +99,18 @@ impl SimStockClient {
         }
 
         let url = self.base.join(urls::USER_STOCKS).into_diagnostic()?;
-        let response: Response = retry(async || {
-            self.client
-                .post(url.clone())
-                .form(&[("account", &self.account), ("password", &self.password)])
-                .send()
-                .await?
-                .error_for_status()
-        })
+        let response: Response = RetryIf::start(
+            FixedInterval::from_millis(RETRY_DELAY_MS).take(USER_STOCKS_RETRIES),
+            || async {
+                self.client
+                    .post(url.clone())
+                    .form(&[("account", &self.account), ("password", &self.password)])
+                    .send()
+                    .await?
+                    .error_for_status()
+            },
+            retry_any,
+        )
         .await
         .into_diagnostic()?
         .json()
@@ -194,13 +191,17 @@ impl SimStockClient {
     pub async fn login(&self) -> Result<()> {
         let url = self.base.join(urls::LOGIN).into_diagnostic()?;
 
-        let login_page = retry(async || {
-            self.client
-                .get(url.clone())
-                .send()
-                .await?
-                .error_for_status()
-        })
+        let login_page = RetryIf::start(
+            FixedInterval::from_millis(RETRY_DELAY_MS).take(LOGIN_RETRIES),
+            || async {
+                self.client
+                    .get(url.clone())
+                    .send()
+                    .await?
+                    .error_for_status()
+            },
+            retry_any,
+        )
         .await
         .into_diagnostic()?
         .text()
@@ -213,20 +214,24 @@ impl SimStockClient {
             parse_csrf(&login_page).ok_or_else(|| miette!("login page missing csrf token"))?;
 
         // Django rejects the HTTPS POST without a Referer matching the host.
-        retry(async || {
-            self.client
-                .post(url.clone())
-                .header(reqwest::header::REFERER, url.as_str())
-                .form(&[
-                    ("csrfmiddlewaretoken", token),
-                    ("account", self.account.as_str()),
-                    ("password", self.password.as_str()),
-                    ("next", ""),
-                ])
-                .send()
-                .await?
-                .error_for_status()
-        })
+        RetryIf::start(
+            FixedInterval::from_millis(RETRY_DELAY_MS).take(LOGIN_RETRIES),
+            || async {
+                self.client
+                    .post(url.clone())
+                    .header(reqwest::header::REFERER, url.as_str())
+                    .form(&[
+                        ("csrfmiddlewaretoken", token),
+                        ("account", self.account.as_str()),
+                        ("password", self.password.as_str()),
+                        ("next", ""),
+                    ])
+                    .send()
+                    .await?
+                    .error_for_status()
+            },
+            retry_any,
+        )
         .await
         .into_diagnostic()?;
 
@@ -246,13 +251,17 @@ impl SimStockClient {
     )]
     pub async fn profile(&self) -> Result<Profile> {
         let url = self.base.join(urls::PROFILE).into_diagnostic()?;
-        let profile_page = retry(async || {
-            self.client
-                .get(url.clone())
-                .send()
-                .await?
-                .error_for_status()
-        })
+        let profile_page = RetryIf::start(
+            FixedInterval::from_millis(RETRY_DELAY_MS).take(PROFILE_RETRIES),
+            || async {
+                self.client
+                    .get(url.clone())
+                    .send()
+                    .await?
+                    .error_for_status()
+            },
+            retry_any,
+        )
         .await
         .into_diagnostic()?
         .text()
@@ -287,16 +296,23 @@ impl SimStockClient {
 
         let url = self.base.join(urls::STOCK_LIST).into_diagnostic()?;
 
-        let map: HashMap<String, Entry> = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .into_diagnostic()?
-            .json()
-            .await
-            .into_diagnostic()
-            .wrap_err("decode sim stock list")?;
+        let map: HashMap<String, Entry> = RetryIf::start(
+            FixedInterval::from_millis(RETRY_DELAY_MS).take(STOCK_LIST_RETRIES),
+            || async {
+                self.client
+                    .get(url.clone())
+                    .send()
+                    .await?
+                    .error_for_status()
+            },
+            retry_any,
+        )
+        .await
+        .into_diagnostic()?
+        .json()
+        .await
+        .into_diagnostic()
+        .wrap_err("decode sim stock list")?;
 
         tracing::Span::current().record("symbols", map.len());
 

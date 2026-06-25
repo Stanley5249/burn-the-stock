@@ -15,6 +15,7 @@ reqwest = {
 scraper = "0.27.0"
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["time"] }
+tokio-retry = "0.3.2"
 tracing.workspace = true
 url.workspace = true
 

@@ -3,16 +3,18 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio_retry::RetryIf;
+use tokio_retry::strategy::ExponentialBackoff;
 use url::Url;
 
 use crate::urls::fugle as urls;
 use miette::{IntoDiagnostic, Result, WrapErr};
 
 /// Give up on a rate-limited symbol after this many backoff retries.
-const MAX_QUOTE_RETRIES: u32 = 5;
+pub const QUOTE_RETRIES: usize = 5;
 
 /// Ceiling on the 429 backoff pace. Raise if the rate limit tightens.
-const MAX_QUOTE_DELAY_MS: u64 = 8_000;
+pub const QUOTE_MAX_DELAY_MS: u64 = 8_000;
 
 /// Fugle market data client. Owns a `reqwest::Client` carrying the `X-API-KEY` header.
 pub struct FugleClient {
@@ -49,9 +51,9 @@ impl FugleClient {
     }
 
     /// Fetch a quote per symbol, sequential and paced by `delay`. On a rate-limit (429) it
-    /// doubles the pace up to [`MAX_QUOTE_DELAY_MS`] and retries the same symbol, so the rest of
+    /// doubles the pace up to [`QUOTE_MAX_DELAY_MS`] and retries the same symbol, so the rest of
     /// the batch self-tunes to the limit and coverage stays full. A non-rate-limit failure is
-    /// logged and skipped, and a symbol still limited after [`MAX_QUOTE_RETRIES`] backoffs is
+    /// logged and skipped, and a symbol still limited after [`QUOTE_RETRIES`] backoffs is
     /// given up on.
     #[tracing::instrument(skip_all, fields(symbols = symbols.len(), delay, fetched, priced))]
     pub async fn quotes(&self, symbols: &[String], mut delay: u64) -> HashMap<String, FugleQuote> {
@@ -66,35 +68,43 @@ impl FugleClient {
                 }
             };
 
-            let mut retries = 0;
-            loop {
-                match self.request_quote(url.clone()).await {
-                    Ok(quote) => {
-                        // Log each landing so the long sweep streams live; priced=false is a null
-                        // quote (no session price yet).
-                        tracing::info!(
-                            %symbol,
-                            done = index + 1,
-                            priced = quote.open_price.is_some(),
-                            last = ?quote.last_price,
-                            "quote",
-                        );
-                        quotes.insert(symbol.clone(), quote);
-                        break;
+            // Seed the per-symbol backoff from the current pace, then grow that pace on each 429
+            // so the rest of the batch inherits the raised delay and self-tunes to the limit.
+            let result = RetryIf::start(
+                ExponentialBackoff::from_millis(2)
+                    .factor(delay)
+                    .max_delay(Duration::from_millis(QUOTE_MAX_DELAY_MS))
+                    .take(QUOTE_RETRIES),
+                || {
+                    let url = url.clone();
+                    async move { self.request_quote(url).await }
+                },
+                |error: &reqwest::Error| {
+                    let limited = error.status() == Some(StatusCode::TOO_MANY_REQUESTS);
+                    if limited {
+                        delay = delay.saturating_mul(2).min(QUOTE_MAX_DELAY_MS);
+                        tracing::warn!(%symbol, delay, "Fugle rate limit, backing off");
                     }
-                    Err(error)
-                        if retries < MAX_QUOTE_RETRIES
-                            && error.status() == Some(StatusCode::TOO_MANY_REQUESTS) =>
-                    {
-                        retries += 1;
-                        delay = delay.saturating_mul(2).min(MAX_QUOTE_DELAY_MS);
-                        tracing::warn!(%symbol, delay, retries, "Fugle rate limit, backing off");
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%symbol, %error, "quote failed");
-                        break;
-                    }
+                    limited
+                },
+            )
+            .await;
+
+            match result {
+                Ok(quote) => {
+                    // Log each landing so the long sweep streams live; priced=false is a null
+                    // quote (no session price yet).
+                    tracing::info!(
+                        %symbol,
+                        done = index + 1,
+                        priced = quote.open_price.is_some(),
+                        last = ?quote.last_price,
+                        "quote",
+                    );
+                    quotes.insert(symbol.clone(), quote);
+                }
+                Err(error) => {
+                    tracing::warn!(%symbol, %error, "quote failed");
                 }
             }
             tokio::time::sleep(Duration::from_millis(delay)).await;
