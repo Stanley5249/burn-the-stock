@@ -12,10 +12,8 @@ mod pricing;
 mod report;
 mod types;
 
-pub use engine::{affordable_shares, run, score_weights};
-pub use pricing::{
-    LOT, SELL_TAX_RATE, buy_price, commission, round_trip_cost, sell_price, tick_ceil, tick_floor,
-};
+pub use engine::{affordable_shares, run};
+pub use pricing::{LOT, SELL_TAX_RATE, commission, sell_price, tick_ceil};
 pub use report::{RenderContext, summary};
 pub use types::{BacktestConfig, BacktestReport, DayBar, ExitReason, Fill, TradingDay, Weighting};
 
