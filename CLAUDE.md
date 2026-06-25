@@ -1,6 +1,6 @@
 # burn-the-stock
 
-Taiwan stock trading bot with a Burn neural network backend. The trading platform is sim_stock (https://ciot.imis.ncku.edu.tw/sim_stock).
+Taiwan stock trading bot with a Burn neural network backend. The trading platform is sim_stock (https://ciot.imis.ncku.edu.tw/stock).
 
 ## Cargo
 
