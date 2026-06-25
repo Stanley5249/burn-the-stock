@@ -53,11 +53,11 @@ impl FugleClient {
     /// the batch self-tunes to the limit and coverage stays full. A non-rate-limit failure is
     /// logged and skipped, and a symbol still limited after [`MAX_QUOTE_RETRIES`] backoffs is
     /// given up on.
-    #[tracing::instrument(skip_all, fields(symbols = symbols.len(), delay))]
+    #[tracing::instrument(skip_all, fields(symbols = symbols.len(), delay, fetched, priced))]
     pub async fn quotes(&self, symbols: &[String], mut delay: u64) -> HashMap<String, FugleQuote> {
         let mut quotes = HashMap::with_capacity(symbols.len());
 
-        for symbol in symbols {
+        for (index, symbol) in symbols.iter().enumerate() {
             let url = match quote_url(symbol) {
                 Ok(url) => url,
                 Err(error) => {
@@ -70,6 +70,15 @@ impl FugleClient {
             loop {
                 match self.request_quote(url.clone()).await {
                     Ok(quote) => {
+                        // Log each landing so the long sweep streams live; priced=false is a null
+                        // quote (no session price yet).
+                        tracing::info!(
+                            %symbol,
+                            done = index + 1,
+                            priced = quote.open_price.is_some(),
+                            last = ?quote.last_price,
+                            "quote",
+                        );
                         quotes.insert(symbol.clone(), quote);
                         break;
                     }
@@ -90,6 +99,16 @@ impl FugleClient {
             }
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
+
+        // priced counts quotes that have an open price, which means the session has started.
+        let priced = quotes
+            .values()
+            .filter(|quote| quote.open_price.is_some())
+            .count();
+        let span = tracing::Span::current();
+        span.record("fetched", quotes.len());
+        span.record("priced", priced);
+
         quotes
     }
 

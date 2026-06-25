@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate, TimeDelta};
 use clap::Parser;
 use miette::Result;
 use stock_client::sim_stock::SimStockClient;
@@ -25,6 +25,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -32,6 +33,15 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let sim_client = SimStockClient::from_env(None, None)?;
-    refresh(&sim_client, &args.output, args.floor).await
+
+    let client = SimStockClient::from_env(None, None)?;
+
+    let stock_list = client.stock_list().await?;
+
+    // Stop at yesterday; today's bar is not final until the market closes.
+    let end = Local::now().date_naive() - TimeDelta::days(1);
+
+    refresh(stock_list, &args.output, args.floor, end).await?;
+
+    Ok(())
 }

@@ -34,7 +34,7 @@ type Backend = Wgpu;
 
 /// Guard the session and confirm the OHLCV is fresh enough to trade. Logs in to sim along the
 /// way so the login round trip overlaps the calendar fetch.
-#[tracing::instrument(skip_all, fields(%datetime))]
+#[tracing::instrument(skip_all, fields(datetime = %datetime.naive_local()))]
 async fn preflight(
     sim_client: &SimStockClient,
     args: &Args,
@@ -47,17 +47,23 @@ async fn preflight(
     let today = datetime.date_naive();
     let day_kind = calendar.day_kind(today);
     let session = calendar.session(datetime);
-    tracing::info!(%today, %day_kind, %session.date, %session.prior);
+    tracing::info!(%day_kind, %session.date, %session.prior);
 
     // Refresh the OHLCV before scoring so a forgotten refresh never trades stale data.
-    if !args.no_download {
+    let history = if args.no_download {
+        History::scan(&args.data)?
+    } else {
         let floor: NaiveDate = stock_data::schema::DEFAULT_FLOOR
             .parse()
             .into_diagnostic()?;
-        stock_data::refresh::refresh(sim_client, &args.data, floor).await?;
-    }
 
-    let last_date = History::scan(&args.data)?
+        let stock_list = sim_client.stock_list().await?;
+
+        // Fetch only through the prior trading session; today's bar is not final yet.
+        stock_data::refresh::refresh(stock_list, &args.data, floor, session.prior).await?
+    };
+
+    let last_date = history
         .last_date()
         .wrap_err_with(|| format!("scan {} for the last date", args.data.display()))?;
 

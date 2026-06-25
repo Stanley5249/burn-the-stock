@@ -9,7 +9,7 @@ use chrono::{Duration, NaiveDate};
 use miette::{IntoDiagnostic, Result, miette};
 use polars::prelude::*;
 
-use crate::schema::DATE;
+use crate::schema::{CLOSE, CODE, DATE, HIGH, LOW, MARKET, OPEN, VOLUME};
 
 /// A pending query over history bars. Methods accumulate `LazyFrame` ops; `lazy`,
 /// `collect`, `sink`, and `last_date` are the terminals.
@@ -24,10 +24,21 @@ impl History {
     /// # Errors
     /// If the path is not valid UTF-8 or the parquet cannot be scanned.
     pub fn scan(path: &Path) -> Result<Self> {
-        let source = PlRefPath::try_from_path(path).into_diagnostic()?;
-        let lazy = LazyFrame::scan_parquet(source, ScanArgsParquet::default())
+        let path = PlRefPath::try_from_path(path).into_diagnostic()?;
+
+        let lazy = LazyFrame::scan_parquet(path, ScanArgsParquet::default())
             .into_diagnostic()?
-            .with_column(col(DATE).cast(DataType::Date));
+            .select([
+                col(MARKET).cast(DataType::String),
+                col(CODE).cast(DataType::String),
+                col(DATE).cast(DataType::Date),
+                col(OPEN).cast(DataType::Float32),
+                col(HIGH).cast(DataType::Float32),
+                col(LOW).cast(DataType::Float32),
+                col(CLOSE).cast(DataType::Float32),
+                col(VOLUME).cast(DataType::Float32),
+            ]);
+
         Ok(Self { lazy })
     }
 
@@ -77,21 +88,45 @@ impl History {
         self.lazy.collect().into_diagnostic()
     }
 
-    /// Collect and write the frame to `path` as a zstd parquet, creating parent dirs.
+    /// Write the frame to `path` as a zstd parquet, creating parent dirs, and return the
+    /// materialized frame. The sink write and the in-memory collect run in one pass so the
+    /// shared scan executes once, sparing callers a re-read of the file they just wrote.
     ///
     /// # Errors
     /// If the query cannot be collected or the file cannot be written.
-    pub fn sink(self, path: &Path) -> Result<()> {
-        let mut frame = self.lazy.collect().into_diagnostic()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).into_diagnostic()?;
-        }
-        let mut file = std::fs::File::create(path).into_diagnostic()?;
-        ParquetWriter::new(&mut file)
-            .with_compression(ParquetCompression::Zstd(None))
-            .finish(&mut frame)
+    pub fn sink(self, path: &Path) -> Result<Self> {
+        let sink = self
+            .lazy
+            .clone()
+            .sink(
+                SinkDestination::File {
+                    target: SinkTarget::Path(PlRefPath::try_from_path(path).into_diagnostic()?),
+                },
+                FileWriteFormat::Parquet(Arc::new(ParquetWriteOptions {
+                    compression: ParquetCompression::Zstd(None),
+                    ..Default::default()
+                })),
+                UnifiedSinkArgs {
+                    mkdir: true,
+                    maintain_order: false,
+                    ..Default::default()
+                },
+            )
             .into_diagnostic()?;
-        Ok(())
+
+        // Results follow input order, so the data is last. The sink writes the file and yields empty.
+        let mut out = LazyFrame::collect_all_with_engine(
+            vec![sink.logical_plan, self.lazy.logical_plan],
+            Engine::InMemory,
+            OptFlags::default(),
+        )
+        .into_diagnostic()?;
+
+        let data = out
+            .pop()
+            .ok_or_else(|| miette!("collect_all returned no frames"))?;
+
+        Ok(Self::from_lazy(data.lazy()))
     }
 
     /// The most recent dated bar, used to verify the data is fresh enough for trading.
@@ -111,7 +146,7 @@ impl History {
             .as_date_iter()
             .flatten()
             .next()
-            .ok_or_else(|| miette!("parquet has no dated rows"))
+            .ok_or_else(|| miette!("dataframe has no dated rows"))
     }
 }
 

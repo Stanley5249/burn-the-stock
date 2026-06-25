@@ -2,49 +2,29 @@
 //! universe, pull bars since the last stored date, append, dedup, and sink. The pure-Rust
 //! replacement for the Python downloader.
 
-use std::collections::HashMap;
 use std::path::Path;
 
-use chrono::{Duration, Local, NaiveDate};
-use miette::{IntoDiagnostic, Result};
+use chrono::{NaiveDate, TimeDelta};
+use futures::{StreamExt, future, stream};
+use miette::{Context, IntoDiagnostic, Result};
 use polars::prelude::*;
-use stock_client::sim_stock::SimStockClient;
-use stock_client::types::{MarketType, StockListEntry};
+use stock_client::types::MarketType;
 use stock_client::yahoo::{ChartBars, YahooClient};
 
 use crate::read::History;
-use crate::schema::{CLOSE, CODE, DATE, HIGH, LOW, MARKET, OPEN, VOLUME};
+use crate::schema::{ADJCLOSE, CLOSE, CODE, DATE, HIGH, LOW, MARKET, OPEN, VOLUME};
 
-/// A universe symbol mapped to its Yahoo ticker and our `tse`/`otc` market label.
-struct Symbol {
-    code: String,
-    yahoo: String,
-    market: &'static str,
-}
+/// In-flight chart requests; Yahoo is one symbol per request.
+const CONCURRENCY: usize = 16;
 
-/// Map the sim stock universe to Yahoo symbols, dropping ESB names Yahoo does not carry.
-fn classify(entries: Vec<StockListEntry>) -> Vec<Symbol> {
-    entries
-        .into_iter()
-        .filter_map(|entry| {
-            let (suffix, market) = match entry.market_type {
-                MarketType::Twse | MarketType::Etf => (".TW", "tse"),
-                MarketType::Otc => (".TWO", "otc"),
-                MarketType::Esb => return None,
-            };
-            Some(Symbol {
-                yahoo: format!("{}{suffix}", entry.code),
-                code: entry.code,
-                market,
-            })
-        })
-        .collect()
-}
+/// Abandon the refresh once this many chart requests fail, so a Yahoo outage stops fast instead
+/// of grinding through the whole universe.
+const MAX_ERRORS: usize = 16;
 
 /// Assemble unadjusted bars into a frame, then fold the split/dividend adjustment in column-wise:
 /// scale OHLC by `adjclose / close`, keep volume raw, drop rows with no usable close, and rename
 /// adjclose to close.
-fn adjusted_frame(bars: ChartBars) -> PolarsResult<LazyFrame> {
+fn adjusted_frame(bars: ChartBars) -> Result<LazyFrame> {
     let raw = df!(
         DATE => bars.dates,
         OPEN => bars.open,
@@ -52,58 +32,43 @@ fn adjusted_frame(bars: ChartBars) -> PolarsResult<LazyFrame> {
         LOW => bars.low,
         CLOSE => bars.close,
         VOLUME => bars.volume,
-        "adjclose" => bars.adjclose,
-    )?;
+        ADJCLOSE => bars.adjclose,
+    )
+    .into_diagnostic()
+    .wrap_err("build dataframe from chart bars")?;
 
-    let usable = col(CLOSE)
-        .is_not_null()
-        .and(col(CLOSE).is_not_nan())
-        .and(col("adjclose").is_not_null())
-        .and(col("adjclose").is_not_nan());
-    let factor = col("adjclose") / col(CLOSE);
+    let factor = col(ADJCLOSE) / col(CLOSE);
 
-    Ok(raw.lazy().filter(usable).select([
+    Ok(raw.lazy().filter(factor.clone().is_finite()).select([
         col(DATE),
         (col(OPEN) * factor.clone()).alias(OPEN),
         (col(HIGH) * factor.clone()).alias(HIGH),
         (col(LOW) * factor).alias(LOW),
-        // adjusted close is just adjclose (close * adjclose / close).
-        col("adjclose").alias(CLOSE),
+        col(ADJCLOSE).alias(CLOSE),
         col(VOLUME),
     ]))
 }
 
-/// Project a frame onto the canonical column order so strict vertical concat lines up.
+/// Project a frame onto the canonical column order so strict vertical concat lines up with the
+/// scanned history frame.
 fn canonical(lazy: LazyFrame) -> LazyFrame {
     lazy.select([
-        col(DATE),
+        col(MARKET),
         col(CODE),
+        col(DATE),
         col(OPEN),
         col(HIGH),
         col(LOW),
         col(CLOSE),
         col(VOLUME),
-        col(MARKET),
     ])
 }
 
 /// Concat the per-symbol and prior frames, drop rows with any null price, keep the newest
 /// row per `(code, date)`, and sort. Frames must arrive oldest-first so `keep=Last` wins.
 fn consolidate(frames: Vec<LazyFrame>) -> PolarsResult<LazyFrame> {
-    let not_null = col(OPEN)
-        .is_not_null()
-        .and(col(HIGH).is_not_null())
-        .and(col(LOW).is_not_null())
-        .and(col(CLOSE).is_not_null());
-
-    let on_code_date = Selector::ByName {
-        names: vec![CODE, DATE].into(),
-        strict: true,
-    };
-
     Ok(concat(frames, UnionArgs::default())?
-        .filter(not_null)
-        .unique(Some(on_code_date), UniqueKeepStrategy::Last)
+        .unique(Some(cols([MARKET, CODE, DATE])), UniqueKeepStrategy::Last)
         .sort([MARKET, CODE, DATE], SortMultipleOptions::new()))
 }
 
@@ -112,92 +77,86 @@ fn consolidate(frames: Vec<LazyFrame>) -> PolarsResult<LazyFrame> {
 ///
 /// # Errors
 /// Network, parse, or parquet failure.
-pub async fn refresh(sim_client: &SimStockClient, output: &Path, floor: NaiveDate) -> Result<()> {
-    let symbols = classify(sim_client.stock_list().await?);
-
+pub async fn refresh(
+    entries: impl IntoIterator<Item = (String, MarketType)>,
+    output: &Path,
+    floor: NaiveDate,
+    end: NaiveDate,
+) -> Result<History> {
     let exists = output.exists();
+
+    let history = History::scan(output)?;
+
     let start = if exists {
-        History::scan(output)?.last_date()? + Duration::days(1)
+        history.last_date()? + TimeDelta::days(1)
     } else {
         floor
     };
-    let end = Local::now().date_naive();
+
     if start > end {
         tracing::info!(%end, "history already current");
-        return Ok(());
+        return Ok(history);
     }
-
-    let yahoo_symbols: Vec<String> = symbols.iter().map(|symbol| symbol.yahoo.clone()).collect();
-    tracing::info!(symbols = yahoo_symbols.len(), %start, %end, "fetching bars");
 
     let client = YahooClient::new().await?;
-    let fetched = client.download(&yahoo_symbols, start, end).await;
-    if fetched.is_empty() {
-        tracing::warn!("no bars fetched; leaving history unchanged");
-        return Ok(());
-    }
+    let client = &client;
 
-    let by_yahoo: HashMap<&str, &Symbol> = symbols
-        .iter()
-        .map(|symbol| (symbol.yahoo.as_str(), symbol))
-        .collect();
-
-    // Prior bars first so consolidate's keep=Last lets a re-fetched day overwrite them.
-    let mut frames: Vec<LazyFrame> = Vec::new();
-    if exists {
-        frames.push(canonical(History::scan(output)?.lazy()));
-    }
-    for (yahoo, bars) in fetched {
-        let Some(symbol) = by_yahoo.get(yahoo.as_str()) else {
-            continue;
+    let entries = entries.into_iter().filter_map(|(code, market_type)| {
+        let (suffix, market) = match market_type {
+            MarketType::Twse | MarketType::Etf => ("TW", "tse"),
+            MarketType::Otc => ("TWO", "otc"),
+            MarketType::Esb => return None,
         };
-        let frame = adjusted_frame(bars).into_diagnostic()?;
-        frames.push(canonical(frame.with_columns([
-            lit(symbol.code.as_str()).alias(CODE),
-            lit(symbol.market).alias(MARKET),
-        ])));
+
+        let symbol = format!("{code}.{suffix}");
+
+        Some((market, code, symbol))
+    });
+
+    let bars: Vec<_> = stream::iter(entries)
+        .map(async |(market, code, symbol)| {
+            client
+                .chart(&symbol, start, end)
+                .await
+                .ok()
+                .map(|bars| (market, code, bars))
+        })
+        .buffer_unordered(CONCURRENCY)
+        .scan(0, |errors, fetched| {
+            *errors += usize::from(fetched.is_none());
+            // Halt the stream once Yahoo has failed too many times rather than fetch every symbol.
+            future::ready((*errors <= MAX_ERRORS).then_some(fetched))
+        })
+        .filter_map(future::ready)
+        .collect()
+        .await;
+
+    // No bars means Yahoo gave us nothing, so leave the existing file untouched.
+    if bars.is_empty() {
+        tracing::warn!("yahoo returned no bars, leaving history unchanged");
+        return Ok(history);
+    }
+
+    let mut frames: Vec<LazyFrame> = Vec::with_capacity(bars.len() + 1);
+
+    if exists {
+        frames.push(history.lazy());
+    }
+
+    for (market, code, bars) in bars {
+        let frame =
+            adjusted_frame(bars)?.with_columns([lit(market).alias(MARKET), lit(code).alias(CODE)]);
+        frames.push(canonical(frame));
     }
 
     let merged = consolidate(frames).into_diagnostic()?;
+
     History::from_lazy(merged).sink(output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn classify_maps_markets_and_drops_esb() {
-        let entries = ["TWSE", "ETF", "OTC", "ESB"]
-            .into_iter()
-            .zip(["2330", "0050", "6488", "1234"])
-            .map(|(kind, code)| StockListEntry {
-                code: code.to_string(),
-                market_type: match kind {
-                    "TWSE" => MarketType::Twse,
-                    "ETF" => MarketType::Etf,
-                    "OTC" => MarketType::Otc,
-                    _ => MarketType::Esb,
-                },
-            })
-            .collect();
-
-        let symbols = classify(entries);
-        let mapped: Vec<(&str, &str, &str)> = symbols
-            .iter()
-            .map(|s| (s.code.as_str(), s.yahoo.as_str(), s.market))
-            .collect();
-
-        // ESB dropped; TWSE and ETF both -> .TW/tse; OTC -> .TWO/otc.
-        assert_eq!(
-            mapped,
-            [
-                ("2330", "2330.TW", "tse"),
-                ("0050", "0050.TW", "tse"),
-                ("6488", "6488.TWO", "otc"),
-            ]
-        );
-    }
 
     #[test]
     fn adjusted_frame_scales_ohlc_keeps_volume_drops_null() {
@@ -224,31 +183,29 @@ mod tests {
         );
 
         // factor = 90/100 = 0.9 applied to OHLC, volume untouched.
-        let close = out.column(&CLOSE).unwrap().f64().unwrap().get(0).unwrap();
-        let open = out.column(&OPEN).unwrap().f64().unwrap().get(0).unwrap();
-        let high = out.column(&HIGH).unwrap().f64().unwrap().get(0).unwrap();
-        let volume = out.column(&VOLUME).unwrap().f64().unwrap().get(0).unwrap();
-        assert!((close - 90.0).abs() < 1e-9);
-        assert!((open - 90.0).abs() < 1e-9);
-        assert!((high - 99.0).abs() < 1e-9);
-        assert!((volume - 1000.0).abs() < 1e-9);
+        let close = out.column(&CLOSE).unwrap().f32().unwrap().get(0).unwrap();
+        let open = out.column(&OPEN).unwrap().f32().unwrap().get(0).unwrap();
+        let high = out.column(&HIGH).unwrap().f32().unwrap().get(0).unwrap();
+        let volume = out.column(&VOLUME).unwrap().f32().unwrap().get(0).unwrap();
+        assert!((close - 90.0).abs() < 1e-4);
+        assert!((open - 90.0).abs() < 1e-4);
+        assert!((high - 99.0).abs() < 1e-4);
+        assert!((volume - 1000.0).abs() < 1e-4);
     }
 
     fn bar(code: &str, day: u32, close: f64) -> LazyFrame {
-        canonical(
-            df!(
-                DATE => &[NaiveDate::from_ymd_opt(2024, 1, day).unwrap()],
-                CODE => &[code],
-                OPEN => &[close],
-                HIGH => &[close],
-                LOW => &[close],
-                CLOSE => &[close],
-                VOLUME => &[1.0],
-                MARKET => &["tse"],
-            )
-            .unwrap()
-            .lazy(),
+        df!(
+            DATE => &[NaiveDate::from_ymd_opt(2024, 1, day).unwrap()],
+            CODE => &[code],
+            OPEN => &[close],
+            HIGH => &[close],
+            LOW => &[close],
+            CLOSE => &[close],
+            VOLUME => &[1.0],
+            MARKET => &["tse"],
         )
+        .unwrap()
+        .lazy()
     }
 
     #[test]

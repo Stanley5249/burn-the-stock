@@ -8,7 +8,7 @@ use url::Url;
 
 use std::collections::HashMap;
 
-use crate::types::{MarketType, Profile, StockListEntry, UserStock};
+use crate::types::{MarketType, Profile, UserStock};
 use crate::urls::sim_stock as urls;
 
 /// Per-request timeout for `sim_stock` when callers do not set one. The platform is flaky and a
@@ -33,7 +33,7 @@ async fn retry(
             Ok(response) => return Ok(response),
             Err(error) if tries < MAX_RETRIES => {
                 tries += 1;
-                tracing::warn!(%error, tries, "sim_stock request failed, retrying");
+                tracing::warn!(%error, tries, "sim stock request failed, retrying");
                 tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
             }
             Err(error) => return Err(error),
@@ -90,7 +90,7 @@ impl SimStockClient {
 
     /// # Errors
     /// Network or deserialization failure, or if the platform rejects the request.
-    #[instrument(skip_all, err)]
+    #[instrument(skip_all, fields(holdings), err)]
     pub async fn user_stocks(&self) -> Result<Vec<UserStock>> {
         #[derive(Deserialize)]
         #[serde(tag = "result", deny_unknown_fields)]
@@ -122,7 +122,10 @@ impl SimStockClient {
         .wrap_err("decode user_stocks")?;
 
         match response {
-            Response::Success { data, .. } => Ok(data),
+            Response::Success { data, .. } => {
+                tracing::Span::current().record("holdings", data.len());
+                Ok(data)
+            }
             Response::Failed { status } => bail!("sim_stock rejected request: {status}"),
         }
     }
@@ -132,7 +135,7 @@ impl SimStockClient {
     ///
     /// # Errors
     /// Network failure or if the server rejects the order.
-    #[instrument(skip_all, err)]
+    #[instrument(skip(self), err)]
     pub async fn buy(&self, code: &str, lots: u64, price: f64) -> Result<()> {
         self.order(urls::BUY, code, lots, price).await
     }
@@ -141,7 +144,7 @@ impl SimStockClient {
     ///
     /// # Errors
     /// Network failure or if the server rejects the order.
-    #[instrument(skip_all, err)]
+    #[instrument(skip(self), err)]
     pub async fn sell(&self, code: &str, lots: u64, price: f64) -> Result<()> {
         self.order(urls::SELL, code, lots, price).await
     }
@@ -236,7 +239,11 @@ impl SimStockClient {
     ///
     /// # Errors
     /// Network failure or a missing field on the page.
-    #[instrument(skip_all, err)]
+    #[instrument(
+        skip_all,
+        fields(usable_cash, total_assets, cumulative_return, trade_count),
+        err
+    )]
     pub async fn profile(&self) -> Result<Profile> {
         let url = self.base.join(urls::PROFILE).into_diagnostic()?;
         let profile_page = retry(async || {
@@ -254,7 +261,15 @@ impl SimStockClient {
 
         let profile_page = Html::parse_document(&profile_page);
 
-        parse_profile(&profile_page)
+        let profile = parse_profile(&profile_page)?;
+
+        let span = tracing::Span::current();
+        span.record("usable_cash", profile.usable_cash);
+        span.record("total_assets", profile.total_assets);
+        span.record("cumulative_return", profile.cumulative_return);
+        span.record("trade_count", profile.trade_count);
+
+        Ok(profile)
     }
 
     /// Fetch the full symbol universe. Unauthenticated, so it is a free function like
@@ -262,8 +277,9 @@ impl SimStockClient {
     ///
     /// # Errors
     /// Network or deserialization failure.
-    #[instrument(skip_all, err)]
-    pub async fn stock_list(&self) -> Result<Vec<StockListEntry>> {
+    #[instrument(skip_all, fields(symbols), err)]
+    pub async fn stock_list(&self) -> Result<HashMap<String, MarketType>> {
+        // Each value is an object like {"name": "台積電", "type": "TWSE"}, so pull out the type.
         #[derive(Deserialize)]
         struct Entry {
             r#type: MarketType,
@@ -282,12 +298,11 @@ impl SimStockClient {
             .into_diagnostic()
             .wrap_err("decode sim stock list")?;
 
+        tracing::Span::current().record("symbols", map.len());
+
         Ok(map
             .into_iter()
-            .map(|(code, entry)| StockListEntry {
-                code,
-                market_type: entry.r#type,
-            })
+            .map(|(code, entry)| (code, entry.r#type))
             .collect())
     }
 }

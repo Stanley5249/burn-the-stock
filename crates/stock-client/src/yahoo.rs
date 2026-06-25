@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Duration as ChronoDuration, NaiveDate};
-use futures::stream::{self, StreamExt};
+use chrono::{DateTime, NaiveDate, TimeDelta};
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
@@ -19,24 +18,9 @@ const INITIAL_DELAY_MS: u64 = 500;
 /// Ceiling on the 429 backoff pace. Raise if the rate limit tightens.
 const MAX_CHART_DELAY_MS: u64 = 8_000;
 
-/// In-flight chart requests; Yahoo is one symbol per request.
-const CONCURRENCY: usize = 16;
-
 /// Yahoo Finance chart client. Owns a cookie-storing `reqwest::Client` with a browser UA.
 pub struct YahooClient {
     client: reqwest::Client,
-}
-
-/// Flat, unadjusted daily bars decoded from a chart response. Dates are local to the exchange.
-/// `adjclose` is kept so the caller can fold the split/dividend adjustment into OHLC.
-pub struct ChartBars {
-    pub dates: Vec<NaiveDate>,
-    pub open: Vec<Option<f64>>,
-    pub high: Vec<Option<f64>>,
-    pub low: Vec<Option<f64>>,
-    pub close: Vec<Option<f64>>,
-    pub volume: Vec<Option<f64>>,
-    pub adjclose: Vec<Option<f64>>,
 }
 
 impl YahooClient {
@@ -55,10 +39,25 @@ impl YahooClient {
             .into_diagnostic()
             .wrap_err("build yahoo client")?;
 
-        // chart API needs no crumb; add a cookie+crumb flow if Yahoo starts returning 401.
-        let _ = client.get(urls::CONSENT).send().await;
+        let client = Self { client };
 
-        Ok(Self { client })
+        client.consent().await.ok();
+
+        Ok(client)
+    }
+
+    /// chart API needs no crumb; add a cookie+crumb flow if Yahoo starts returning 401.
+    #[tracing::instrument(skip_all, err)]
+    async fn consent(&self) -> Result<()> {
+        self.client
+            .get(urls::CONSENT)
+            .send()
+            .await
+            .into_diagnostic()?
+            .error_for_status()
+            .into_diagnostic()?;
+
+        Ok(())
     }
 
     /// Fetch unadjusted daily bars for one `symbol`, named after the `/v8/finance/chart` endpoint.
@@ -67,14 +66,25 @@ impl YahooClient {
     ///
     /// # Errors
     /// Network, deserialization, or empty/missing chart data.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip_all, fields(symbol, %start, %end))]
     pub async fn chart(&self, symbol: &str, start: NaiveDate, end: NaiveDate) -> Result<ChartBars> {
         let url = chart_url(symbol, start, end)?;
 
         let mut delay = INITIAL_DELAY_MS;
         let mut retries = 0;
+
         let response = loop {
-            match self.request_chart(url.clone()).await {
+            match self
+                .client
+                .get(url.clone())
+                .send()
+                .await
+                .into_diagnostic()?
+                .error_for_status()
+                .into_diagnostic()?
+                .json()
+                .await
+            {
                 Ok(response) => break response,
                 Err(error)
                     if retries < MAX_CHART_RETRIES
@@ -91,53 +101,17 @@ impl YahooClient {
 
         bars(symbol, response)
     }
-
-    /// Fetch many symbols concurrently. A failed symbol is logged and dropped, so the returned
-    /// vec covers only the successes.
-    #[tracing::instrument(skip_all, fields(symbols = symbols.len()))]
-    pub async fn download(
-        &self,
-        symbols: &[String],
-        start: NaiveDate,
-        end: NaiveDate,
-    ) -> Vec<(String, ChartBars)> {
-        stream::iter(symbols.iter().cloned())
-            .map(|symbol| async move {
-                match self.chart(&symbol, start, end).await {
-                    Ok(bars) => Some((symbol, bars)),
-                    Err(error) => {
-                        tracing::warn!(%symbol, %error, "chart failed");
-                        None
-                    }
-                }
-            })
-            .buffer_unordered(CONCURRENCY)
-            .filter_map(|entry| async move { entry })
-            .collect()
-            .await
-    }
-
-    /// Inner request kept at the reqwest level so [`chart`](Self::chart) can read the HTTP status
-    /// for the 429 backoff.
-    async fn request_chart(&self, url: Url) -> reqwest::Result<ChartResponse> {
-        self.client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await
-    }
 }
 
 fn chart_url(symbol: &str, start: NaiveDate, end: NaiveDate) -> Result<Url> {
-    let mut url = Url::parse(&format!("{}{symbol}", urls::CHART_BASE))
-        .into_diagnostic()
-        .wrap_err("build chart url")?;
+    let mut url = Url::parse(urls::CHART_BASE)
+        .into_diagnostic()?
+        .join(symbol)
+        .into_diagnostic()?;
 
     // end is inclusive, period2 is exclusive, so push one day past it.
     let period1 = day_start_epoch(start);
-    let period2 = day_start_epoch(end + ChronoDuration::days(1));
+    let period2 = day_start_epoch(end + TimeDelta::days(1));
 
     url.query_pairs_mut()
         .append_pair("period1", &period1.to_string())
@@ -156,9 +130,22 @@ fn day_start_epoch(date: NaiveDate) -> i64 {
         .timestamp()
 }
 
-/// Decode the response into flat unadjusted columns: `date`, OHLC, `volume`, plus `adjclose` so
-/// the caller can fold the adjustment in. Timestamps are shifted by the exchange offset so the
-/// calendar date is local, not UTC.
+/// Flat, unadjusted daily bars decoded from a chart response. Dates are local
+/// to the exchange. `adjclose` is kept so the caller can fold the
+/// split/dividend adjustment into OHLC.
+pub struct ChartBars {
+    pub dates: Vec<NaiveDate>,
+    pub open: Vec<Option<f32>>,
+    pub high: Vec<Option<f32>>,
+    pub low: Vec<Option<f32>>,
+    pub close: Vec<Option<f32>>,
+    pub volume: Vec<Option<f32>>,
+    pub adjclose: Vec<Option<f32>>,
+}
+
+/// Decode the response into flat unadjusted columns: `date`, OHLC, `volume`,
+/// plus `adjclose` so the caller can fold the adjustment in. Timestamps are
+/// shifted by the exchange offset so the calendar date is local, not UTC.
 fn bars(symbol: &str, response: ChartResponse) -> Result<ChartBars> {
     let result = response
         .chart
@@ -173,6 +160,7 @@ fn bars(symbol: &str, response: ChartResponse) -> Result<ChartBars> {
         .into_iter()
         .next()
         .ok_or_else(|| miette!("no quote series for {symbol}"))?;
+
     let adjclose = result
         .indicators
         .adjclose
@@ -181,12 +169,11 @@ fn bars(symbol: &str, response: ChartResponse) -> Result<ChartBars> {
         .map(|series| series.adjclose)
         .ok_or_else(|| miette!("no adjclose series for {symbol}"))?;
 
-    let offset = result.meta.gmtoffset;
     let dates: Vec<NaiveDate> = result
         .timestamp
         .iter()
         .map(|ts| {
-            DateTime::from_timestamp(ts + offset, 0)
+            DateTime::from_timestamp(ts + result.meta.gmtoffset, 0)
                 .map(|dt| dt.date_naive())
                 .ok_or_else(|| miette!("bad timestamp {ts} for {symbol}"))
         })
@@ -233,16 +220,16 @@ struct Indicators {
 
 #[derive(Deserialize)]
 struct Quote {
-    open: Vec<Option<f64>>,
-    high: Vec<Option<f64>>,
-    low: Vec<Option<f64>>,
-    close: Vec<Option<f64>>,
-    volume: Vec<Option<f64>>,
+    open: Vec<Option<f32>>,
+    high: Vec<Option<f32>>,
+    low: Vec<Option<f32>>,
+    close: Vec<Option<f32>>,
+    volume: Vec<Option<f32>>,
 }
 
 #[derive(Deserialize)]
 struct AdjClose {
-    adjclose: Vec<Option<f64>>,
+    adjclose: Vec<Option<f32>>,
 }
 
 #[cfg(test)]
@@ -269,7 +256,7 @@ mod tests {
     async fn live_chart_returns_bars() {
         let client = YahooClient::new().await.unwrap();
         let end = chrono::Local::now().date_naive();
-        let start = end - ChronoDuration::days(30);
+        let start = end - TimeDelta::days(30);
         let bars = client.chart("2330.TW", start, end).await.unwrap();
         assert!(!bars.dates.is_empty());
         assert!(bars.adjclose.iter().flatten().all(|value| *value > 0.0));

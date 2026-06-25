@@ -9,6 +9,7 @@ pub const OPEN: PlSmallStr = PlSmallStr::from_static("open");
 pub const HIGH: PlSmallStr = PlSmallStr::from_static("high");
 pub const LOW: PlSmallStr = PlSmallStr::from_static("low");
 pub const CLOSE: PlSmallStr = PlSmallStr::from_static("close");
+pub const ADJCLOSE: PlSmallStr = PlSmallStr::from_static("adjclose");
 pub const VOLUME: PlSmallStr = PlSmallStr::from_static("volume");
 pub const MARKET: PlSmallStr = PlSmallStr::from_static("market");
 

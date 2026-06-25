@@ -220,9 +220,10 @@ mod tests {
             calendar.day_kind(date("2026-06-22")),
             DayKind::Holiday(_)
         ));
+        // The post-holiday marker is a trading day that keeps its name so the trader can show it.
         assert_eq!(
             calendar.day_kind(date("2026-02-23")),
-            DayKind::Trading(None)
+            DayKind::Trading(Some("農曆春節後開始交易日".to_string()))
         );
         assert_eq!(
             calendar.day_kind(date("2026-06-23")),
