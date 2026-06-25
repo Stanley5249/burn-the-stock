@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     let budget = profile.usable_cash * (1.0 - args.buffer);
 
     let sells = plan_sells(&holdings, &quotes);
-    let buys = plan_buys(&candidates, &quotes, budget);
+    let buys = plan_buys(&candidates, &quotes, budget, args.max_holdings);
     print!(
         "{}",
         report_sells(session.date, budget, holdings.len(), &profile, &sells)

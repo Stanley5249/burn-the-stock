@@ -3,8 +3,7 @@
 use std::collections::HashMap;
 
 use portfolio::{
-    DayBar, Fill, LOT, SELL_TAX_RATE, affordable_shares, commission, score_weights, sell_price,
-    tick_ceil,
+    DayBar, Fill, LOT, SELL_TAX_RATE, affordable_shares, commission, sell_price, tick_ceil,
 };
 use stock_client::fugle::FugleQuote;
 use stock_client::types::UserStock;
@@ -56,34 +55,34 @@ pub fn plan_sells(holdings: &[UserStock], quotes: &HashMap<String, FugleQuote>) 
     sells
 }
 
-/// Size buys by score over the budget, filling the open slots with the strongest quoted
-/// candidates. Cash drops as each fills, so later names get what is left.
+/// Size buys equal-weight over the budget, filling the open slots with the strongest quoted
+/// candidates. Each name targets `budget / max_holdings`, matching the backtest engine. Cash
+/// drops as each fills, so later names get what is left.
 pub fn plan_buys(
     candidates: &[(String, f32)],
     quotes: &HashMap<String, FugleQuote>,
     budget: f64,
+    max_holdings: usize,
 ) -> Vec<Buy> {
-    let priced: Vec<(&String, f32, f64)> = candidates
+    let priced: Vec<(&String, f64)> = candidates
         .iter()
-        .filter_map(|(ticker, score)| {
+        .filter_map(|(ticker, _)| {
             let quote = quotes.get(ticker)?;
             let low = quote.low_price.or(quote.open_price)?;
-            Some((ticker, *score, tick_ceil(low)))
+            Some((ticker, tick_ceil(low)))
         })
         .collect();
 
-    let weights = score_weights(
-        &priced
-            .iter()
-            .map(|(_, score, _)| *score)
-            .collect::<Vec<_>>(),
-    );
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "slot count is a small whole number"
+    )]
+    let target = budget / max_holdings.max(1) as f64;
 
     let mut remaining = budget;
     let mut buys = Vec::new();
-    for ((code, _, price), weight) in priced.iter().zip(weights) {
-        let target = budget * weight;
-        let shares = affordable_shares(target.min(remaining), *price, remaining);
+    for (code, price) in priced {
+        let shares = affordable_shares(target.min(remaining), price, remaining);
         if shares <= 0.0 {
             continue;
         }
@@ -97,9 +96,9 @@ pub fn plan_buys(
         )]
         let lots = (shares / LOT).round() as u64;
         buys.push(Buy {
-            code: (*code).clone(),
+            code: code.clone(),
             lots,
-            price: *price,
+            price,
             cost,
         });
     }
