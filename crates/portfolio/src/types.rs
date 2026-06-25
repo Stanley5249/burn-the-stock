@@ -121,6 +121,8 @@ pub(super) struct Holding {
 /// and action logs.
 pub(super) struct Ledger {
     pub(super) cash: f64,
+    /// Proceeds from sells, held one trading day then released to `cash` (T+1 settlement).
+    pub(super) pending: f64,
     pub(super) holdings: HashMap<String, Holding>,
     pub(super) trades: Vec<Trade>,
     pub(super) events: Vec<TradeEvent>,

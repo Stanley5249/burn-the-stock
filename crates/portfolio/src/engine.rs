@@ -17,6 +17,7 @@ use super::types::{
 pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
     let mut ledger = Ledger {
         cash: config.starting_cash,
+        pending: 0.0,
         holdings: HashMap::new(),
         trades: Vec::new(),
         events: Vec::new(),
@@ -27,6 +28,10 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
 
     for (index, day) in days.iter().enumerate() {
         let is_last = index == last_index;
+
+        // Release yesterday's sale proceeds, T+1 settlement.
+        ledger.cash += ledger.pending;
+        ledger.pending = 0.0;
 
         sell_phase(day, index, is_last, config, &mut ledger);
 
@@ -44,6 +49,7 @@ pub fn run(days: &[TradingDay], config: &BacktestConfig) -> BacktestReport {
             }
         }
         let equity = ledger.cash
+            + ledger.pending
             + ledger
                 .holdings
                 .values()
@@ -146,7 +152,8 @@ fn book_sale(ledger: &mut Ledger, date: NaiveDate, ticker: &str, price: f64, rea
     let holding = ledger.holdings.remove(ticker).expect("ticker is held");
     let amount = price * holding.shares;
     let proceeds = amount - commission(amount) - amount * SELL_TAX_RATE;
-    ledger.cash += proceeds;
+    // Proceeds settle next day, so cash_after below shows no bump on a sell.
+    ledger.pending += proceeds;
     let pnl = proceeds - holding.cost;
     ledger.events.push(TradeEvent {
         date,
@@ -614,6 +621,45 @@ mod tests {
                 .iter()
                 .all(|t| t.exit_reason != ExitReason::Rotate)
         );
+    }
+
+    #[test]
+    fn rotation_proceeds_settle_next_day() {
+        // One slot in A, B outranks it day 2 so A is evicted, but the freed cash settles T+1 so B buys day 3.
+        let mut day1 = TradingDay {
+            date: date(1),
+            bars: HashMap::new(),
+        };
+        day1.bars
+            .insert("A".to_string(), bar(0.5, 10.0, 10.0, 10.0));
+        let mut day2 = TradingDay {
+            date: date(2),
+            bars: HashMap::new(),
+        };
+        day2.bars
+            .insert("A".to_string(), bar(0.2, 11.0, 12.0, 11.0));
+        day2.bars
+            .insert("B".to_string(), bar(0.9, 50.0, 51.0, 50.0));
+        let mut day3 = TradingDay {
+            date: date(3),
+            bars: HashMap::new(),
+        };
+        day3.bars
+            .insert("B".to_string(), bar(0.9, 50.0, 51.0, 50.0));
+        // A trailing day so day 3 is not the final day, which would skip buying.
+        let day4 = TradingDay {
+            date: date(4),
+            bars: HashMap::new(),
+        };
+
+        let report = run(&[day1, day2, day3, day4], &config(1_000_000.0, 1));
+
+        let b_buy = report
+            .events
+            .iter()
+            .find(|event| event.ticker == "B" && event.side == Side::Buy)
+            .expect("B should be bought once cash settles");
+        assert_eq!(b_buy.date, date(3));
     }
 
     fn barrier_config(take_profit: f64, stop_loss: f64, max_hold_days: usize) -> BacktestConfig {
