@@ -1,7 +1,5 @@
-use chrono::NaiveDate;
-use miette::{Result, bail};
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
 
 /// One position as returned by the sim server's `get_user_stocks` endpoint.
 #[derive(Debug, Deserialize)]
@@ -11,9 +9,9 @@ pub struct UserStock {
     pub stock_code_id: String,
     /// Position size in 張 (board lots of 1,000 shares), the platform's unit.
     pub shares: u64,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub beginning_price: Decimal,
-    pub createtime: i64,
+    pub beginning_price: f64,
+    #[serde(with = "chrono::serde::ts_seconds")]
+    pub createtime: DateTime<Utc>,
     pub user_uid_id: u64,
 }
 
@@ -28,65 +26,6 @@ pub struct Profile {
     pub cumulative_return: f64,
     /// Count of successful trades (交易成功次數).
     pub trade_count: u64,
-}
-
-/// OHLCV row shared by all market sources.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OhlcvRow {
-    pub date: NaiveDate,
-    pub stock_code_id: String,
-    pub open: Option<f64>,
-    pub high: Option<f64>,
-    pub low: Option<f64>,
-    pub close: Option<f64>,
-    pub change: Option<f64>,
-    pub capacity: u64,
-    pub turnover: u64,
-    pub transaction_volume: u64,
-}
-
-impl OhlcvRow {
-    /// # Errors
-    /// If `stock_code_id` is empty or any price field is negative.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        date: NaiveDate,
-        stock_code_id: String,
-        open: Option<f64>,
-        high: Option<f64>,
-        low: Option<f64>,
-        close: Option<f64>,
-        change: Option<f64>,
-        capacity: u64,
-        turnover: u64,
-        transaction_volume: u64,
-    ) -> Result<Self> {
-        if stock_code_id.is_empty() {
-            bail!("empty stock_code_id");
-        }
-        for (name, value) in [
-            ("open", open),
-            ("high", high),
-            ("low", low),
-            ("close", close),
-        ] {
-            if value.is_some_and(f64::is_sign_negative) {
-                bail!("{name} is negative");
-            }
-        }
-        Ok(Self {
-            date,
-            stock_code_id,
-            open,
-            high,
-            low,
-            close,
-            change,
-            capacity,
-            turnover,
-            transaction_volume,
-        })
-    }
 }
 
 /// Market label as returned by the sim server's `/stock_type` endpoint.

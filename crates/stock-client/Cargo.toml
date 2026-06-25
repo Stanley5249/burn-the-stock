@@ -12,7 +12,6 @@ reqwest = {
   workspace = true,
   features = ["default-tls", "cookies", "form", "json"]
 }
-rust_decimal = { workspace = true, features = ["serde", "serde-with-str"] }
 scraper = "0.27.0"
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["time"] }
