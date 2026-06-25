@@ -49,13 +49,13 @@ impl<B: Backend> StockModel<B> {
 #[derive(Config, Debug)]
 pub struct StockModelConfig {
     /// GRU hidden size, the temporal summary width.
-    #[config(default = 8)]
+    #[config(default = 32)]
     pub d_hidden: usize,
     /// Hidden width of the MLP head.
     #[config(default = 32)]
     pub d_head: usize,
     /// Dropout probability applied in the head.
-    #[config(default = 0.2)]
+    #[config(default = 0.1)]
     pub dropout: f64,
 }
 

@@ -22,14 +22,38 @@ buy or sell orders through the sim-server API.
 
 ## Crates
 
-- `stock-client` - HTTP client for the sim trading API and TWSE/TPEX market data
-- `trainer` - data pipeline, model training, and weight serialization
-- `trader` - inference loop, order execution, and daily scheduling
+- `portfolio` - long-only portfolio simulation under sim stock rules, the backtest engine
+- `stock-client` - HTTP clients for the sim trading API, Fugle quotes, Yahoo OHLCV, and TWSE holidays
+- `stock-data` - OHLCV parquet store plus the `refresh` binary that fetches history
+- `stock-model` - shared model architecture, feature transform, and inference path
+- `trainer` - training and backtest CLI
+- `trader` - live inference loop, order execution, and daily scheduling
 
 ## Setup
 
-Copy `.env.example` to `.env` and fill in your credentials, then build and run.
+Copy `.env.example` to `.env` and fill in your credentials, then build.
 
 ```
 cargo build --workspace --all-targets --release
+```
+
+## Usage
+
+Fetch the latest price history into the parquet.
+
+```
+cargo run --release --bin refresh
+```
+
+Train a model. The flag defaults already encode the tuned setup, so only `--artifact-dir` is
+required. Override any hyperparameter to sweep.
+
+```
+cargo run --release --bin trainer -- train --artifact-dir artifacts/run
+```
+
+Backtest a run over its held-out window.
+
+```
+cargo run --release --bin trainer -- backtest --artifact-dir artifacts/run
 ```

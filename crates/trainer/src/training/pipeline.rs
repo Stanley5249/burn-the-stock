@@ -29,7 +29,7 @@ use stock_model::model::StockModelConfig;
 pub struct TrainingConfig {
     pub model: StockModelConfig,
     pub optimizer: AdamWConfig,
-    #[config(default = 1.0e-4)]
+    #[config(default = 3.0e-4)]
     pub learning_rate: f64,
     /// Forward horizon in trading days the MFE target looks ahead.
     #[config(default = 25)]
@@ -38,17 +38,17 @@ pub struct TrainingConfig {
     #[config(default = 1.0)]
     pub huber_delta: f32,
     /// Full passes over the training data; `passes * windows / epoch_size` epochs run.
-    #[config(default = 3)]
+    #[config(default = 5)]
     pub passes: usize,
     /// Window length fed to the GRU.
-    #[config(default = 30)]
+    #[config(default = 20)]
     pub steps: usize,
     /// Tickers per batch.
     #[config(default = "stock_model::inference::DEFAULT_BATCH_SIZE")]
     pub batch_size: usize,
     /// Batches per epoch, setting the validation cadence. Each epoch samples
     /// `epoch_size * batch_size` windows without replacement.
-    #[config(default = 200)]
+    #[config(default = 64)]
     pub epoch_size: usize,
     #[config(default = 42)]
     pub seed: u64,

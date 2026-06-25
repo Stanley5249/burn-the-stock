@@ -107,11 +107,11 @@ pub struct TrainArgs {
 
     /// Validation batches per epoch; 0 sweeps every window. Counterpart of
     /// `--batches-per-epoch`.
-    #[arg(long, default_value_t = 200, help_heading = "Validation")]
+    #[arg(long, default_value_t = 64, help_heading = "Validation")]
     pub valid_batches: usize,
 
     /// Length in days of the recent validation window; everything before it trains.
-    #[arg(long, default_value_t = 180, help_heading = "Validation")]
+    #[arg(long, default_value_t = 365, help_heading = "Validation")]
     pub valid_days: i64,
 
     /// Keep only this many tickers, drawn at random by the seed, for overfit
