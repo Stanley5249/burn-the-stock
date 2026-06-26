@@ -1,25 +1,14 @@
 # burn-the-stock
 
-An automated Taiwan stock trading bot built in Rust, using a burn neural network to decide
-daily buy and sell orders.
+An automated Taiwan stock trading bot built in Rust, using a burn neural network to decide daily buy and sell orders.
 
-## Goal
-
-Starting from NT$100,000,000 in virtual funds, the bot trades Taiwan listed stocks
-(TWSE, TPEX, ESB) to maximize total asset value by market close on 2026-06-26.
-The trading period requires at least 100 executed trades.
-
-Profit is measured as total asset value at close on 2026-06-26 minus the 100,000,000 starting capital.
+See `report/` for further details.
 
 ## How it works
 
-The `refresh` binary pulls daily OHLCV history from Yahoo Finance into a
-parquet. The `trainer` binary reads that parquet to train a neural network and
-save the model weights to disk.
+The `refresh` binary pulls daily OHLCV history from Yahoo Finance into a parquet. The `trainer` binary reads that parquet to train a neural network and save the model weights to disk.
 
-The `trader` binary is a CLI you run once during a trading session. It refreshes
-the OHLCV through the prior session, loads the weights, ranks every ticker, then
-places the day's buy and sell orders through the sim-server API and exits.
+The `trader` binary is a CLI you run once during a trading session. It refreshes the OHLCV through the prior session, loads the weights, ranks every ticker, then places the day's buy and sell orders through the sim-server API and exits.
 
 Schedule it externally if you want it to run daily.
 
@@ -34,31 +23,28 @@ Schedule it externally if you want it to run daily.
 
 ## Setup
 
-Copy `.env.example` to `.env` and fill in your credentials, then build.
+Install Rust 1.95.0 or later via [rustup](https://rustup.rs), which provides `cargo` and `rustc`.
 
-```
-cargo build --workspace --all-targets --release
-```
+Then copy `.env.example` to `.env` and fill in your credentials.
 
 ## Usage
 
-Fetch the latest price history into the parquet.
+Fetch the latest price history into `data/yfinance/stock_history.parquet`.
 
 ```
 cargo run --release --bin refresh
 ```
 
-Train a model. The flag defaults already encode the tuned setup, so only `--artifact-dir` is
-required. Override any hyperparameter to sweep.
+Train a model. Pass `--artifact-dir` to set where checkpoints, config, and weights are written; all other flags default to the tuned setup.
 
 ```
 cargo run --release --bin trainer -- train --artifact-dir artifacts/run
 ```
 
-Backtest a run over its held-out window.
+Backtest the latest run over its held-out window. Defaults to `artifacts/latest`, which the train step links automatically.
 
 ```
-cargo run --release --bin trainer -- backtest --artifact-dir artifacts/run
+cargo run --release --bin trainer -- backtest
 ```
 
 ## License
