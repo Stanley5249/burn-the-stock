@@ -213,7 +213,7 @@ pub struct BacktestArgs {
     /// Trading days to hold before the time exit, the primary exit. Default 20 is the
     /// hold length that backtests best across windows.
     #[arg(long, default_value_t = 20)]
-    pub max_hold: usize,
+    pub hold_days: usize,
 
     /// Most stocks held at once.
     #[arg(long, default_value_t = 10)]

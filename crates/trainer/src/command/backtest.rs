@@ -90,7 +90,7 @@ pub fn run(args: &BacktestArgs) -> Result<()> {
         starting_cash: STARTING_CASH,
         take_profit: f64::from(args.take_profit),
         stop_loss: f64::from(args.stop_loss),
-        max_hold_days: args.max_hold,
+        max_hold_days: args.hold_days,
         rotate: args.rotate,
     };
     let report = stock_portfolio::run(&days, &backtest_config);
