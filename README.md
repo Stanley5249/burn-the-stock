@@ -1,4 +1,4 @@
-# burn-the-stock
+# 🔥 burn-the-stock
 
 An automated Taiwan stock trading bot built in Rust, using a burn neural network to decide daily buy and sell orders.
 
